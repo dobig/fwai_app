@@ -77,18 +77,20 @@ function serverSaysActive() {
   };
 }
 
-// 切 app 的入口。用真的 context 而不是重挂组件——「切走要还原」正是靠
-// activeApp 变化触发的，重挂就测不到那条路径。
+// 切 app 的入口。用真的 context 而不是重挂组件——切 app 走的是 activeApp 变化那条
+// 路径，重挂等于换了一个新组件，测不到状态该不该跟着变。
 function SwitchTo({ app }: { app: AppId }) {
   const { setActiveApp } = useActiveApp();
   return <button onClick={() => setActiveApp(app)}>切到 {app}</button>;
 }
 
-function renderDock(activeApp: AppId = "claude", switchTo?: AppId) {
+function renderDock(activeApp: AppId = "claude", ...switchTo: AppId[]) {
   return render(
     <QueryClientProvider client={createTestQueryClient()}>
       <ActiveAppProvider initialApp={activeApp}>
-        {switchTo && <SwitchTo app={switchTo} />}
+        {switchTo.map((app) => (
+          <SwitchTo key={app} app={app} />
+        ))}
         <LlmGatewaySubscriptionDock />
       </ActiveAppProvider>
     </QueryClientProvider>,
@@ -286,46 +288,46 @@ describe("LlmGatewaySubscriptionDock 按 app 隔离", () => {
   });
 });
 
-// 切走了却不还原，用户的 settings.json 会一直压着网关的 endpoint，而面板显示的
-// 是另一个 app 的状态——配置被改了却没有任何入口能关掉它。
+// 隔离之后每个 app 的配置互不影响，切走还去停掉就是多余的干预：用户在 Claude 上
+// 开了转发，切去 Codex 看一眼再切回来，转发本就该还在。
 describe("LlmGatewaySubscriptionDock 切换 app", () => {
-  it("切到别的 CLI 时把上一个还原回去", async () => {
+  it("切到别的 CLI 时不动上一个的转发", async () => {
     seedActivePlan();
     vi.mocked(providersApi.isForwarding).mockResolvedValue(true);
 
     renderDock("claude", "codex");
-    // 等首次状态读完，否则 toast 的判断依据（缓存）还是空的。
+    // 等首次状态读完，确认 Claude 确实在转发中，否则「没被停掉」是废断言。
     await screen.findByText(/^结束转发/);
 
     await userEvent.click(screen.getByText("切到 codex"));
 
-    await waitFor(() =>
-      expect(providersApi.stopForwarding).toHaveBeenCalledWith("claude"),
-    );
-    expect(toasts.info).toHaveBeenCalledWith(
-      "已切换到 Codex，Claude Code 的转发已结束并还原配置",
-    );
-    // 只停旧，不自动开新——切个标签就往磁盘写网关凭据太吓人了。
+    // 面板换成了 Codex 的状态（同样在转发中，mock 对两个 app 都返回 true）。
+    await screen.findByText("结束转发（Codex）");
+    // 关键：Claude 那边一个字节都没动，也没弹「已结束并还原」。
+    expect(providersApi.stopForwarding).not.toHaveBeenCalled();
     expect(providersApi.startForwarding).not.toHaveBeenCalled();
+    expect(toasts.info).not.toHaveBeenCalledWith(
+      expect.stringContaining("转发已结束"),
+    );
   });
 
-  it("上一个本来就没转发时不弹提示，但仍然调一次还原（空操作）", async () => {
+  it("切回来时转发还在", async () => {
     seedActivePlan();
-    vi.mocked(providersApi.isForwarding).mockResolvedValue(false);
+    vi.mocked(providersApi.isForwarding).mockImplementation(
+      async (app) => app === "claude",
+    );
 
-    renderDock("claude", "codex");
-    await startButton();
+    renderDock("claude", "codex", "claude");
+    await screen.findByText("结束转发（Claude Code）");
 
+    // 去 Codex 看一眼：它自己没转发，按钮是「开启转发」。
     await userEvent.click(screen.getByText("切到 codex"));
+    await screen.findByText("开启转发（Codex）");
 
-    // 无条件调：客户端缓存可能是陈旧的（上次会话崩了留下备份），
-    // 漏还原的代价比多调一次空操作大得多。
-    await waitFor(() =>
-      expect(providersApi.stopForwarding).toHaveBeenCalledWith("claude"),
-    );
-    expect(toasts.info).not.toHaveBeenCalledWith(
-      expect.stringContaining("的转发已结束"),
-    );
+    // 切回来，Claude 的转发仍然在——期间没有任何一次 stopForwarding。
+    await userEvent.click(screen.getByText("切到 claude"));
+    await screen.findByText("结束转发（Claude Code）");
+    expect(providersApi.stopForwarding).not.toHaveBeenCalled();
   });
 });
 

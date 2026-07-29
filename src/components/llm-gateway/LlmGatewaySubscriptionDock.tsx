@@ -321,8 +321,8 @@ export function LlmGatewaySubscriptionDock() {
   const onActivatedRef = useRef<() => Promise<void>>(async () => {});
 
   // 转发只作用于当前选中的那个 CLI：Claude 走网关时，Codex 的配置一个字节都
-  // 不该动。切走时上一个 app 会被还原，所以任意时刻最多只有一个 app 在转发，
-  // 且必然是这一个。
+  // 不该动。每个 app 的转发状态相互独立，可以同时开着；面板显示的始终是当前
+  // 选中那个的状态。
   const queryClient = useQueryClient();
   const { activeApp } = useActiveApp();
   const target: ForwardableApp | null = isForwardable(activeApp)
@@ -414,47 +414,14 @@ export function LlmGatewaySubscriptionDock() {
     void queryClient.invalidateQueries({ queryKey: ["forwarding", activeApp] });
   }, [open, activeApp, queryClient]);
 
-  // 切到别的 CLI 时，把上一个还原回它自己的配置。
+  // 切 app 不动上一个的转发状态。
   //
-  // 不这么做的话，用户在 Claude 上开了转发再去 Codex，Claude 的 settings.json
-  // 会一直压着网关的 endpoint，而面板显示的却是 Codex 的状态——配置被改了却没
-  // 有任何入口能关掉它。
+  // 隔离之后每个 app 的配置互不影响，切走还去停掉就是多余的干预——用户在 Claude
+  // 上开了转发，切去 Codex 看一眼再切回来，转发本就该还在。切走时看不见它在转发
+  // 没关系，切回来就看见了。
   //
-  // 只负责「停旧」，不自动开新：切个标签就往磁盘写网关凭据太吓人了。
-  const prevAppRef = useRef(activeApp);
-  useEffect(() => {
-    const prev = prevAppRef.current;
-    if (prev === activeApp) return;
-    prevAppRef.current = activeApp;
-    if (!isForwardable(prev)) return;
-
-    // 客户端缓存只用来决定要不要弹提示；stop_forwarding 本身在没备份时是空
-    // 操作，所以无条件调它——缓存可能是陈旧的（上次会话崩了留下备份、用户手动
-    // 改过配置），漏还原的代价比多弹一次提示大得多。
-    const wasForwarding =
-      queryClient.getQueryData<boolean>(["forwarding", prev]) === true;
-    void (async () => {
-      try {
-        await providersApi.stopForwarding(prev);
-        localStorage.removeItem(forwardingFlagKey(prev));
-        if (wasForwarding) {
-          toast.info(
-            `已切换到 ${APP_DISPLAY_NAME[activeApp]}，${APP_DISPLAY_NAME[prev]} 的转发已结束并还原配置`,
-          );
-        }
-      } catch (error) {
-        console.error("[forwarding] 切换 app 时还原失败", error);
-        if (wasForwarding) {
-          toast.warning(
-            `${APP_DISPLAY_NAME[prev]} 配置还原失败，请切回去手动结束转发`,
-          );
-        }
-      } finally {
-        void queryClient.invalidateQueries({ queryKey: ["forwarding", prev] });
-        void queryClient.invalidateQueries({ queryKey: ["providers", prev] });
-      }
-    })();
-  }, [activeApp, queryClient]);
+  // 关掉转发只有一个入口：用户自己点「结束转发」（以及登出/改密码时的批量清理，
+  // 那时 token 已经失效，留着凭据只会让 CLI 一直 401）。
 
   // 按规则 1 确保网关条目在当前 app 的列表里。切 app 时也补一次——每个 app 的
   // 列表是分开的。
@@ -1466,10 +1433,9 @@ requires_openai_auth = true`,
                   : `开启转发（${activeAppName}）`}
             </button>
             {target && (
-              // 自动还原必须先说清楚，否则用户切个标签发现配置变了会以为是 bug。
+              // 说清楚作用范围：用户要能确信别的 CLI 没被碰过。
               <p className="mt-1.5 text-center text-xs text-muted-foreground">
-                只改 {activeAppName} 的配置；切换到其它 CLI
-                时会自动结束转发并还原
+                只改 {activeAppName} 的配置，其它 CLI 不受影响
               </p>
             )}
 
