@@ -29,6 +29,21 @@ Program($99/年)签发的 **Developer ID Application** 证书 + 公证才能让�
 
    导出密码存进 `APPLE_CERTIFICATE_PASSWORD`。存完把本地的 `.p12` 删掉。
 
+   > **只选中那一张证书再导出。** 别用 `security export -t identities` 图省事——
+   > 它会把钥匙串里的**每一张**身份都打进同一个 `.p12`。如果机器上还有
+   > "Apple Development"(通常排在前面),bundler 取到的是第一张,于是签成那张只能
+   > 本机调试的证书,公证阶段才被 Apple 拒:`The binary is not signed with a valid
+   > Developer ID certificate`。设 `APPLE_SIGNING_IDENTITY` 也救不回来——bundler
+   > 只拿它和证书里的身份做一致性校验,不会在多张里挑,对不上直接中止。
+   >
+   > 想确认手里的 `.p12` 是干净的:
+   >
+   > ```bash
+   > openssl pkcs12 -in cert.p12 -nokeys -nodes | openssl x509 -noout -subject
+   > ```
+   >
+   > 应该只输出一行,且是 `Developer ID Application`。
+
 3. **生成 App 专用密码**
    在 [account.apple.com](https://account.apple.com) → 登录与安全 → App 专用密码
    生成一个(格式 `xxxx-xxxx-xxxx-xxxx`),存进 `APPLE_PASSWORD`。
