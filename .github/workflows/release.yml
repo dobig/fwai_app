@@ -40,7 +40,28 @@ env:
   VITE_GATEWAY_URL: ${{ vars.VITE_GATEWAY_URL || 'https://api.fwai.space' }}
 
 jobs:
+  verify:
+    # Gates both build jobs. A tag that disagrees with package.json produces
+    # assets named after the wrong version, and catching it inside one platform
+    # job would still let the other upload its mis-named installers to the
+    # release. Fail before either starts.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Check the tag matches package.json
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "v$version" ]; then
+            echo "tag $tag does not match package.json version $version" >&2
+            exit 1
+          fi
+          echo "building v$version from tag $tag"
+
   macos:
+    needs: verify
     runs-on: macos-latest
     timeout-minutes: 180
     steps:
@@ -56,17 +77,6 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
-
-      - name: Check the tag matches package.json
-        # A tag that disagrees with package.json produces assets named after the
-        # wrong version and is a pain to unpick after publishing. Fail early.
-        run: |
-          tag="${{ inputs.tag || github.ref_name }}"
-          version="$(node -p "require('./package.json').version")"
-          if [ "$tag" != "v$version" ]; then
-            echo "tag $tag does not match package.json version $version" >&2
-            exit 1
-          fi
 
       - name: Install the Rust toolchain
         # rust-toolchain.toml pins the channel; `rustup show` in the repo root
@@ -104,6 +114,7 @@ jobs:
             src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
 
   windows:
+    needs: verify
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
