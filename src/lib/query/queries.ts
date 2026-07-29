@@ -4,6 +4,7 @@ import {
   keepPreviousData,
 } from "@tanstack/react-query";
 import { providersApi, settingsApi, type AppId } from "@/lib/api";
+import { forwardingFlagKey, isForwardable } from "@/lib/apps";
 import type { Provider, Settings } from "@/types";
 
 const sortProviders = (
@@ -60,6 +61,28 @@ export const useProvidersQuery = (
         providers: sortProviders(providers),
         currentProviderId,
       };
+    },
+  });
+};
+
+/// 某个 app 是否正在走网关转发。
+///
+/// 以后端的备份为准——备份在，就说明 live 配置里还压着网关的 endpoint。
+/// localStorage 只是拿不到后端时的兜底：它和真实磁盘状态可能不一致（换了机器、
+/// 手动改过配置），而按钮显示什么直接决定用户会不会去点「结束转发」把配置还原。
+///
+/// 用 query 而不是组件里的 state，是为了能在用户于供应商列表里手动切走之后自动
+/// 重读——那种切换会让后端作废备份，不重读就会一直显示「结束转发」。
+export const useForwardingQuery = (appId: AppId): UseQueryResult<boolean> => {
+  return useQuery({
+    queryKey: ["forwarding", appId],
+    enabled: isForwardable(appId),
+    queryFn: async () => {
+      try {
+        return await providersApi.isForwarding(appId);
+      } catch {
+        return localStorage.getItem(forwardingFlagKey(appId)) === "1";
+      }
     },
   });
 };

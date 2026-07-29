@@ -13,7 +13,17 @@ import {
   RefreshCw,
   ShoppingBag,
 } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { providersApi } from "@/lib/api";
+import { useActiveApp } from "@/components/active-app-provider";
+import { useForwardingQuery } from "@/lib/query";
+import {
+  APP_DISPLAY_NAME,
+  FORWARDABLE_APPS,
+  forwardingFlagKey,
+  isForwardable,
+  type ForwardableApp,
+} from "@/lib/apps";
 import type { Provider } from "@/types";
 import {
   clearGatewayLogin,
@@ -177,9 +187,6 @@ function planPerMonthUSD(priceUSD: number, months: number): number {
 }
 
 const GATEWAY_PROVIDER_ID = "llm-gateway-local";
-// 转发总闸。写 live 配置需要「转发已开启」与「在供应商列表中启用」同时
-// 成立；这个标志就是第一个条件，供应商列表的切换守卫也读它。
-const FORWARDING_FLAG_KEY = "llm-gateway-forwarding-on";
 const DOCK_OPEN_KEY = "llm-gateway-dock-open";
 
 function planLabel(tier?: string): string {
@@ -288,7 +295,6 @@ export function LlmGatewaySubscriptionDock() {
     mail?: boolean;
     pass?: boolean;
   }>({});
-  const [forwarding, setForwarding] = useState(false);
   const [busy, setBusy] = useState(false);
   const [fwdBusy, setFwdBusy] = useState(false);
   const [refreshBusy, setRefreshBusy] = useState(false);
@@ -313,6 +319,18 @@ export function LlmGatewaySubscriptionDock() {
   const [resetPasswordInput, setResetPasswordInput] = useState("");
   const [resetRequested, setResetRequested] = useState(false);
   const onActivatedRef = useRef<() => Promise<void>>(async () => {});
+
+  // 转发只作用于当前选中的那个 CLI：Claude 走网关时，Codex 的配置一个字节都
+  // 不该动。切走时上一个 app 会被还原，所以任意时刻最多只有一个 app 在转发，
+  // 且必然是这一个。
+  const queryClient = useQueryClient();
+  const { activeApp } = useActiveApp();
+  const target: ForwardableApp | null = isForwardable(activeApp)
+    ? activeApp
+    : null;
+  const activeAppName = APP_DISPLAY_NAME[activeApp];
+  const { data: forwardingData } = useForwardingQuery(activeApp);
+  const forwarding = target ? (forwardingData ?? false) : false;
 
   const subscription = login?.subscription;
   const isActive = Boolean(subscription?.active);
@@ -374,7 +392,7 @@ export function LlmGatewaySubscriptionDock() {
             setUsage(u);
             setUsageFetchedAt(Date.now());
           }
-          await syncGatewayProviderEntries();
+          if (target) await syncGatewayProviderEntry(target);
         } catch {
           if (!cancelled) {
             toast.error("登录已过期，请重新登录");
@@ -385,46 +403,66 @@ export function LlmGatewaySubscriptionDock() {
     return () => {
       cancelled = true;
     };
-  }, [open, screen, login, isActive]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, screen, login, isActive, target]);
 
-  // 转发状态以后端的备份为准——备份在，就说明 live 配置里还压着网关的
-  // endpoint。localStorage 只是拿不到后端时的兜底：它和真实磁盘状态可能不
-  // 一致（换了机器、手动改过配置），而按钮显示什么直接决定用户会不会去点
-  // 「结束转发」把配置还原回来。
-  //
-  // 挂载时对一次（收起状态下的小药丸也要显示「转发中」），面板每次开合再对
-  // 一次：用户可能在供应商列表里手动切走，后端那边备份已经作废了，不重新读
-  // 就会一直显示「结束转发」，点下去反而把陈旧的 token 盖回去。
+  // 面板每次打开重读一次转发状态：用户可能在供应商列表里手动切走，后端那边
+  // 备份已经作废了，不重新读就会一直显示「结束转发」，点下去反而把陈旧的
+  // token 盖回去。
   useEffect(() => {
-    let cancelled = false;
+    if (!open) return;
+    void queryClient.invalidateQueries({ queryKey: ["forwarding", activeApp] });
+  }, [open, activeApp, queryClient]);
+
+  // 切到别的 CLI 时，把上一个还原回它自己的配置。
+  //
+  // 不这么做的话，用户在 Claude 上开了转发再去 Codex，Claude 的 settings.json
+  // 会一直压着网关的 endpoint，而面板显示的却是 Codex 的状态——配置被改了却没
+  // 有任何入口能关掉它。
+  //
+  // 只负责「停旧」，不自动开新：切个标签就往磁盘写网关凭据太吓人了。
+  const prevAppRef = useRef(activeApp);
+  useEffect(() => {
+    const prev = prevAppRef.current;
+    if (prev === activeApp) return;
+    prevAppRef.current = activeApp;
+    if (!isForwardable(prev)) return;
+
+    // 客户端缓存只用来决定要不要弹提示；stop_forwarding 本身在没备份时是空
+    // 操作，所以无条件调它——缓存可能是陈旧的（上次会话崩了留下备份、用户手动
+    // 改过配置），漏还原的代价比多弹一次提示大得多。
+    const wasForwarding =
+      queryClient.getQueryData<boolean>(["forwarding", prev]) === true;
     void (async () => {
       try {
-        const [claude, codex] = await Promise.all([
-          providersApi.isForwarding("claude"),
-          providersApi.isForwarding("codex"),
-        ]);
-        if (cancelled) return;
-        setForwarding(claude || codex);
-        if (claude || codex) {
-          localStorage.setItem(FORWARDING_FLAG_KEY, "1");
-        } else {
-          localStorage.removeItem(FORWARDING_FLAG_KEY);
+        await providersApi.stopForwarding(prev);
+        localStorage.removeItem(forwardingFlagKey(prev));
+        if (wasForwarding) {
+          toast.info(
+            `已切换到 ${APP_DISPLAY_NAME[activeApp]}，${APP_DISPLAY_NAME[prev]} 的转发已结束并还原配置`,
+          );
         }
-      } catch {
-        if (cancelled) return;
-        setForwarding(localStorage.getItem(FORWARDING_FLAG_KEY) === "1");
+      } catch (error) {
+        console.error("[forwarding] 切换 app 时还原失败", error);
+        if (wasForwarding) {
+          toast.warning(
+            `${APP_DISPLAY_NAME[prev]} 配置还原失败，请切回去手动结束转发`,
+          );
+        }
+      } finally {
+        void queryClient.invalidateQueries({ queryKey: ["forwarding", prev] });
+        void queryClient.invalidateQueries({ queryKey: ["providers", prev] });
       }
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, [open]);
+  }, [activeApp, queryClient]);
 
-  // 按规则 1 确保网关条目在列表里（只在挂载时做一次）。
+  // 按规则 1 确保网关条目在当前 app 的列表里。切 app 时也补一次——每个 app 的
+  // 列表是分开的。
   useEffect(() => {
-    void ensureGatewayProvidersListed();
+    if (!target) return;
+    void ensureGatewayProviderListed(target);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [target]);
 
   // 发送验证码后的冷却倒计时。只是把按钮灰掉——服务端的 60 秒冷却才是权威。
   useEffect(() => {
@@ -435,7 +473,7 @@ export function LlmGatewaySubscriptionDock() {
 
   // ---- provider install / restore ------------------------------------------
 
-  function buildGatewayProvider(app: "claude" | "codex"): Provider {
+  function buildGatewayProvider(app: ForwardableApp): Provider {
     const token = gatewayOAuthAccessToken();
     const base = getGatewayBaseURL().replace(/\/+$/, "");
     if (app === "claude") {
@@ -477,18 +515,22 @@ requires_openai_auth = true`,
     };
   }
 
-  // 规则 1：打开 app 时确保 LLM Gateway 出现在 claude/codex 的供应商列表里。
+  // 规则 1：确保 LLM Gateway 出现在当前 app 的供应商列表里。
   // 只在缺失时补条目（不覆盖已有、不切换、不写 live）。
-  async function ensureGatewayProvidersListed(): Promise<void> {
-    for (const app of ["claude", "codex"] as const) {
-      try {
-        const providers = await providersApi.getAll(app);
-        if (!providers[GATEWAY_PROVIDER_ID]) {
-          await providersApi.add(buildGatewayProvider(app), app, false);
-        }
-      } catch {
-        // Non-Tauri env or read failure — the next mount retries.
+  //
+  // 只补当前选中的那个 app：后端的 add 在「该 app 还没有当前供应商」时会顺手
+  // 把新条目设成当前并写 live，两个 app 都补就等于替用户碰了他没选的那个 CLI
+  // 的配置文件。
+  async function ensureGatewayProviderListed(
+    app: ForwardableApp,
+  ): Promise<void> {
+    try {
+      const providers = await providersApi.getAll(app);
+      if (!providers[GATEWAY_PROVIDER_ID]) {
+        await providersApi.add(buildGatewayProvider(app), app, false);
       }
+    } catch {
+      // Non-Tauri env or read failure — the next mount retries.
     }
   }
 
@@ -496,16 +538,17 @@ requires_openai_auth = true`,
   // 转发开着的话后端会把这次落盘降级成「只覆盖 endpoint + key」（见 Rust 侧
   // forwarding::intercept_live_write），所以刷新 token 不会顺手把用户在转发
   // 期间改的配置盖掉。
-  async function syncGatewayProviderEntries(): Promise<void> {
-    for (const app of ["claude", "codex"] as const) {
-      try {
-        const providers = await providersApi.getAll(app);
-        if (providers[GATEWAY_PROVIDER_ID]) {
-          await providersApi.update(buildGatewayProvider(app), app);
-        }
-      } catch {
-        // best-effort
+  //
+  // 同样只处理当前 app：按「最多一个 app 在转发且必然是当前这个」的不变量，
+  // 也只有它可能把网关条目设成当前，也就只有它需要落新 token。
+  async function syncGatewayProviderEntry(app: ForwardableApp): Promise<void> {
+    try {
+      const providers = await providersApi.getAll(app);
+      if (providers[GATEWAY_PROVIDER_ID]) {
+        await providersApi.update(buildGatewayProvider(app), app);
       }
+    } catch {
+      // best-effort
     }
   }
 
@@ -524,7 +567,7 @@ requires_openai_auth = true`,
     }
   }
 
-  async function startForwarding(): Promise<void> {
+  async function startForwarding(app: ForwardableApp): Promise<void> {
     const token = gatewayOAuthAccessToken();
     // 规则 2：没登录不能开启转发。
     if (!login || !token) {
@@ -550,10 +593,7 @@ requires_openai_auth = true`,
         }
       }
 
-      await ensureGatewayProvidersListed();
-
-      localStorage.setItem(FORWARDING_FLAG_KEY, "1");
-      setForwarding(true);
+      await ensureGatewayProviderListed(app);
 
       // 只覆盖 endpoint + api key，不整份替换 live 配置。
       //
@@ -562,79 +602,83 @@ requires_openai_auth = true`,
       // 下一次写入抹掉，结束转发时又被 default 那份陈旧快照覆盖一遍。现在
       // startForwarding 会先备份 live 里现有的 endpoint + key，再只改这两个
       // 字段；结束转发时只把它们还原回去。
+      //
+      // 而且只写这一个 app：以前这里遍历 claude+codex，用户明明只想让 Claude
+      // 走网关，Codex 的配置也被一起改了。
       const base = getGatewayBaseURL().replace(/\/+$/, "");
-      const wrote: string[] = [];
-      const failed: string[] = [];
-      for (const app of ["claude", "codex"] as const) {
-        try {
-          await providersApi.startForwarding(
-            buildGatewayProvider(app),
-            app,
-            token,
-            base,
-          );
-          wrote.push(app);
-        } catch (error) {
-          // 单个 app 失败不该中断另一个，但也不能咽掉——之前这里是空 catch，
-          // 写失败和「本来就没启用」在提示上无法区分。
-          console.error(`[forwarding] ${app} 配置写入失败`, error);
-          failed.push(app);
-        }
-      }
-      if (wrote.length === 0) {
-        toast.error("已开启转发，但配置写入失败，请在供应商列表中手动启用");
-      } else if (failed.length > 0) {
-        toast.warning(
-          `已开启转发，${wrote.join("/")} 配置已更新；${failed.join("/")} 写入失败`,
+      const name = APP_DISPLAY_NAME[app];
+      try {
+        await providersApi.startForwarding(
+          buildGatewayProvider(app),
+          app,
+          token,
+          base,
         );
-      } else {
-        toast.success(`已开启转发，${wrote.join("/")} 配置已更新`);
+      } catch (error) {
+        // 写盘失败就不能说自己在转发——标志置位放在成功之后，否则按钮显示
+        // 「转发中」而磁盘上根本没配置，用户既用不了也不知道该点什么。
+        console.error(`[forwarding] ${app} 配置写入失败`, error);
+        toast.error(`开启转发失败：${name} 配置写入失败`);
+        return;
       }
+      localStorage.setItem(forwardingFlagKey(app), "1");
+      toast.success(`已开启转发，${name} 配置已更新`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "开启转发失败");
     } finally {
       setFwdBusy(false);
+      void queryClient.invalidateQueries({ queryKey: ["forwarding", app] });
+      void queryClient.invalidateQueries({ queryKey: ["providers", app] });
     }
   }
 
-  async function stopForwarding(): Promise<void> {
+  async function stopForwarding(app: ForwardableApp): Promise<void> {
     setFwdBusy(true);
     try {
       // 只还原 endpoint + api key。以前这里是切回 default——而 default 是很久
       // 以前一次 import 留下的快照，切过去等于把那份陈旧配置整个写回磁盘，把
       // 用户后来改的东西全抹了。现在只动这两个字段，转发期间的修改全部保留；
       // 转发前本就没配过凭据的话就直接删掉，不留网关的值。
-      const failed: string[] = [];
-      for (const app of ["claude", "codex"] as const) {
-        try {
-          await providersApi.stopForwarding(app);
-        } catch (error) {
-          console.error(`[forwarding] ${app} 配置还原失败`, error);
-          failed.push(app);
-        }
-      }
-      localStorage.removeItem(FORWARDING_FLAG_KEY);
-      setForwarding(false);
-      if (failed.length > 0) {
-        toast.warning(`已结束转发，但 ${failed.join("/")} 配置还原失败`);
-      } else {
-        toast.success("已结束转发，原有配置已还原");
-      }
+      await providersApi.stopForwarding(app);
+      localStorage.removeItem(forwardingFlagKey(app));
+      toast.success(`已结束转发，${APP_DISPLAY_NAME[app]} 原有配置已还原`);
     } catch (error) {
+      console.error(`[forwarding] ${app} 配置还原失败`, error);
       toast.error(error instanceof Error ? error.message : "结束转发失败");
     } finally {
       setFwdBusy(false);
+      void queryClient.invalidateQueries({ queryKey: ["forwarding", app] });
+      void queryClient.invalidateQueries({ queryKey: ["providers", app] });
+    }
+  }
+
+  // 登出/改密码用：token 已经失效，任何还压着网关 endpoint 的 app 都得还原。
+  // 正常情况下最多只有一个，这里遍历是防不变量被破坏时留下残留（上次会话崩了
+  // 之类）；后端没备份时 stop_forwarding 是空操作，白调不要钱。
+  async function stopForwardingEverywhere(): Promise<void> {
+    for (const app of FORWARDABLE_APPS) {
+      try {
+        await providersApi.stopForwarding(app);
+        localStorage.removeItem(forwardingFlagKey(app));
+      } catch (error) {
+        console.error(`[forwarding] ${app} 配置还原失败`, error);
+      }
+      void queryClient.invalidateQueries({ queryKey: ["forwarding", app] });
     }
   }
 
   async function handleToggleForwarding() {
     if (fwdBusy) return;
+    if (!target) {
+      toast.info(`${activeAppName} 暂不支持转发`);
+      return;
+    }
     if (forwarding) {
-      await stopForwarding();
+      await stopForwarding(target);
       return;
     }
     if (isActive) {
-      await startForwarding();
+      await startForwarding(target);
       return;
     }
     // 本地说没套餐——这是全 app 唯一会真正挡住用户的判断，所以在这里跟服务端
@@ -648,7 +692,7 @@ requires_openai_auth = true`,
       setFwdBusy(false);
     }
     if (fresh?.subscription.active) {
-      await startForwarding();
+      await startForwarding(target);
       return;
     }
     if (!fresh) {
@@ -719,8 +763,10 @@ requires_openai_auth = true`,
           : "account",
       );
       // 规则 1 + 凭据就绪：确保条目在列表里，并把最新 token 写进条目数据。
-      await ensureGatewayProvidersListed();
-      await syncGatewayProviderEntries();
+      if (target) {
+        await ensureGatewayProviderListed(target);
+        await syncGatewayProviderEntry(target);
+      }
       toast.success(justRegistered ? "注册成功，请验证邮箱" : "登录成功");
     } catch (error) {
       clearGatewayLogin();
@@ -868,7 +914,7 @@ requires_openai_auth = true`,
       // 供应商条目里那份 token 也一起清掉：它已经是死的，留着只会让
       // Claude Code 一直 401——和登出时不留凭据是同一个理由。
       if (login) {
-        if (forwarding) await stopForwarding();
+        await stopForwardingEverywhere();
         await removeGatewayProvider();
       }
       clearGatewayLogin();
@@ -891,7 +937,7 @@ requires_openai_auth = true`,
   }
 
   async function handleLogout() {
-    if (forwarding) await stopForwarding();
+    await stopForwardingEverywhere();
     await removeGatewayProvider();
     // Kill the session server-side too — with non-expiring tokens, a logout
     // that only clears localStorage would leave live credentials behind.
@@ -920,7 +966,7 @@ requires_openai_auth = true`,
       await refreshGatewayToken();
       // 刷新即轮换，旧 token 全部作废。用标准 update 同步条目：live 仅在
       // 该条目正被启用时随之更新（转发 + 启用的合取由列表守卫保证）。
-      await syncGatewayProviderEntries();
+      if (target) await syncGatewayProviderEntry(target);
       toast.success("Auth Token 已刷新");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "刷新失败");
@@ -1125,7 +1171,7 @@ requires_openai_auth = true`,
           : screen === "forgot-password"
             ? "用注册邮箱收取验证码重设密码"
             : forwarding
-              ? "转发中 · Claude Code 正在走 llm_gateway"
+              ? `转发中 · ${activeAppName} 正在走 llm_gateway`
               : "已登录 · 开启转发后即可使用";
 
   const inputCls =
@@ -1398,14 +1444,14 @@ requires_openai_auth = true`,
               </div>
             )}
 
-            {/* forwarding toggle */}
+            {/* forwarding toggle — 只作用于当前选中的那个 CLI */}
             <button
               className={`flex w-full items-center justify-center gap-2 rounded-lg border py-2.5 font-semibold transition disabled:opacity-60 ${
                 forwarding
                   ? "border-green-500/35 bg-green-500/12 text-green-600 dark:text-green-400 hover:bg-green-500/20"
                   : "border-transparent bg-primary text-primary-foreground hover:brightness-105"
               }`}
-              disabled={fwdBusy}
+              disabled={fwdBusy || !target}
               onClick={() => void handleToggleForwarding()}
             >
               {fwdBusy ? (
@@ -1413,8 +1459,19 @@ requires_openai_auth = true`,
               ) : (
                 <Plug className="h-4 w-4" />
               )}
-              {forwarding ? "结束转发" : "开启转发"}
+              {!target
+                ? `${activeAppName} 暂不支持转发`
+                : forwarding
+                  ? `结束转发（${activeAppName}）`
+                  : `开启转发（${activeAppName}）`}
             </button>
+            {target && (
+              // 自动还原必须先说清楚，否则用户切个标签发现配置变了会以为是 bug。
+              <p className="mt-1.5 text-center text-xs text-muted-foreground">
+                只改 {activeAppName} 的配置；切换到其它 CLI
+                时会自动结束转发并还原
+              </p>
+            )}
 
             {/* purchase */}
             <button

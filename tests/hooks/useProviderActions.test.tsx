@@ -55,6 +55,7 @@ vi.mock("@/lib/query", () => ({
 
 const providersApiUpdateMock = vi.fn();
 const providersApiUpdateTrayMenuMock = vi.fn();
+const providersApiIsForwardingMock = vi.fn();
 const settingsApiGetMock = vi.fn();
 const settingsApiApplyMock = vi.fn();
 
@@ -63,6 +64,7 @@ vi.mock("@/lib/api", () => ({
     update: (...args: unknown[]) => providersApiUpdateMock(...args),
     updateTrayMenu: (...args: unknown[]) =>
       providersApiUpdateTrayMenuMock(...args),
+    isForwarding: (...args: unknown[]) => providersApiIsForwardingMock(...args),
   },
   settingsApi: {
     get: (...args: unknown[]) => settingsApiGetMock(...args),
@@ -102,6 +104,9 @@ beforeEach(() => {
   switchProviderMutateAsync.mockReset();
   providersApiUpdateMock.mockReset();
   providersApiUpdateTrayMenuMock.mockReset();
+  providersApiIsForwardingMock.mockReset();
+  providersApiIsForwardingMock.mockResolvedValue(false);
+  localStorage.clear();
   settingsApiGetMock.mockReset();
   settingsApiApplyMock.mockReset();
   toastSuccessMock.mockReset();
@@ -357,6 +362,64 @@ describe("useProviderActions", () => {
 
     expect(settingsApiGetMock).not.toHaveBeenCalled();
     expect(settingsApiApplyMock).not.toHaveBeenCalled();
+  });
+
+  // 转发是按 app 隔离的。守卫问的必须是当前这个 app，否则 Claude 开着转发时
+  // 去 Codex 点网关条目也会被放行，绕过 dock 把整份 config 写进 live。
+  it("blocks the gateway entry when the current app is not forwarding", async () => {
+    providersApiIsForwardingMock.mockResolvedValue(false);
+    const { wrapper } = createWrapper();
+    const provider = createProvider({ id: "llm-gateway-local" });
+
+    const { result } = renderHook(() => useProviderActions("codex"), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(providersApiIsForwardingMock).toHaveBeenCalledWith("codex");
+    expect(switchProviderMutateAsync).not.toHaveBeenCalled();
+    expect(toastInfoMock).toHaveBeenCalledWith(
+      "请先在 LLM Gateway 面板登录并开启转发，再启用该供应商",
+    );
+  });
+
+  it("allows the gateway entry once the current app is forwarding", async () => {
+    providersApiIsForwardingMock.mockResolvedValue(true);
+    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
+    const { wrapper } = createWrapper();
+    const provider = createProvider({ id: "llm-gateway-local" });
+
+    const { result } = renderHook(() => useProviderActions("codex"), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith("llm-gateway-local");
+  });
+
+  // 后端读不到时才回落到 localStorage，而且是按 app 分键的那个。
+  it("falls back to the per-app flag when the backend read fails", async () => {
+    providersApiIsForwardingMock.mockRejectedValue(new Error("no tauri"));
+    localStorage.setItem("llm-gateway-forwarding-on:claude", "1");
+    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
+    const { wrapper } = createWrapper();
+    const provider = createProvider({ id: "llm-gateway-local" });
+
+    const { result } = renderHook(() => useProviderActions("claude"), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith("llm-gateway-local");
   });
 
   it("should track pending state of all mutations in isLoading", () => {

@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { providersApi, settingsApi, type AppId } from "@/lib/api";
+import { forwardingFlagKey } from "@/lib/apps";
 import type { Provider } from "@/types";
 import {
   useAddProviderMutation,
@@ -81,12 +82,23 @@ export function useProviderActions(activeApp: AppId) {
     async (provider: Provider) => {
       // LLM Gateway 供应商的写入需要「转发已开启」与「启用」同时成立：
       // 转发关闭（或未登录）时拦下切换，避免绕过 dock 把 config 写进 live。
-      if (
-        provider.id === "llm-gateway-local" &&
-        localStorage.getItem("llm-gateway-forwarding-on") !== "1"
-      ) {
-        toast.info("请先在 LLM Gateway 面板登录并开启转发，再启用该供应商");
-        return;
+      //
+      // 按当前 app 问后端，而不是读一个全局标志：转发本来就是按 app 隔离的，
+      // 读全局标志的话 Claude 开着转发时去 Codex 点这个条目也会被放行。问后端
+      // 还顺带修掉「用户已经手动切走、备份早已作废，标志却还留着」那个洞——那
+      // 时候放行等于触发一次整份写盘。
+      if (provider.id === "llm-gateway-local") {
+        let forwardingOn: boolean;
+        try {
+          forwardingOn = await providersApi.isForwarding(activeApp);
+        } catch {
+          forwardingOn =
+            localStorage.getItem(forwardingFlagKey(activeApp)) === "1";
+        }
+        if (!forwardingOn) {
+          toast.info("请先在 LLM Gateway 面板登录并开启转发，再启用该供应商");
+          return;
+        }
       }
       try {
         const result = await switchProviderMutation.mutateAsync(provider.id);
@@ -113,7 +125,7 @@ export function useProviderActions(activeApp: AppId) {
         // 错误提示由 mutation 处理
       }
     },
-    [switchProviderMutation, syncClaudePlugin, t],
+    [activeApp, switchProviderMutation, syncClaudePlugin, t],
   );
 
   // 删除供应商

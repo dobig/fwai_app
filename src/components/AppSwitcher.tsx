@@ -2,6 +2,7 @@ import type { AppId } from "@/lib/api";
 import type { VisibleApps } from "@/types";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { cn } from "@/lib/utils";
+import { ALL_APPS, APP_DISPLAY_NAME } from "@/lib/apps";
 import { Terminal } from "lucide-react";
 
 const APP_BADGE_ICON: Partial<
@@ -17,18 +18,15 @@ interface AppSwitcherProps {
   compact?: boolean;
 }
 
-const ALL_APPS: AppId[] = ["claude", "codex", "gemini"];
-const STORAGE_KEY = "cc-switch-last-app";
-
 export function AppSwitcher({
   activeApp,
   onSwitch,
   visibleApps,
   compact,
 }: AppSwitcherProps) {
+  // 持久化归 ActiveAppProvider 管，这里只上报选择。
   const handleSwitch = (app: AppId) => {
     if (app === activeApp) return;
-    localStorage.setItem(STORAGE_KEY, app);
     onSwitch(app);
   };
   const iconSize = 20;
@@ -37,11 +35,7 @@ export function AppSwitcher({
     codex: "openai",
     gemini: "gemini",
   };
-  const appDisplayName: Record<AppId, string> = {
-    claude: "Claude Code",
-    codex: "Codex",
-    gemini: "Gemini",
-  };
+  const appDisplayName = APP_DISPLAY_NAME;
 
   // Filter apps based on visibility settings (default all visible)
   const appsToShow = ALL_APPS.filter((app) => {

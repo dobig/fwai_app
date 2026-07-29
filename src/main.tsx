@@ -7,6 +7,7 @@ import "./index.css";
 import i18n from "./i18n";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@/components/theme-provider";
+import { ActiveAppProvider } from "@/components/active-app-provider";
 import { queryClient } from "@/lib/query";
 import { Toaster } from "@/components/ui/sonner";
 import { listen } from "@tauri-apps/api/event";
@@ -90,8 +91,10 @@ async function bootstrap() {
     <React.StrictMode>
       <QueryClientProvider client={queryClient}>
         <ThemeProvider defaultTheme="system" storageKey="cc-switch-theme">
-          <App />
-          <LlmGatewaySubscriptionDock />
+          <ActiveAppProvider>
+            <App />
+            <LlmGatewaySubscriptionDock />
+          </ActiveAppProvider>
           <Toaster />
         </ThemeProvider>
       </QueryClientProvider>
