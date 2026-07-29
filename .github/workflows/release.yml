@@ -1,0 +1,189 @@
+name: release
+
+# Builds all four installers on GitHub-hosted runners and attaches them to the
+# release for the tag being built:
+#
+#   macOS   fwai_app_X.Y.Z_aarch64.dmg + _x64.dmg   (Developer ID signed, notarized)
+#   Windows fwai_app_X.Y.Z_x64-setup.exe + _x64_en-US.msi
+#
+# Both jobs upload with `draft: true`, so the release stays a draft until you
+# review the assets and publish it yourself — a half-built release never goes
+# out, and you get to write the notes before anyone can download it. Pre-create
+# the draft with your notes if you want them in place first:
+#
+#   gh release create vX.Y.Z --draft --title vX.Y.Z --notes-file notes.md
+#   git tag vX.Y.Z && git push origin vX.Y.Z
+#
+# Required repository secrets (macOS only — Windows needs none):
+#   APPLE_CERTIFICATE           base64 of the Developer ID Application .p12
+#   APPLE_CERTIFICATE_PASSWORD  password set when exporting that .p12
+#   APPLE_ID                    Apple account used for notarization
+#   APPLE_PASSWORD              app-specific password, NOT the Apple ID password
+#   APPLE_TEAM_ID               Developer Program team id
+# See docs/release.md for how to produce each one.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and attach installers to
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # Baked into the renderer at build time so the shipped binary defaults to
+  # prod. Override the repository variable to retarget without a code change.
+  VITE_GATEWAY_URL: ${{ vars.VITE_GATEWAY_URL || 'https://api.fwai.space' }}
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Check the tag matches package.json
+        # A tag that disagrees with package.json produces assets named after the
+        # wrong version and is a pain to unpick after publishing. Fail early.
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "v$version" ]; then
+            echo "tag $tag does not match package.json version $version" >&2
+            exit 1
+          fi
+
+      - name: Install the Rust toolchain
+        # rust-toolchain.toml pins the channel; `rustup show` in the repo root
+        # installs it. The runner is arm64, so the Intel dmg is cross-compiled.
+        run: |
+          rustup show
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: macos-universal
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build, sign and notarize both dmgs
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # Same script the local release path uses: it takes the CI branch when
+        # APPLE_CERTIFICATE is set, and self-checks every dmg with spctl +
+        # stapler at the end, so an unnotarized build fails here instead of on a
+        # user's machine.
+        run: ./scripts/build-macos-release.sh
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          draft: true
+          files: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup show
+          rustup target add x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: x86_64-pc-windows-msvc
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build the installers
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          # WiX requires a pre-release identifier to be numeric-only and <= 65535,
+          # so a version like 1.4.0-beta.1 cannot be packaged as an MSI at all --
+          # the Rust build succeeds and only bundling fails. NSIS has no such rule,
+          # so pre-release builds ship the NSIS installer alone; stable versions
+          # still get both. Drop the beta suffix and MSI comes back automatically.
+          if ($version -match '-') {
+            Write-Host "Pre-release version $version detected: building NSIS only (MSI rejects non-numeric pre-release identifiers)"
+            pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis
+          } else {
+            pnpm tauri build --target x86_64-pc-windows-msvc
+          }
+          if ($LASTEXITCODE -ne 0) { throw "tauri build failed with exit code $LASTEXITCODE" }
+
+      - name: Verify the NSIS installer was produced
+        shell: pwsh
+        # The upload step below tolerates unmatched globs (so pre-release builds
+        # can omit the MSI), which would otherwise let a bundling failure pass as
+        # a green run with no installer attached. NSIS is built either way, so
+        # assert on it here.
+        run: |
+          $nsis = Get-ChildItem "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue
+          if (-not $nsis) { throw "no NSIS installer found -- bundling produced nothing to upload" }
+          $nsis | ForEach-Object { Write-Host "built $($_.Name) ($([math]::Round($_.Length/1MB,1)) MB)" }
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          draft: true
+          # Pre-release versions ship NSIS only (see the build step), so the MSI
+          # glob intentionally matches nothing there; unmatched globs must not
+          # fail the upload. The step above guarantees NSIS actually exists.
+          fail_on_unmatched_files: false
+          files: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+
+  summary:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Point at the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          url="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url)"
+          {
+            echo "All four installers are attached to the **draft** release for \`$TAG\`."
+            echo ""
+            echo "Review the assets, write the notes, then publish: $url"
+          } >> "$GITHUB_STEP_SUMMARY"

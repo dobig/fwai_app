@@ -1,0 +1,729 @@
+import { useEffect, useMemo, useState, useRef } from "react";
+import { useTranslation } from "react-i18next";
+import { motion, AnimatePresence } from "framer-motion";
+import { toast } from "sonner";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  Plus,
+  Settings,
+  ArrowLeft,
+  Minus,
+  Maximize2,
+  Minimize2,
+  X,
+} from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import type { Provider, VisibleApps } from "@/types";
+import type { EnvConflict } from "@/types/env";
+import { useProvidersQuery, useSettingsQuery } from "@/lib/query";
+import {
+  providersApi,
+  settingsApi,
+  type AppId,
+  type ProviderSwitchEvent,
+} from "@/lib/api";
+import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
+import { useProviderActions } from "@/hooks/useProviderActions";
+import { useLastValidValue } from "@/hooks/useLastValidValue";
+import { extractErrorMessage } from "@/utils/errorUtils";
+import { isTextEditableTarget } from "@/utils/domUtils";
+import {
+  isWindows,
+  isLinux,
+  DRAG_REGION_ATTR,
+  DRAG_REGION_STYLE,
+} from "@/lib/platform";
+import { AppSwitcher } from "@/components/AppSwitcher";
+import { ProviderList } from "@/components/providers/ProviderList";
+import { AddProviderDialog } from "@/components/providers/AddProviderDialog";
+import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { SettingsPage } from "@/components/settings/SettingsPage";
+import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
+import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
+import { Button } from "@/components/ui/button";
+import { useQueryClient } from "@tanstack/react-query";
+
+type View = "providers" | "settings";
+
+const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
+const HEADER_HEIGHT = 64; // px
+
+const STORAGE_KEY = "cc-switch-last-app";
+const VALID_APPS: AppId[] = ["claude", "codex", "gemini"];
+
+const getInitialApp = (): AppId => {
+  const saved = localStorage.getItem(STORAGE_KEY) as AppId | null;
+  if (saved && VALID_APPS.includes(saved)) {
+    return saved;
+  }
+  return "claude";
+};
+
+function App() {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+
+  const [activeApp, setActiveApp] = useState<AppId>(getInitialApp);
+  const [currentView, setCurrentView] = useState<View>("providers");
+  const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
+  const [isAddOpen, setIsAddOpen] = useState(false);
+  const [isWindowMaximized, setIsWindowMaximized] = useState(false);
+
+  const { data: settingsData } = useSettingsQuery();
+  const useAppWindowControls =
+    isLinux() && (settingsData?.useAppWindowControls ?? false);
+  const dragBarHeight = useAppWindowControls ? 32 : DEFAULT_DRAG_BAR_HEIGHT;
+  const contentTopOffset = dragBarHeight + HEADER_HEIGHT;
+  const visibleApps: VisibleApps = settingsData?.visibleApps ?? {
+    claude: true,
+    codex: true,
+    gemini: true,
+  };
+
+  const getFirstVisibleApp = (): AppId => {
+    if (visibleApps.claude) return "claude";
+    if (visibleApps.codex) return "codex";
+    if (visibleApps.gemini) return "gemini";
+    return "claude"; // fallback
+  };
+
+  useEffect(() => {
+    if (!visibleApps[activeApp]) {
+      setActiveApp(getFirstVisibleApp());
+    }
+  }, [visibleApps, activeApp]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, activeApp);
+  }, [activeApp]);
+
+  const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{
+    provider: Provider;
+    action: "delete";
+  } | null>(null);
+  const [envConflicts, setEnvConflicts] = useState<EnvConflict[]>([]);
+  const [showEnvBanner, setShowEnvBanner] = useState(false);
+
+  const effectiveEditingProvider = useLastValidValue(editingProvider);
+
+  const addActionButtonClass =
+    "bg-orange-500 hover:bg-orange-600 dark:bg-orange-500 dark:hover:bg-orange-600 text-white shadow-lg shadow-orange-500/30 dark:shadow-orange-500/40 rounded-full w-8 h-8";
+
+  const { data, isLoading, refetch } = useProvidersQuery(activeApp);
+  const providers = useMemo(() => data?.providers ?? {}, [data]);
+  const currentProviderId = data?.currentProviderId ?? "";
+
+  const { addProvider, updateProvider, switchProvider, deleteProvider } =
+    useProviderActions(activeApp);
+
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined;
+
+    const setupListener = async () => {
+      try {
+        unsubscribe = await providersApi.onSwitched(
+          async (event: ProviderSwitchEvent) => {
+            if (event.appType === activeApp) {
+              await refetch();
+            }
+          },
+        );
+      } catch (error) {
+        console.error("[App] Failed to subscribe provider switch event", error);
+      }
+    };
+
+    setupListener();
+    return () => {
+      unsubscribe?.();
+    };
+  }, [activeApp, refetch]);
+
+  useEffect(() => {
+    let active = true;
+    let unlistenResize: (() => void) | undefined;
+
+    const setupWindowStateSync = async () => {
+      try {
+        const currentWindow = getCurrentWindow();
+        const syncWindowMaximizedState = async () => {
+          const maximized = await currentWindow.isMaximized();
+          if (active) {
+            setIsWindowMaximized(maximized);
+          }
+        };
+
+        await syncWindowMaximizedState();
+        unlistenResize = await currentWindow.onResized(() => {
+          void syncWindowMaximizedState();
+        });
+      } catch (error) {
+        console.error("[App] Failed to sync window maximized state", error);
+      }
+    };
+
+    void setupWindowStateSync();
+    return () => {
+      active = false;
+      unlistenResize?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    // settingsData 未加载时跳过，避免用 fallback false 覆盖 Rust 侧已设好的装饰状态
+    if (!settingsData) return;
+
+    const syncWindowDecorations = async () => {
+      try {
+        await getCurrentWindow().setDecorations(!useAppWindowControls);
+      } catch (error) {
+        console.error("[App] Failed to update window decorations", error);
+      }
+    };
+
+    void syncWindowDecorations();
+  }, [useAppWindowControls, settingsData]);
+
+  useEffect(() => {
+    const checkEnvOnStartup = async () => {
+      try {
+        const allConflicts = await checkAllEnvConflicts();
+        const flatConflicts = Object.values(allConflicts).flat();
+
+        if (flatConflicts.length > 0) {
+          setEnvConflicts(flatConflicts);
+          const dismissed = sessionStorage.getItem("env_banner_dismissed");
+          if (!dismissed) {
+            setShowEnvBanner(true);
+          }
+        }
+      } catch (error) {
+        console.error(
+          "[App] Failed to check environment conflicts on startup:",
+          error,
+        );
+      }
+    };
+
+    checkEnvOnStartup();
+  }, []);
+
+  useEffect(() => {
+    const checkMigration = async () => {
+      try {
+        const migrated = await invoke<boolean>("get_migration_result");
+        if (migrated) {
+          toast.success(
+            t("migration.success", { defaultValue: "配置迁移成功" }),
+            { closeButton: true },
+          );
+        }
+      } catch (error) {
+        console.error("[App] Failed to check migration result:", error);
+      }
+    };
+
+    checkMigration();
+  }, [t]);
+
+  useEffect(() => {
+    const checkEnvOnSwitch = async () => {
+      try {
+        const conflicts = await checkEnvConflicts(activeApp);
+
+        if (conflicts.length > 0) {
+          setEnvConflicts((prev) => {
+            const existingKeys = new Set(
+              prev.map((c) => `${c.varName}:${c.sourcePath}`),
+            );
+            const newConflicts = conflicts.filter(
+              (c) => !existingKeys.has(`${c.varName}:${c.sourcePath}`),
+            );
+            return [...prev, ...newConflicts];
+          });
+          const dismissed = sessionStorage.getItem("env_banner_dismissed");
+          if (!dismissed) {
+            setShowEnvBanner(true);
+          }
+        }
+      } catch (error) {
+        console.error(
+          "[App] Failed to check environment conflicts on app switch:",
+          error,
+        );
+      }
+    };
+
+    checkEnvOnSwitch();
+  }, [activeApp]);
+
+  const currentViewRef = useRef(currentView);
+
+  useEffect(() => {
+    currentViewRef.current = currentView;
+  }, [currentView]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "," && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        setCurrentView("settings");
+        return;
+      }
+
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+
+      if (document.body.style.overflow === "hidden") return;
+
+      const view = currentViewRef.current;
+      if (view === "providers") return;
+
+      if (isTextEditableTarget(event.target)) return;
+
+      event.preventDefault();
+      setCurrentView("providers");
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  const handleOpenWebsite = async (url: string) => {
+    try {
+      await settingsApi.openExternal(url);
+    } catch (error) {
+      const detail =
+        extractErrorMessage(error) ||
+        t("notifications.openLinkFailed", {
+          defaultValue: "链接打开失败",
+        });
+      toast.error(detail);
+    }
+  };
+
+  const handleEditProvider = async ({
+    provider,
+    originalId,
+  }: {
+    provider: Provider;
+    originalId?: string;
+  }) => {
+    await updateProvider(provider, originalId);
+    setEditingProvider(null);
+  };
+
+  const handleConfirmAction = async () => {
+    if (!confirmAction) return;
+    await deleteProvider(confirmAction.provider.id);
+    setConfirmAction(null);
+  };
+
+  const handleDuplicateProvider = async (provider: Provider) => {
+    const newSortIndex =
+      provider.sortIndex !== undefined ? provider.sortIndex + 1 : undefined;
+
+    const duplicatedProvider: Omit<Provider, "id" | "createdAt"> = {
+      name: `${provider.name} copy`,
+      settingsConfig: JSON.parse(JSON.stringify(provider.settingsConfig)), // 深拷贝
+      websiteUrl: provider.websiteUrl,
+      category: provider.category,
+      sortIndex: newSortIndex, // 复制原 sortIndex + 1
+      meta: provider.meta
+        ? JSON.parse(JSON.stringify(provider.meta))
+        : undefined, // 深拷贝
+      icon: provider.icon,
+      iconColor: provider.iconColor,
+    };
+
+    if (provider.sortIndex !== undefined) {
+      const updates = Object.values(providers)
+        .filter(
+          (p) =>
+            p.sortIndex !== undefined &&
+            p.sortIndex >= newSortIndex! &&
+            p.id !== provider.id,
+        )
+        .map((p) => ({
+          id: p.id,
+          sortIndex: p.sortIndex! + 1,
+        }));
+
+      if (updates.length > 0) {
+        try {
+          await providersApi.updateSortOrder(updates, activeApp);
+        } catch (error) {
+          console.error("[App] Failed to update sort order", error);
+          toast.error(
+            t("provider.sortUpdateFailed", {
+              defaultValue: "排序更新失败",
+            }),
+          );
+          return; // 如果排序更新失败，不继续添加
+        }
+      }
+    }
+
+    await addProvider(duplicatedProvider);
+  };
+
+  const handleOpenTerminal = async (provider: Provider) => {
+    try {
+      const selectedDir = await settingsApi.pickDirectory();
+      if (!selectedDir) {
+        return;
+      }
+
+      await providersApi.openTerminal(provider.id, activeApp, {
+        cwd: selectedDir,
+      });
+      toast.success(
+        t("provider.terminalOpened", {
+          defaultValue: "终端已打开",
+        }),
+      );
+    } catch (error) {
+      console.error("[App] Failed to open terminal", error);
+      const errorMessage = extractErrorMessage(error);
+      toast.error(
+        t("provider.terminalOpenFailed", {
+          defaultValue: "打开终端失败",
+        }) + (errorMessage ? `: ${errorMessage}` : ""),
+      );
+    }
+  };
+
+  const handleImportSuccess = async () => {
+    try {
+      await queryClient.invalidateQueries({
+        queryKey: ["providers"],
+        refetchType: "all",
+      });
+      await queryClient.refetchQueries({
+        queryKey: ["providers"],
+        type: "all",
+      });
+    } catch (error) {
+      console.error("[App] Failed to refresh providers after import", error);
+      await refetch();
+    }
+    try {
+      await providersApi.updateTrayMenu();
+    } catch (error) {
+      console.error("[App] Failed to refresh tray menu", error);
+    }
+  };
+
+  const notifyWindowControlError = (error: unknown) => {
+    toast.error(
+      t("notifications.windowControlFailed", {
+        defaultValue: "窗口控制失败：{{error}}",
+        error: extractErrorMessage(error),
+      }),
+    );
+  };
+
+  const handleWindowMinimize = async () => {
+    try {
+      await getCurrentWindow().minimize();
+    } catch (error) {
+      console.error("[App] Failed to minimize window", error);
+      notifyWindowControlError(error);
+    }
+  };
+
+  const handleWindowToggleMaximize = async () => {
+    try {
+      const currentWindow = getCurrentWindow();
+      await currentWindow.toggleMaximize();
+      setIsWindowMaximized(await currentWindow.isMaximized());
+    } catch (error) {
+      console.error("[App] Failed to toggle maximize", error);
+      notifyWindowControlError(error);
+    }
+  };
+
+  const handleWindowClose = async () => {
+    try {
+      await getCurrentWindow().close();
+    } catch (error) {
+      console.error("[App] Failed to close window", error);
+      notifyWindowControlError(error);
+    }
+  };
+
+  const renderContent = () => {
+    const content =
+      currentView === "settings" ? (
+        <SettingsPage
+          open={true}
+          onOpenChange={() => setCurrentView("providers")}
+          onImportSuccess={handleImportSuccess}
+          defaultTab={settingsDefaultTab}
+        />
+      ) : (
+        <div className="px-6 flex flex-col flex-1 min-h-0 overflow-hidden">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden pb-12 px-1">
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={activeApp}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+                className="space-y-4"
+              >
+                <ProviderList
+                  providers={providers}
+                  currentProviderId={currentProviderId}
+                  appId={activeApp}
+                  isLoading={isLoading}
+                  onSwitch={switchProvider}
+                  onEdit={(provider) => {
+                    setEditingProvider(provider);
+                  }}
+                  onDelete={(provider) =>
+                    setConfirmAction({ provider, action: "delete" })
+                  }
+                  onDuplicate={handleDuplicateProvider}
+                  onOpenWebsite={handleOpenWebsite}
+                  onOpenTerminal={
+                    activeApp === "claude" ? handleOpenTerminal : undefined
+                  }
+                  onCreate={() => setIsAddOpen(true)}
+                />
+              </motion.div>
+            </AnimatePresence>
+          </div>
+        </div>
+      );
+
+    return (
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={currentView}
+          className="flex-1 min-h-0"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.2 }}
+        >
+          {content}
+        </motion.div>
+      </AnimatePresence>
+    );
+  };
+
+  return (
+    <div
+      className="flex flex-col h-screen overflow-hidden bg-background text-foreground selection:bg-primary/30 pb-4"
+      style={{ overflowX: "hidden", paddingTop: contentTopOffset }}
+    >
+      {(dragBarHeight > 0 || useAppWindowControls) && (
+        <div
+          className="fixed top-0 left-0 right-0 z-[70] flex items-center justify-end px-2"
+          data-tauri-drag-region
+          style={{ WebkitAppRegion: "drag", height: dragBarHeight } as any}
+        >
+          {useAppWindowControls && (
+            <div
+              className="flex items-center gap-1"
+              style={{ WebkitAppRegion: "no-drag" } as any}
+            >
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => void handleWindowMinimize()}
+                title={t("header.windowMinimize")}
+                className="h-7 w-7"
+              >
+                <Minus className="w-4 h-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => void handleWindowToggleMaximize()}
+                title={
+                  isWindowMaximized
+                    ? t("header.windowRestore")
+                    : t("header.windowMaximize")
+                }
+                className="h-7 w-7"
+              >
+                {isWindowMaximized ? (
+                  <Minimize2 className="w-4 h-4" />
+                ) : (
+                  <Maximize2 className="w-4 h-4" />
+                )}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => void handleWindowClose()}
+                title={t("header.windowClose")}
+                className="h-7 w-7 hover:bg-red-500/15 hover:text-red-500"
+              >
+                <X className="w-4 h-4" />
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+      {showEnvBanner && envConflicts.length > 0 && (
+        <EnvWarningBanner
+          conflicts={envConflicts}
+          onDismiss={() => {
+            setShowEnvBanner(false);
+            sessionStorage.setItem("env_banner_dismissed", "true");
+          }}
+          onDeleted={async () => {
+            try {
+              const allConflicts = await checkAllEnvConflicts();
+              const flatConflicts = Object.values(allConflicts).flat();
+              setEnvConflicts(flatConflicts);
+              if (flatConflicts.length === 0) {
+                setShowEnvBanner(false);
+              }
+            } catch (error) {
+              console.error(
+                "[App] Failed to re-check conflicts after deletion:",
+                error,
+              );
+            }
+          }}
+        />
+      )}
+
+      <header
+        className="fixed z-50 w-full transition-all duration-300 bg-background/80 backdrop-blur-md"
+        {...DRAG_REGION_ATTR}
+        style={
+          {
+            ...DRAG_REGION_STYLE,
+            top: dragBarHeight,
+            height: HEADER_HEIGHT,
+          } as any
+        }
+      >
+        <div
+          className="flex h-full items-center justify-between gap-2 px-6"
+          {...DRAG_REGION_ATTR}
+          style={{ ...DRAG_REGION_STYLE } as any}
+        >
+          <div
+            className="flex items-center gap-1"
+            style={{ WebkitAppRegion: "no-drag" } as any}
+          >
+            {currentView !== "providers" ? (
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() => setCurrentView("providers")}
+                  className="mr-2 rounded-lg"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                </Button>
+                <h1 className="text-lg font-semibold">
+                  {currentView === "settings" && t("settings.title")}
+                </h1>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <div className="relative inline-flex items-center">
+                  <span className="text-xl font-semibold text-blue-500 dark:text-blue-400">
+                    fwai_app
+                  </span>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => {
+                    setSettingsDefaultTab("general");
+                    setCurrentView("settings");
+                  }}
+                  title={t("common.settings")}
+                  className="hover:bg-black/5 dark:hover:bg-white/5"
+                >
+                  <Settings className="w-4 h-4" />
+                </Button>
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-1 min-w-0 items-center justify-end gap-1.5">
+            <div className="flex flex-1 min-w-0 overflow-x-hidden items-center py-4 pr-2">
+              <div
+                className="flex shrink-0 items-center gap-1.5 ml-auto"
+                style={{ WebkitAppRegion: "no-drag" } as any}
+              >
+                {currentView === "providers" && (
+                  <>
+                    <AppSwitcher
+                      activeApp={activeApp}
+                      onSwitch={setActiveApp}
+                      visibleApps={visibleApps}
+                      compact={false}
+                    />
+
+                    <Button
+                      onClick={() => setIsAddOpen(true)}
+                      size="icon"
+                      className={`ml-2 ${addActionButtonClass}`}
+                    >
+                      <Plus className="w-5 h-5" />
+                    </Button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main className="flex-1 min-h-0 flex flex-col overflow-y-auto animate-fade-in">
+        {renderContent()}
+      </main>
+
+      <AddProviderDialog
+        open={isAddOpen}
+        onOpenChange={setIsAddOpen}
+        appId={activeApp}
+        onSubmit={addProvider}
+      />
+
+      <EditProviderDialog
+        open={Boolean(editingProvider)}
+        provider={effectiveEditingProvider}
+        onOpenChange={(open) => {
+          if (!open) {
+            setEditingProvider(null);
+          }
+        }}
+        onSubmit={handleEditProvider}
+        appId={activeApp}
+      />
+
+      <ConfirmDialog
+        isOpen={Boolean(confirmAction)}
+        title={t("confirm.deleteProvider")}
+        message={
+          confirmAction
+            ? t("confirm.deleteProviderMessage", {
+                name: confirmAction.provider.name,
+              })
+            : ""
+        }
+        onConfirm={() => void handleConfirmAction()}
+        onCancel={() => setConfirmAction(null)}
+      />
+
+      <FirstRunNoticeDialog />
+    </div>
+  );
+}
+
+export default App;

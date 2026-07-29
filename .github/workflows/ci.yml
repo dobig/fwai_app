@@ -1,0 +1,63 @@
+name: ci
+
+# Typecheck, lint and test on every push and PR. Deliberately does NOT run
+# `tauri build` — a full bundle takes ~15 minutes per platform and the release
+# workflow already covers it. This one is meant to come back in a couple of
+# minutes.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run format:check
+      - run: pnpm run test:unit
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the Rust toolchain
+        run: rustup show   # rust-toolchain.toml pins the channel + components
+
+      - name: Install the Linux build dependencies
+        # The tauri crate links against webkit2gtk/libsoup even for `cargo test`,
+        # so a bare ubuntu runner cannot compile the lib without these.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Check formatting
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Run the unit tests
+        working-directory: src-tauri
+        run: cargo test --lib

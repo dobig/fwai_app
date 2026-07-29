@@ -1,0 +1,880 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>llm_gateway dock — UX preview</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --card: #f9fafb;
+    --border: #e6e8ec;
+    --border-strong: #d3d7de;
+    --text: #1b1e24;
+    --muted: #6b7280;
+    --primary: #2563eb;
+    --primary-fg: #ffffff;
+    --primary-soft: #eff4ff;
+    --success: #16a34a;
+    --danger: #dc2626;
+    --radius: 14px;
+    --shadow: 0 12px 40px -8px rgba(20, 25, 40, 0.22), 0 2px 8px -2px rgba(20, 25, 40, 0.12);
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  [data-theme="dark"] {
+    --bg: #0e1116;
+    --panel: #171a21;
+    --card: #1e222b;
+    --border: #2a2f3a;
+    --border-strong: #3a4150;
+    --text: #e8eaed;
+    --muted: #9aa1ac;
+    --primary: #3b82f6;
+    --primary-soft: #17253f;
+    --shadow: 0 16px 48px -8px rgba(0, 0, 0, 0.6), 0 2px 8px -2px rgba(0, 0, 0, 0.5);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(37, 99, 235, 0.10), transparent 60%),
+      radial-gradient(900px 500px at 0% 110%, rgba(22, 163, 74, 0.08), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* fake desktop backdrop */
+  .stage {
+    position: fixed; inset: 0; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .backdrop-hint {
+    text-align: center; color: var(--muted); user-select: none;
+    max-width: 520px; padding: 24px;
+  }
+  .backdrop-hint h1 { font-size: 20px; font-weight: 650; color: var(--text); margin: 0 0 6px; letter-spacing: -0.2px; }
+  .backdrop-hint p { font-size: 14px; line-height: 1.6; margin: 4px 0; }
+  .backdrop-hint .kbd {
+    display: inline-block; padding: 1px 7px; border-radius: 6px; border: 1px solid var(--border-strong);
+    background: var(--card); font-size: 12px; font-family: ui-monospace, monospace;
+  }
+
+  .toolbar { position: fixed; top: 16px; left: 16px; display: flex; gap: 8px; z-index: 10; }
+  .toolbar button {
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    border-radius: 10px; padding: 7px 12px; font-size: 13px; cursor: pointer;
+    box-shadow: var(--shadow); transition: transform 0.15s var(--ease), border-color 0.15s;
+  }
+  .toolbar button:hover { transform: translateY(-1px); border-color: var(--border-strong); }
+
+  /* ---------- collapsed pill ---------- */
+  .pill {
+    position: fixed; bottom: 24px; right: 24px; z-index: 100;
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px 10px 12px; border-radius: 999px;
+    background: var(--panel); border: 1px solid var(--border);
+    box-shadow: var(--shadow); cursor: pointer; color: var(--text);
+    font-size: 14px; font-weight: 550;
+    transition: transform 0.25s var(--ease), opacity 0.25s var(--ease), box-shadow 0.2s;
+  }
+  .pill:hover { transform: translateY(-2px); }
+  .pill.hidden { opacity: 0; transform: translateY(12px) scale(0.9); pointer-events: none; }
+  .pill .avatar {
+    width: 30px; height: 30px; border-radius: 50%; flex: none;
+    display: grid; place-items: center; font-size: 13px; font-weight: 700; color: #fff;
+    background: linear-gradient(135deg, #3b82f6, #6366f1);
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pill .dot.active { background: var(--success); box-shadow: 0 0 0 3px rgba(22,163,74,0.18); }
+
+  /* ---------- panel ---------- */
+  .panel {
+    position: fixed; bottom: 24px; right: 24px; z-index: 100;
+    width: 384px; max-width: calc(100vw - 32px);
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+    overflow: hidden; transform-origin: bottom right;
+    transition: transform 0.32s var(--ease), opacity 0.28s var(--ease);
+  }
+  .panel.hidden { opacity: 0; transform: translateY(16px) scale(0.94); pointer-events: none; }
+
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 16px 16px 14px; border-bottom: 1px solid var(--border);
+  }
+  .panel-head .title { font-size: 15px; font-weight: 650; letter-spacing: -0.2px; }
+  .panel-head .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .icon-btn {
+    border: none; background: transparent; color: var(--muted); cursor: pointer;
+    width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center;
+    transition: background 0.15s, color 0.15s;
+  }
+  .icon-btn:hover { background: var(--card); color: var(--text); }
+
+  .panel-body { padding: 16px; position: relative; }
+
+  /* screen transition container */
+  .screens { position: relative; }
+  .screen { transition: opacity 0.28s var(--ease), transform 0.32s var(--ease); }
+  .screen.leave-left  { opacity: 0; transform: translateX(-24px); position: absolute; inset: 0; pointer-events: none; }
+  .screen.leave-right { opacity: 0; transform: translateX(24px);  position: absolute; inset: 0; pointer-events: none; }
+  .screen.enter-left  { opacity: 0; transform: translateX(-24px); }
+  .screen.enter-right { opacity: 0; transform: translateX(24px); }
+
+  /* ---------- form bits ---------- */
+  .tabs {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 4px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 4px;
+    position: relative; margin-bottom: 14px;
+  }
+  .tabs .glider {
+    position: absolute; top: 4px; bottom: 4px; left: 4px; width: calc(50% - 4px);
+    background: var(--panel); border-radius: 7px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    transition: transform 0.28s var(--ease);
+  }
+  [data-theme="dark"] .tabs .glider { background: #2b3140; }
+  .tabs.register .glider { transform: translateX(100%); }
+  .tabs button {
+    position: relative; z-index: 1; border: none; background: transparent; cursor: pointer;
+    padding: 8px; font-size: 13.5px; font-weight: 550; color: var(--muted);
+    transition: color 0.2s;
+  }
+  .tabs button.on { color: var(--text); }
+
+  .field { margin-bottom: 11px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+  .input-wrap { position: relative; display: flex; align-items: center; }
+  .field input {
+    width: 100%; padding: 10px 12px; border-radius: 10px; font-size: 14px;
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+    transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
+  }
+  .field input::placeholder { color: var(--muted); opacity: 0.7; }
+  .field input:focus {
+    outline: none; border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--primary-soft); background: var(--panel);
+  }
+  .field.error input { border-color: var(--danger); box-shadow: 0 0 0 3px rgba(220,38,38,0.12); }
+  .field .hint { font-size: 11.5px; color: var(--danger); margin-top: 5px; height: 0; opacity: 0;
+    transform: translateY(-3px); transition: all 0.2s var(--ease); }
+  .field.error .hint { height: auto; opacity: 1; transform: none; }
+  .peek {
+    position: absolute; right: 8px; border: none; background: transparent; cursor: pointer;
+    color: var(--muted); padding: 6px; border-radius: 6px; display: grid; place-items: center;
+  }
+  .peek:hover { color: var(--text); }
+
+  .btn {
+    width: 100%; padding: 11px; border-radius: 10px; font-size: 14px; font-weight: 600;
+    border: 1px solid transparent; cursor: pointer; display: flex; align-items: center;
+    justify-content: center; gap: 8px; transition: transform 0.12s var(--ease), filter 0.15s, background 0.15s;
+  }
+  .btn:active { transform: scale(0.985); }
+  .btn.primary { background: var(--primary); color: var(--primary-fg); }
+  .btn.primary:hover { filter: brightness(1.06); }
+  .btn.ghost { background: var(--card); color: var(--text); border-color: var(--border); }
+  .btn.ghost:hover { border-color: var(--border-strong); }
+  .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+  .btn .spin {
+    width: 15px; height: 15px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff;
+    animation: spin 0.7s linear infinite;
+  }
+  .btn.ghost .spin { border-color: rgba(120,120,120,0.35); border-top-color: var(--text); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .advanced { margin-top: 4px; }
+  .advanced summary {
+    list-style: none; cursor: pointer; font-size: 12.5px; color: var(--muted);
+    display: flex; align-items: center; gap: 6px; padding: 6px 2px; user-select: none;
+  }
+  .advanced summary::-webkit-details-marker { display: none; }
+  .advanced summary .chev { transition: transform 0.2s var(--ease); }
+  .advanced[open] summary .chev { transform: rotate(90deg); }
+  .advanced .adv-body { padding-top: 6px; animation: fadeDown 0.25s var(--ease); }
+  .advanced .adv-hint { font-size: 11.5px; color: var(--muted); margin-top: 7px; line-height: 1.5; }
+  @keyframes fadeDown { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+  .divider { display: flex; align-items: center; gap: 10px; margin: 14px 0; color: var(--muted); font-size: 12px; }
+  .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+  /* ---------- account card ---------- */
+  .acct {
+    display: flex; align-items: center; gap: 12px; padding: 14px;
+    border: 1px solid var(--border); border-radius: 12px; background: var(--card);
+    margin-bottom: 14px;
+  }
+  .acct .avatar { width: 42px; height: 42px; border-radius: 50%; flex: none; display: grid;
+    place-items: center; font-size: 16px; font-weight: 700; color: #fff;
+    background: linear-gradient(135deg, #3b82f6, #6366f1); }
+  .acct .who { flex: 1; min-width: 0; }
+  .acct .who .name { font-size: 14.5px; font-weight: 650; }
+  .acct .who .mail { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip { font-size: 11px; padding: 3px 8px; border-radius: 999px; font-weight: 600; }
+  .chip.active { background: rgba(22,163,74,0.14); color: var(--success); }
+  .chip.inactive { background: var(--border); color: var(--muted); }
+
+  .stat-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+  .stat { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--card); }
+  .stat .k { font-size: 11px; color: var(--muted); }
+  .stat .v { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; margin-top: 2px; }
+
+  /* ---------- forwarding toggle ---------- */
+  .btn.fwd { position: relative; overflow: hidden; }
+  .btn.fwd.off { background: var(--primary); color: var(--primary-fg); }
+  .btn.fwd.off:hover { filter: brightness(1.06); }
+  .btn.fwd.on {
+    background: rgba(22,163,74,0.12); color: var(--success);
+    border-color: rgba(22,163,74,0.35);
+  }
+  .btn.fwd.on:hover { background: rgba(22,163,74,0.18); }
+  .btn.fwd .fwd-ic { width: 15px; height: 15px; border-radius: 50%; flex: none; position: relative; }
+  .btn.fwd.off .fwd-ic {
+    border: 2px solid currentColor; border-top-color: transparent; transform: rotate(-45deg);
+  }
+  .btn.fwd.on .fwd-ic { background: var(--success); box-shadow: 0 0 0 0 rgba(22,163,74,0.5); animation: pulse 1.8s ease-out infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(22,163,74,0.45); } 70% { box-shadow: 0 0 0 7px rgba(22,163,74,0); } 100% { box-shadow: 0 0 0 0 rgba(22,163,74,0); } }
+  .fwd-status {
+    font-size: 12px; color: var(--muted); text-align: center; margin: 8px 0 14px;
+    transition: color 0.2s;
+  }
+  .fwd-status.on { color: var(--success); }
+
+  .back-link {
+    display: inline-flex; align-items: center; gap: 5px; border: none; background: transparent;
+    color: var(--muted); font-size: 13px; cursor: pointer; padding: 2px 0; margin-bottom: 12px;
+    transition: color 0.15s;
+  }
+  .back-link:hover { color: var(--text); }
+
+  .section-label { font-size: 12px; color: var(--muted); margin: 4px 0 8px; font-weight: 550; }
+
+  .plans { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .plan {
+    border: 1.5px solid var(--border); border-radius: 12px; padding: 12px 8px; text-align: center;
+    cursor: pointer; background: var(--panel); transition: transform 0.16s var(--ease), border-color 0.16s, box-shadow 0.16s;
+    position: relative;
+  }
+  .plan:hover { transform: translateY(-3px); border-color: var(--primary); box-shadow: 0 8px 20px -8px rgba(37,99,235,0.4); }
+  .plan.popular { border-color: var(--primary); }
+  .plan .tag { position: absolute; top: -9px; left: 50%; transform: translateX(-50%);
+    background: var(--primary); color: #fff; font-size: 10px; padding: 2px 8px; border-radius: 999px; font-weight: 600; white-space: nowrap; }
+  .plan .pl { font-size: 12.5px; font-weight: 600; }
+  .plan .pp { font-size: 20px; font-weight: 750; margin: 4px 0 2px; letter-spacing: -0.5px; }
+  .plan .pd { font-size: 10.5px; color: var(--muted); }
+
+  /* ---------- month select ---------- */
+  .months { display: flex; flex-direction: column; gap: 8px; }
+  .month-row {
+    display: flex; align-items: center; justify-content: space-between;
+    border: 1.5px solid var(--border); border-radius: 12px; padding: 11px 13px; cursor: pointer;
+    background: var(--panel); transition: border-color 0.16s var(--ease), background 0.16s, transform 0.12s var(--ease);
+  }
+  .month-row:hover { border-color: var(--primary); transform: translateY(-1px); }
+  .month-row.sel { border-color: var(--primary); background: var(--primary-soft); }
+  .month-row .ml .mn { font-size: 14px; font-weight: 600; }
+  .month-row .ml .mp { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .month-row .mr { text-align: right; }
+  .month-row .mr .mt { font-size: 15px; font-weight: 700; letter-spacing: -0.3px; }
+  .month-row .mr .ms { font-size: 11px; color: var(--success); margin-top: 2px; font-weight: 550; }
+  .disc-badge {
+    display: inline-block; background: var(--primary); color: #fff; font-size: 10px; font-weight: 700;
+    border-radius: 6px; padding: 1px 5px; margin-left: 6px; vertical-align: middle;
+  }
+  .active-note {
+    margin-top: 12px; font-size: 11.5px; line-height: 1.5; color: var(--muted);
+    background: var(--card); border: 1px dashed var(--border-strong); border-radius: 8px; padding: 9px 11px;
+  }
+  .active-note b { color: var(--text); font-weight: 600; }
+
+  .foot-link { margin-top: 14px; text-align: center; }
+  .foot-link button { border: none; background: transparent; color: var(--muted); font-size: 12.5px; cursor: pointer; }
+  .foot-link button:hover { color: var(--danger); }
+
+  /* endpoint code strip */
+  .endpoint { margin-top: 12px; font-size: 11.5px; color: var(--muted); }
+  .endpoint code { display: block; margin-top: 5px; padding: 8px 10px; border-radius: 8px;
+    background: var(--card); border: 1px solid var(--border); font-family: ui-monospace, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ---------- QR / pay overlay ---------- */
+  .overlay {
+    position: absolute; inset: 0; background: color-mix(in srgb, var(--panel) 88%, transparent);
+    backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center;
+    padding: 20px; z-index: 5; opacity: 0; pointer-events: none; transition: opacity 0.25s var(--ease);
+  }
+  /* screens grows to fit the pay overlay so the QR never needs scrolling */
+  .screens { transition: min-height 0.28s var(--ease); }
+  .overlay.show { opacity: 1; pointer-events: auto; }
+  .pay-card {
+    width: 100%; text-align: center; transform: scale(0.94); transition: transform 0.3s var(--ease);
+  }
+  .overlay.show .pay-card { transform: scale(1); }
+  .pay-card h4 { margin: 0 0 3px; font-size: 15px; }
+  .pay-card .amt { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  .qr {
+    width: 150px; height: 150px; margin: 0 auto 12px; border-radius: 12px; padding: 12px;
+    background: #fff; border: 1px solid var(--border); box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+    position: relative;
+  }
+  .qr svg { display: block; width: 100%; height: 100%; }
+  .qr .scanline {
+    position: absolute; left: 12px; right: 12px; height: 2px; top: 12px; border-radius: 2px;
+    background: linear-gradient(90deg, transparent, var(--primary), transparent);
+    box-shadow: 0 0 8px var(--primary); animation: scan 2.2s ease-in-out infinite;
+  }
+  @keyframes scan { 0%,100% { top: 14px; } 50% { top: calc(100% - 14px); } }
+  .pay-wait { font-size: 12px; color: var(--muted); display: flex; align-items: center; justify-content: center; gap: 7px; }
+  .pay-wait .spin { width: 13px; height: 13px; border: 2px solid var(--border-strong); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.7s linear infinite; }
+  .pay-cancel { margin-top: 14px; border: none; background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; text-decoration: underline; }
+
+  /* success checkmark */
+  .success-wrap { text-align: center; }
+  .check-circle {
+    width: 76px; height: 76px; margin: 0 auto 14px; border-radius: 50%;
+    background: rgba(22,163,74,0.12); display: grid; place-items: center;
+    animation: pop 0.4s var(--ease);
+  }
+  @keyframes pop { 0% { transform: scale(0.4); opacity: 0; } 60% { transform: scale(1.08); } 100% { transform: scale(1); opacity: 1; } }
+  .check-circle svg { width: 40px; height: 40px; }
+  .check-circle path { stroke: var(--success); stroke-width: 5; fill: none; stroke-linecap: round; stroke-linejoin: round;
+    stroke-dasharray: 40; stroke-dashoffset: 40; animation: draw 0.4s 0.15s var(--ease) forwards; }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  .success-wrap h4 { margin: 0 0 4px; font-size: 16px; }
+  .success-wrap p { margin: 0; font-size: 13px; color: var(--muted); }
+
+  /* ---------- toast ---------- */
+  .toasts { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 200; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+  .toast {
+    min-width: 220px; max-width: 380px; padding: 11px 14px; border-radius: 11px;
+    background: var(--panel); border: 1px solid var(--border); box-shadow: var(--shadow);
+    font-size: 13.5px; display: flex; align-items: center; gap: 9px;
+    animation: toastIn 0.32s var(--ease);
+  }
+  .toast.out { animation: toastOut 0.3s var(--ease) forwards; }
+  @keyframes toastIn { from { opacity: 0; transform: translateY(-14px) scale(0.96); } to { opacity: 1; transform: none; } }
+  @keyframes toastOut { to { opacity: 0; transform: translateY(-10px) scale(0.96); } }
+  .toast .ic { width: 18px; height: 18px; flex: none; }
+  .toast.success .ic { color: var(--success); }
+  .toast.error .ic { color: var(--danger); }
+  .toast.info .ic { color: var(--primary); }
+</style>
+</head>
+<body data-theme="light">
+
+  <div class="toolbar">
+    <button id="themeBtn">🌙 深色</button>
+    <button id="resetBtn">↺ 重置演示</button>
+  </div>
+
+  <div class="stage">
+    <div class="backdrop-hint">
+      <h1>cc-switch · llm_gateway 登录窗口 — 改进版 UX 预览</h1>
+      <p>这是右下角那个悬浮 dock 的重新设计。点右下角胶囊展开，试试完整流程：</p>
+      <p>登录（试试 <span class="kbd">回车提交</span> / 空字段校验）→ 已登录卡片 → 选套餐 → <b>选购买月数（1/3/6/12，含折扣）</b> → 微信扫码 → 支付成功动画。</p>
+      <p style="margin-top:12px">演示账号任意填即可；密码错误可输 <span class="kbd">wrong</span> 看错误态。</p>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+
+  <!-- collapsed pill -->
+  <button class="pill" id="pill">
+    <span class="avatar" id="pillAvatar">GW</span>
+    <span id="pillLabel">llm_gateway</span>
+    <span class="dot" id="pillDot"></span>
+  </button>
+
+  <!-- panel -->
+  <div class="panel hidden" id="panel">
+    <div class="panel-head">
+      <div>
+        <div class="title" id="headTitle">登录 llm_gateway</div>
+        <div class="sub" id="headSub">登录后即可在 Claude Code 中使用</div>
+      </div>
+      <button class="icon-btn" id="collapseBtn" title="收起">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+    </div>
+
+    <div class="panel-body">
+      <div class="screens" id="screens">
+
+        <!-- SCREEN: AUTH -->
+        <section class="screen" id="screenAuth">
+          <div class="tabs" id="tabs">
+            <span class="glider"></span>
+            <button class="on" data-mode="login">登录</button>
+            <button data-mode="register">注册</button>
+          </div>
+
+          <div class="field" id="fUser">
+            <label>账号</label>
+            <div class="input-wrap"><input id="inUser" placeholder="用户名" autocomplete="off" /></div>
+            <div class="hint">请输入账号</div>
+          </div>
+
+          <div class="field" id="fMail" style="display:none">
+            <label>邮箱</label>
+            <div class="input-wrap"><input id="inMail" placeholder="you@example.com" autocomplete="off" /></div>
+            <div class="hint">请输入邮箱</div>
+          </div>
+
+          <div class="field" id="fPass">
+            <label>密码</label>
+            <div class="input-wrap">
+              <input id="inPass" type="password" placeholder="密码" autocomplete="off" />
+              <button class="peek" id="peekBtn" title="显示/隐藏">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+            <div class="hint">请输入密码</div>
+          </div>
+
+          <button class="btn primary" id="submitBtn">登录</button>
+        </section>
+
+        <!-- SCREEN: ACCOUNT -->
+        <section class="screen" id="screenAccount" style="display:none">
+          <div class="acct">
+            <span class="avatar" id="acctAvatar">U</span>
+            <div class="who">
+              <div class="name" id="acctName">user</div>
+              <div class="mail" id="acctMail">user@example.com</div>
+            </div>
+            <span class="chip inactive" id="acctChip">未开通</span>
+          </div>
+
+          <button class="btn fwd off" id="forwardBtn">
+            <span class="fwd-ic" id="fwdIc"></span>
+            <span id="forwardLabel">开启转发</span>
+          </button>
+
+          <button class="btn ghost" id="buyBtn" style="margin-top:10px">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+            <span id="buyLabel">购买套餐</span>
+          </button>
+
+          <details class="advanced" style="margin-top:14px; border-top:1px solid var(--border); padding-top:6px">
+            <summary>
+              <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+              高级
+            </summary>
+            <div class="adv-body">
+              <button class="btn ghost" id="refreshTokenBtn">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+                刷新 Auth Token
+              </button>
+              <div class="adv-hint" id="refreshHint">重新获取访问令牌；若正在转发会同步更新已安装的配置</div>
+            </div>
+          </details>
+
+          <div class="foot-link"><button id="logoutBtn">登出</button></div>
+        </section>
+
+        <!-- SCREEN: PURCHASE -->
+        <section class="screen" id="screenPurchase" style="display:none">
+          <button class="back-link" id="backBtn">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+            返回
+          </button>
+          <div class="section-label">选择套餐 · 微信支付</div>
+          <div class="plans" id="plans">
+            <div class="plan" data-plan="starter" data-price="20"><div class="pl">Starter</div><div class="pp">$20</div><div class="pd">入门</div></div>
+            <div class="plan popular" data-plan="pro" data-price="100"><span class="tag">最受欢迎</span><div class="pl">Pro</div><div class="pp">$100</div><div class="pd">5× 用量</div></div>
+            <div class="plan" data-plan="business" data-price="200"><div class="pl">Business</div><div class="pp">$200</div><div class="pd">20× 用量</div></div>
+          </div>
+          <div class="adv-hint" style="margin-top:12px; text-align:center">点击套餐后选择购买月数</div>
+        </section>
+
+        <!-- SCREEN: MONTHS -->
+        <section class="screen" id="screenMonths" style="display:none">
+          <button class="back-link" id="backMonths">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+            返回
+          </button>
+          <div class="section-label" id="monthsLabel">选择购买月数</div>
+          <div class="months" id="months"></div>
+          <div id="activeNote"></div>
+          <button class="btn primary" id="payBtn" style="margin-top:14px">微信支付</button>
+        </section>
+
+      </div><!-- /screens -->
+
+      <!-- pay + success overlay -->
+      <div class="overlay" id="overlay">
+        <div class="pay-card" id="payCard">
+          <!-- filled by JS -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const state = { mode: "login", loggedIn: false, active: false, plan: null, forwarding: false, user: null, showPass: false, tierId: null, months: 1 };
+
+  // ---------- plan / month pricing (display only; server is authoritative) ----------
+  const TIER_LABEL = { starter: "Starter", pro: "Pro", business: "Business" };
+  const TIER_PRICE = { starter: 20, pro: 100, business: 200 };
+  const MONTHS = [1, 3, 6, 12];
+  const CURRENT_EXPIRY = "2026-08-15"; // demo value for the active-plan note
+  const discount = (n) => (n >= 12 ? 0.9 : n >= 6 ? 0.95 : 1);
+  const discLabel = (n) => (n >= 12 ? "9折" : n >= 6 ? "95折" : "");
+  const totalUSD = (price, n) => Math.round(price * n * discount(n));
+  const perMonthUSD = (price, n) => Math.round(price * discount(n));
+  const saveUSD = (price, n) => price * n - totalUSD(price, n);
+
+  // ---------- theme ----------
+  $("themeBtn").onclick = () => {
+    const dark = document.body.dataset.theme === "dark";
+    document.body.dataset.theme = dark ? "light" : "dark";
+    $("themeBtn").textContent = dark ? "🌙 深色" : "☀️ 浅色";
+  };
+
+  // ---------- toast ----------
+  const icons = {
+    success: '<path d="M20 6L9 17l-5-5"/>',
+    error: '<path d="M18 6L6 18M6 6l12 12"/>',
+    info: '<path d="M12 8v4m0 4h.01"/><circle cx="12" cy="12" r="9"/>',
+  };
+  function toast(msg, type = "info") {
+    const t = document.createElement("div");
+    t.className = "toast " + type;
+    t.innerHTML = `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${icons[type]}</svg><span>${msg}</span>`;
+    $("toasts").appendChild(t);
+    setTimeout(() => { t.classList.add("out"); setTimeout(() => t.remove(), 300); }, 2600);
+  }
+
+  // ---------- expand / collapse ----------
+  function openPanel() {
+    $("pill").classList.add("hidden");
+    $("panel").classList.remove("hidden");
+  }
+  function closePanel() {
+    $("panel").classList.add("hidden");
+    $("pill").classList.remove("hidden");
+  }
+  $("pill").onclick = openPanel;
+  $("collapseBtn").onclick = closePanel;
+
+  // ---------- tabs ----------
+  $("tabs").querySelectorAll("button").forEach((b) => {
+    b.onclick = () => {
+      state.mode = b.dataset.mode;
+      $("tabs").classList.toggle("register", state.mode === "register");
+      $("tabs").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+      $("fMail").style.display = state.mode === "register" ? "" : "none";
+      $("submitBtn").textContent = state.mode === "register" ? "注册" : "登录";
+      $("headTitle").textContent = state.mode === "register" ? "注册 llm_gateway" : "登录 llm_gateway";
+      clearErrors();
+    };
+  });
+
+  // ---------- show password ----------
+  $("peekBtn").onclick = () => {
+    state.showPass = !state.showPass;
+    $("inPass").type = state.showPass ? "text" : "password";
+  };
+
+  // ---------- validation ----------
+  function clearErrors() {
+    ["fUser", "fMail", "fPass"].forEach((f) => $(f).classList.remove("error"));
+  }
+  function validate() {
+    clearErrors();
+    let ok = true;
+    if (!$("inUser").value.trim()) { $("fUser").classList.add("error"); ok = false; }
+    if (state.mode === "register" && !$("inMail").value.trim()) { $("fMail").classList.add("error"); ok = false; }
+    if (!$("inPass").value.trim()) { $("fPass").classList.add("error"); ok = false; }
+    return ok;
+  }
+
+  // ---------- screen transitions ----------
+  // dir "next" = to slides in from the right; "prev" = from the left.
+  function transition(fromEl, toEl, dir) {
+    const leaveCls = dir === "next" ? "leave-left" : "leave-right";
+    const enterCls = dir === "next" ? "enter-right" : "enter-left";
+    fromEl.classList.add(leaveCls);
+    setTimeout(() => {
+      fromEl.style.display = "none"; fromEl.classList.remove(leaveCls);
+      toEl.style.display = ""; toEl.classList.add(enterCls);
+      requestAnimationFrame(() => requestAnimationFrame(() => toEl.classList.remove(enterCls)));
+    }, 200);
+  }
+  function goToAccount() {
+    transition($("screenAuth"), $("screenAccount"), "next");
+    $("headTitle").textContent = "我的账号";
+    renderForwarding();
+  }
+  function goToAuth() {
+    transition($("screenAccount"), $("screenAuth"), "prev");
+    $("headTitle").textContent = state.mode === "register" ? "注册 llm_gateway" : "登录 llm_gateway";
+    $("headSub").textContent = "登录后即可在 Claude Code 中使用";
+  }
+  function showPurchase() {
+    transition($("screenAccount"), $("screenPurchase"), "next");
+    $("headTitle").textContent = "购买套餐";
+    $("headSub").textContent = "微信扫码支付，支付成功即时开通";
+  }
+  function backToAccount() {
+    transition($("screenPurchase"), $("screenAccount"), "prev");
+    $("headTitle").textContent = "我的账号";
+    renderForwarding();
+  }
+  $("buyBtn").onclick = showPurchase;
+  $("backBtn").onclick = backToAccount;
+
+  // ---------- submit (fake) ----------
+  $("submitBtn").onclick = () => {
+    if (!validate()) { toast("请填写必填项", "error"); return; }
+    const pass = $("inPass").value.trim();
+    const btn = $("submitBtn");
+    const label = state.mode === "register" ? "注册" : "登录";
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spin"></span>${label}中…`;
+
+    setTimeout(() => {
+      btn.disabled = false; btn.textContent = label;
+      // simulate wrong password
+      if (state.mode === "login" && pass === "wrong") {
+        $("fPass").classList.add("error");
+        toast("账号或密码错误", "error");
+        return;
+      }
+      // success
+      const name = $("inUser").value.trim();
+      state.loggedIn = true;
+      state.user = { name, mail: state.mode === "register" ? $("inMail").value.trim() : name + "@example.com" };
+      renderAccount();
+      goToAccount();
+      updatePill();
+      toast(state.mode === "register" ? "注册成功，选择套餐即可开通" : "登录成功", "success");
+    }, 1100);
+  };
+
+  // enter to submit
+  ["inUser", "inMail", "inPass"].forEach((id) =>
+    $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") $("submitBtn").click(); })
+  );
+
+  // ---------- account render ----------
+  function initials(s) { return (s || "U").slice(0, 2).toUpperCase(); }
+  function renderAccount() {
+    $("acctAvatar").textContent = initials(state.user.name);
+    $("acctName").textContent = state.user.name;
+    $("acctMail").textContent = state.user.mail;
+    const chip = $("acctChip");
+    chip.className = "chip " + (state.active ? "active" : "inactive");
+    chip.textContent = state.active ? (state.plan || "会员") : "未开通";
+    renderForwarding();
+  }
+
+  function renderForwarding() {
+    const btn = $("forwardBtn"), label = $("forwardLabel");
+    if (state.forwarding) {
+      btn.className = "btn fwd on";
+      label.textContent = "结束转发";
+      $("headSub").textContent = "转发中 · Claude Code 正在走 llm_gateway";
+    } else {
+      btn.className = "btn fwd off";
+      label.textContent = "开启转发";
+      $("headSub").textContent = "已登录 · 开启转发后即可使用";
+    }
+  }
+  function updatePill() {
+    $("pillDot").classList.toggle("active", state.forwarding);
+    $("pillAvatar").textContent = state.loggedIn ? initials(state.user.name) : "GW";
+    $("pillLabel").textContent = state.forwarding ? "转发中" : state.loggedIn ? state.user.name : "llm_gateway";
+  }
+
+  // ---------- forwarding toggle (install / restore provider) ----------
+  $("forwardBtn").onclick = () => {
+    const btn = $("forwardBtn"), label = $("forwardLabel");
+    const turningOn = !state.forwarding;
+    // No membership yet → send the user to buy a plan instead of forwarding.
+    if (turningOn && !state.active) {
+      toast("请先购买会员再开启转发", "info");
+      showPurchase();
+      return;
+    }
+    btn.disabled = true;
+    label.innerHTML = `<span class="spin"></span>${turningOn ? "开启中…" : "结束中…"}`;
+    setTimeout(() => {
+      btn.disabled = false;
+      state.forwarding = turningOn;
+      renderForwarding();
+      updatePill();
+      toast(turningOn ? "已开启转发，Claude Code 已切到 gateway" : "已结束转发，已还原原来的配置", turningOn ? "success" : "info");
+    }, 900);
+  };
+
+  // ---------- refresh auth token ----------
+  $("refreshTokenBtn").onclick = () => {
+    const btn = $("refreshTokenBtn");
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spin"></span>刷新中…`;
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.innerHTML = original;
+      // If forwarding is on, the installed provider's token is rewritten too.
+      toast(
+        state.forwarding
+          ? "Auth Token 已刷新，已同步更新已安装的配置"
+          : "Auth Token 已刷新",
+        "success",
+      );
+    }, 950);
+  };
+
+  // ---------- logout ----------
+  $("logoutBtn").onclick = () => {
+    state.loggedIn = false; state.active = false; state.plan = null; state.forwarding = false; state.user = null;
+    goToAuth(); updatePill();
+    toast("已登出", "info");
+  };
+
+  // ---------- purchase flow ----------
+  function fakeQR() {
+    // deterministic pseudo-QR grid
+    const n = 21, cell = 168 / n; let rects = "";
+    let seed = 7;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      const finder = (x < 7 && y < 7) || (x >= n - 7 && y < 7) || (x < 7 && y >= n - 7);
+      const on = finder ? ((x % 6 === 0 || y % 6 === 0) || (x > 1 && x < 5 && y > 1 && y < 5)) : rnd() > 0.55;
+      if (on) rects += `<rect x="${x * cell}" y="${y * cell}" width="${cell}" height="${cell}" fill="#111"/>`;
+    }
+    return `<svg viewBox="0 0 168 168">${rects}</svg>`;
+  }
+
+  // Grow the screens container so the overlay fits the pay content exactly —
+  // the QR is fully visible without any scrolling.
+  function fitOverlay() {
+    const h = $("payCard").offsetHeight + 40; // + overlay vertical padding
+    $("screens").style.minHeight = h + "px";
+  }
+  function closeOverlay() {
+    $("overlay").classList.remove("show");
+    $("screens").style.minHeight = "";
+  }
+
+  let payTimer = null;
+
+  // plan card → month-select screen (no longer straight to the QR)
+  $("plans").querySelectorAll(".plan").forEach((p) => {
+    p.onclick = () => {
+      state.tierId = p.dataset.plan;
+      state.months = 1;
+      renderMonths();
+      transition($("screenPurchase"), $("screenMonths"), "next");
+      $("headTitle").textContent = "选择购买月数";
+      $("headSub").textContent = TIER_LABEL[state.tierId] + " 套餐 · 微信支付";
+    };
+  });
+
+  function renderMonths() {
+    const price = TIER_PRICE[state.tierId];
+    $("monthsLabel").textContent = TIER_LABEL[state.tierId] + " 套餐 · 选择购买月数";
+    $("months").innerHTML = MONTHS.map((n) => {
+      const total = totalUSD(price, n), per = perMonthUSD(price, n), save = saveUSD(price, n);
+      const badge = discLabel(n) ? `<span class="disc-badge">${discLabel(n)}</span>` : "";
+      return `
+        <div class="month-row ${n === state.months ? "sel" : ""}" data-n="${n}">
+          <div class="ml"><div class="mn">${n} 个月${badge}</div><div class="mp">$${per}/月</div></div>
+          <div class="mr"><div class="mt">$${total}</div>${save > 0 ? `<div class="ms">省 $${save}</div>` : ""}</div>
+        </div>`;
+    }).join("");
+    $("months").querySelectorAll(".month-row").forEach((r) => {
+      r.onclick = () => { state.months = Number(r.dataset.n); renderMonths(); };
+    });
+    // active-plan note: same tier extends, different tier switches
+    const note = $("activeNote");
+    if (state.active && state.plan) {
+      const activeId = state.plan.toLowerCase();
+      note.innerHTML = activeId === state.tierId
+        ? `<div class="active-note">已有 <b>${state.plan}</b> 生效中 —— 购买后将在当前到期 <b>${CURRENT_EXPIRY}</b> 基础上 <b>延长 ${state.months} 个月</b>。</div>`
+        : `<div class="active-note">当前 <b>${state.plan}</b> 生效中 —— 购买后将 <b>切换到 ${TIER_LABEL[state.tierId]}</b>，剩余时长按新套餐日费率折算（天数会相应变化）。</div>`;
+    } else {
+      note.innerHTML = "";
+    }
+    $("payBtn").textContent = `微信支付 $${totalUSD(price, state.months)}`;
+  }
+
+  $("backMonths").onclick = () => {
+    transition($("screenMonths"), $("screenPurchase"), "prev");
+    $("headTitle").textContent = "购买套餐";
+    $("headSub").textContent = "微信扫码支付，支付成功即时开通";
+  };
+
+  $("payBtn").onclick = () => {
+    const price = TIER_PRICE[state.tierId];
+    const total = totalUSD(price, state.months);
+    $("payCard").innerHTML = `
+      <h4>微信扫码支付</h4>
+      <div class="amt">${TIER_LABEL[state.tierId]} 套餐 · ${state.months} 个月 · $${total}</div>
+      <div class="qr">${fakeQR()}<div class="scanline"></div></div>
+      <div class="pay-wait"><span class="spin"></span>等待支付…（演示会自动成功）</div>
+      <button class="pay-cancel" id="payCancel">取消</button>`;
+    $("overlay").classList.add("show");
+    fitOverlay();
+    $("payCancel").onclick = () => { clearTimeout(payTimer); closeOverlay(); };
+    payTimer = setTimeout(() => showSuccess(state.tierId, total, state.months), 2600);
+  };
+
+  function showSuccess(tierId, total, months) {
+    const label = TIER_LABEL[tierId] || tierId;
+    $("payCard").innerHTML = `
+      <div class="success-wrap">
+        <div class="check-circle"><svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg></div>
+        <h4>支付成功</h4>
+        <p>${label} 会员已开通 · ${months} 个月</p>
+      </div>`;
+    state.active = true;
+    state.plan = label;
+    fitOverlay();
+    setTimeout(() => {
+      closeOverlay();
+      renderAccount(); updatePill();
+      // Purchased from the month screen → slide back to the account view.
+      if ($("screenMonths").style.display !== "none") {
+        transition($("screenMonths"), $("screenAccount"), "prev");
+        $("headTitle").textContent = "我的账号";
+        renderForwarding();
+      }
+      toast("会员已开通，可直接使用", "success");
+    }, 1500);
+  }
+
+  // ---------- reset ----------
+  $("resetBtn").onclick = () => {
+    state.loggedIn = false; state.active = false; state.plan = null; state.forwarding = false; state.user = null; state.mode = "login";
+    $("tabs").classList.remove("register");
+    $("tabs").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x.dataset.mode === "login"));
+    $("fMail").style.display = "none";
+    $("inUser").value = ""; $("inMail").value = ""; $("inPass").value = "";
+    $("submitBtn").textContent = "登录";
+    clearErrors();
+    $("screenAccount").style.display = "none";
+    $("screenPurchase").style.display = "none";
+    $("screenMonths").style.display = "none";
+    $("screenAuth").style.display = "";
+    $("headTitle").textContent = "登录 llm_gateway";
+    $("headSub").textContent = "登录后即可在 Claude Code 中使用";
+    $("overlay").classList.remove("show");
+    $("screens").style.minHeight = "";
+    updatePill();
+    closePanel();
+  };
+
+  // start collapsed so the entrance animation is visible on first open
+})();
+</script>
+</body>
+</html>
