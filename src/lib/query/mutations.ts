@@ -144,6 +144,9 @@ export const useSwitchProviderMutation = (appId: AppId) => {
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
+      // 手动切到别的供应商会让后端作废转发备份（switch_normal → discard_backup），
+      // 面板得跟着从「结束转发」变回「开启转发」。
+      await queryClient.invalidateQueries({ queryKey: ["forwarding", appId] });
 
       try {
         await providersApi.updateTrayMenu();

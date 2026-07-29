@@ -34,6 +34,7 @@ import {
   DRAG_REGION_STYLE,
 } from "@/lib/platform";
 import { AppSwitcher } from "@/components/AppSwitcher";
+import { useActiveApp } from "@/components/active-app-provider";
 import { ProviderList } from "@/components/providers/ProviderList";
 import { AddProviderDialog } from "@/components/providers/AddProviderDialog";
 import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
@@ -49,22 +50,12 @@ type View = "providers" | "settings";
 const DEFAULT_DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px
 const HEADER_HEIGHT = 64; // px
 
-const STORAGE_KEY = "cc-switch-last-app";
-const VALID_APPS: AppId[] = ["claude", "codex", "gemini"];
-
-const getInitialApp = (): AppId => {
-  const saved = localStorage.getItem(STORAGE_KEY) as AppId | null;
-  if (saved && VALID_APPS.includes(saved)) {
-    return saved;
-  }
-  return "claude";
-};
-
 function App() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
-  const [activeApp, setActiveApp] = useState<AppId>(getInitialApp);
+  // 选中的 app 提到了 context 里：转发面板是 <App/> 的兄弟节点，也要读它。
+  const { activeApp, setActiveApp } = useActiveApp();
   const [currentView, setCurrentView] = useState<View>("providers");
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -93,10 +84,6 @@ function App() {
       setActiveApp(getFirstVisibleApp());
     }
   }, [visibleApps, activeApp]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, activeApp);
-  }, [activeApp]);
 
   const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
   const [confirmAction, setConfirmAction] = useState<{
