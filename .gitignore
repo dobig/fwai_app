@@ -6,6 +6,12 @@ release/
 .env
 .env.local
 *.tsbuildinfo
+
+# 签名材料。docs/release.md 让你在本机导出 cert.p12 再转 base64,
+# 那一步很容易把证书落在仓库目录里。
+*.p12
+*.pem
+*.mobileprovision
 .npmrc
 CLAUDE.md
 # AGENTS.md

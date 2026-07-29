@@ -58,6 +58,8 @@ jobs:
         working-directory: src-tauri
         run: cargo fmt --check
 
-      - name: Run the unit tests
+      - name: Run the tests
         working-directory: src-tauri
-        run: cargo test --lib
+        # Not --lib: that skips tests/, which is 27 of the 189 tests. They
+        # isolate HOME through CC_SWITCH_TEST_HOME, so they are safe on a runner.
+        run: cargo test

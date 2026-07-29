@@ -37,8 +37,8 @@ pnpm install
 pnpm tauri dev      # 开发
 pnpm tauri build    # 构建
 
-pnpm run typecheck && pnpm run test:unit               # 前端
-cd src-tauri && cargo fmt --check && cargo test --lib  # 后端
+pnpm run typecheck && pnpm run test:unit         # 前端
+cd src-tauri && cargo fmt --check && cargo test   # 后端
 ```
 
 网关地址在构建期由 `VITE_GATEWAY_URL` 烘焙进产物,默认 `https://api.fwai.space`;
