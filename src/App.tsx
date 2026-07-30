@@ -23,6 +23,7 @@ import {
   type ProviderSwitchEvent,
 } from "@/lib/api";
 import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
+import { dismissVersion, isVersionDismissed } from "@/lib/updateCheck";
 import { useProviderActions } from "@/hooks/useProviderActions";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
 import { extractErrorMessage } from "@/utils/errorUtils";
@@ -213,6 +214,53 @@ function App() {
     };
 
     checkMigration();
+  }, [t]);
+
+  // 启动时静默检查新版本。只提示，不安装——点「查看」跳到 releases 页手动下载。
+  useEffect(() => {
+    // dev 下每次热重启都弹属于纯干扰。About 页的「检查更新」按钮没有这道门，
+    // 那才是 dev 下验证这条链路的入口。
+    if (import.meta.env.DEV) return;
+
+    let cancelled = false;
+
+    const checkUpdate = async () => {
+      try {
+        const info = await settingsApi.checkAppUpdate();
+        if (cancelled || !info.updateAvailable || !info.latest) return;
+
+        const latest = info.latest;
+        if (isVersionDismissed(latest)) return;
+
+        // 全局 toastOptions.duration 是 2000ms，读不完版本号也点不到按钮，
+        // 这里必须显式覆盖。裸 toast() 而非 .info()：richColors 会把 info
+        // 染成蓝色告警色，而这只是条信息。
+        toast(t("settings.updateAvailable", { version: `v${latest}` }), {
+          duration: 10000,
+          closeButton: true,
+          action: {
+            label: t("common.view"),
+            onClick: () => {
+              void settingsApi.openExternal(info.releaseUrl).catch((error) => {
+                console.error("[App] Failed to open releases page:", error);
+              });
+            },
+          },
+          // onDismiss 而非 onAutoClose：主动关掉才算"不想再看到"，
+          // 人离开座位让它自动消失不该永久丢掉这条通知
+          onDismiss: () => dismissVersion(latest),
+        });
+      } catch (error) {
+        // 启动检查失败保持静默，只留 console 痕迹
+        console.error("[App] Failed to check for updates:", error);
+      }
+    };
+
+    void checkUpdate();
+
+    return () => {
+      cancelled = true;
+    };
   }, [t]);
 
   useEffect(() => {
