@@ -540,6 +540,7 @@ pub fn run() {
             // Provider terminal + tool versions
             commands::open_provider_terminal,
             commands::get_tool_versions,
+            commands::check_app_update,
             // Window theme control
             commands::set_window_theme,
             // lightweight mode (for testing or low-resource environments)

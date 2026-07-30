@@ -8,6 +8,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 use tauri::AppHandle;
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
@@ -258,6 +259,68 @@ async fn fetch_github_latest_version(client: &reqwest::Client, repo: &str) -> Op
         }
         Err(_) => None,
     }
+}
+
+/// 本应用自身的发布仓库
+const APP_REPO: &str = "dobig/fwai_app";
+/// 发布页地址（提示用户手动下载，本应用不做应用内自动安装）
+const RELEASES_URL: &str = "https://github.com/dobig/fwai_app/releases";
+/// 检查更新的请求超时。get_tool_versions 用的是无超时的裸 client，
+/// 但这里的调用方要么是启动时的后台任务（会泄漏），要么是带 spinner 的按钮
+/// （spinner 会一直转），所以必须有超时。
+const UPDATE_CHECK_TIMEOUT_SECS: u64 = 10;
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUpdateInfo {
+    /// 当前运行的版本
+    current: String,
+    /// GitHub 上最新的正式版；网络失败或仓库无 release 时为 None
+    latest: Option<String>,
+    update_available: bool,
+    release_url: String,
+}
+
+/// 判断 GitHub 上的 tag 是否是一个值得提示用户升级的正式版。
+///
+/// 与 I/O 分离以便单测。三条规则：
+/// - tag 解析不出 semver → false（畸形 tag 用户也无法行动）
+/// - tag 是预发布版 → false。`/releases/latest` 本身已排除 prerelease，
+///   这道守卫是为了把该不变量固定在本地、可被测试覆盖：将来若有人改成拉
+///   `/releases` 列表，beta 不会静默地推给所有人
+/// - 否则按 semver 序比较。注意 `1.6.0-beta.1` > `1.5.0`，所以 beta 用户
+///   不会被劝降级到更旧的正式版
+fn is_newer_stable_release(current: &semver::Version, latest_tag: &str) -> bool {
+    match semver::Version::parse(latest_tag) {
+        Ok(latest) => latest.pre.is_empty() && latest > *current,
+        Err(_) => false,
+    }
+}
+
+/// 检查是否有新版本可用（只提示，不安装）
+#[tauri::command]
+pub async fn check_app_update(app: AppHandle) -> Result<AppUpdateInfo, String> {
+    let current = app.package_info().version.clone();
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(UPDATE_CHECK_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
+
+    // 该 helper 把网络错误吞成 None，所以断网时得到的是"没有更新"而不是 Err。
+    // 这正是需要的形状：启动检查必须静默，而对用户来说"连不上 GitHub"和
+    // "已是最新"同样无法行动。
+    let latest = fetch_github_latest_version(&client, APP_REPO).await;
+    let update_available = latest
+        .as_deref()
+        .is_some_and(|tag| is_newer_stable_release(&current, tag));
+
+    Ok(AppUpdateInfo {
+        current: current.to_string(),
+        latest,
+        update_available,
+        release_url: RELEASES_URL.to_string(),
+    })
 }
 
 /// 预编译的版本号正则表达式
@@ -1584,6 +1647,48 @@ mod tests {
         assert_eq!(extract_version("claude 1.0.20"), "1.0.20");
         assert_eq!(extract_version("v2.3.4-beta.1"), "2.3.4-beta.1");
         assert_eq!(extract_version("no version here"), "no version here");
+    }
+
+    fn ver(s: &str) -> semver::Version {
+        semver::Version::parse(s).expect("test fixture must be valid semver")
+    }
+
+    #[test]
+    fn test_is_newer_stable_release() {
+        // 数值比较，不是字典序：1.10.0 比 1.5.0 新
+        assert!(is_newer_stable_release(&ver("1.5.0"), "1.10.0"));
+        assert!(!is_newer_stable_release(&ver("1.10.0"), "1.5.0"));
+
+        // 相同版本不提示
+        assert!(!is_newer_stable_release(&ver("1.5.0"), "1.5.0"));
+
+        // 普通升级
+        assert!(is_newer_stable_release(&ver("1.5.0"), "1.5.1"));
+        assert!(is_newer_stable_release(&ver("1.5.0"), "2.0.0"));
+
+        // 解析不出来的 tag 当作没有更新
+        assert!(!is_newer_stable_release(&ver("1.5.0"), "garbage"));
+        assert!(!is_newer_stable_release(&ver("1.5.0"), ""));
+    }
+
+    #[test]
+    fn beta_build_is_not_asked_to_downgrade() {
+        // 跑 1.6.0-beta.1 的用户比最新正式版 1.5.0 更超前，不能提示他"升级"到 1.5.0。
+        // 这不是假设：commit e4ebde1 真的发过 version = "1.5.0-beta.1"。
+        assert!(!is_newer_stable_release(&ver("1.6.0-beta.1"), "1.5.0"));
+
+        // 但预发布版落后于自己的正式版时，应该提示
+        assert!(is_newer_stable_release(&ver("1.5.0-beta.1"), "1.5.0"));
+        assert!(is_newer_stable_release(&ver("1.6.0-beta.2"), "1.6.0"));
+    }
+
+    #[test]
+    fn prerelease_tag_never_triggers_update() {
+        // /releases/latest 已经排除 prerelease，这道守卫是防止将来有人改成
+        // 拉 /releases 列表时把 beta 静默推给所有用户
+        assert!(!is_newer_stable_release(&ver("1.5.0"), "1.6.0-beta.1"));
+        assert!(!is_newer_stable_release(&ver("1.5.0"), "2.0.0-rc.1"));
+        assert!(!is_newer_stable_release(&ver("1.5.0"), "1.5.1-alpha"));
     }
 
     #[cfg(target_os = "windows")]

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  ArrowUpCircle,
   Copy,
   Info,
   Loader2,
@@ -19,7 +20,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { getVersion } from "@tauri-apps/api/app";
-import { settingsApi } from "@/lib/api";
+import { settingsApi, type AppUpdateInfo } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { motion } from "framer-motion";
 import appIcon from "@/assets/icons/app-icon.png";
@@ -91,6 +92,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   const [isLoadingVersion, setIsLoadingVersion] = useState(true);
   const [toolVersions, setToolVersions] = useState<ToolVersion[]>([]);
   const [isLoadingTools, setIsLoadingTools] = useState(true);
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
 
   const [wslShellByTool, setWslShellByTool] = useState<
     Record<string, WslShellPreference>
@@ -183,13 +186,21 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     let active = true;
     const load = async () => {
       try {
-        const [appVersion] = await Promise.all([
+        // 更新检查单独兜底：它失败了也不该把版本号显示成"未知"
+        const updatePromise = settingsApi.checkAppUpdate().catch((error) => {
+          console.error("[AboutSection] Failed to check for updates", error);
+          return null;
+        });
+
+        const [appVersion, update] = await Promise.all([
           getVersion(),
+          updatePromise,
           ...(isWindows() ? [] : [loadAllToolVersions()]),
         ]);
 
         if (active) {
           setVersion(appVersion);
+          setUpdateInfo(update);
         }
       } catch (error) {
         console.error("[AboutSection] Failed to load info", error);
@@ -222,6 +233,32 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       toast.error(t("settings.installCommandsCopyFailed"));
     }
   }, [t]);
+
+  const handleCheckUpdate = useCallback(async () => {
+    setIsCheckingUpdate(true);
+    try {
+      const info = await settingsApi.checkAppUpdate();
+      setUpdateInfo(info);
+      // 有更新时不弹 toast——徽标出现本身就是反馈
+      if (!info.updateAvailable) {
+        toast.success(t("settings.upToDate"), { closeButton: true });
+      }
+    } catch (error) {
+      console.error("[AboutSection] Failed to check for updates", error);
+      toast.error(t("settings.checkUpdateFailed"));
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  }, [t]);
+
+  const handleOpenReleases = useCallback(async () => {
+    if (!updateInfo) return;
+    try {
+      await settingsApi.openExternal(updateInfo.releaseUrl);
+    } catch (error) {
+      console.error("[AboutSection] Failed to open releases page", error);
+    }
+  }, [updateInfo]);
 
   const displayVersion = version ?? t("common.unknown");
 
@@ -264,6 +301,19 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                   <span className="font-medium">{`v${displayVersion}`}</span>
                 )}
               </Badge>
+              {updateInfo?.updateAvailable && (
+                <Badge
+                  variant="secondary"
+                  className="gap-1.5 cursor-pointer transition-colors hover:bg-secondary/70"
+                  title={t("settings.updateAvailable", {
+                    version: `v${updateInfo.latest}`,
+                  })}
+                  onClick={handleOpenReleases}
+                >
+                  <ArrowUpCircle className="h-3 w-3" />
+                  {t("settings.updateBadge")}
+                </Badge>
+              )}
               {isPortable && (
                 <Badge variant="secondary" className="gap-1.5">
                   <Info className="h-3 w-3" />
@@ -272,6 +322,21 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               )}
             </div>
           </div>
+
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1.5 text-xs self-start sm:self-auto"
+            onClick={handleCheckUpdate}
+            disabled={isCheckingUpdate}
+          >
+            <RefreshCw
+              className={
+                isCheckingUpdate ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"
+              }
+            />
+            {t("settings.checkForUpdates")}
+          </Button>
         </div>
       </motion.div>
 

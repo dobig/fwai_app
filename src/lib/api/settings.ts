@@ -143,6 +143,10 @@ export const settingsApi = {
     return await invoke("get_tool_versions", { tools, wslShellByTool });
   },
 
+  async checkAppUpdate(): Promise<AppUpdateInfo> {
+    return await invoke("check_app_update");
+  },
+
   async getRectifierConfig(): Promise<RectifierConfig> {
     return await invoke("get_rectifier_config");
   },
@@ -167,6 +171,14 @@ export const settingsApi = {
     return await invoke("set_log_config", { config });
   },
 };
+
+export interface AppUpdateInfo {
+  current: string;
+  /** null 表示没拿到（断网 / 仓库无 release），不代表已是最新 */
+  latest: string | null;
+  updateAvailable: boolean;
+  releaseUrl: string;
+}
 
 export interface RectifierConfig {
   enabled: boolean;
