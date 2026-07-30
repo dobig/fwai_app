@@ -344,23 +344,36 @@ export async function getPaymentOrder(
   );
 }
 
-// createPlanOrder opens a real WeChat Native order for a plan bought for `months`
-// (1/3/6/12). The gateway computes the price authoritatively (full N × price
-// credit, discounted charge) and, on the verified paid callback, extends
-// validity by 30 × months. For the "custom" plan, priceUSD is the buyer-chosen
-// whole-dollar monthly price (server-validated to $1–$199 and below the top
-// tier); it is ignored for catalog plans.
+// createPlanOrder opens a real WeChat Native order for a plan bought for one
+// `period` (see PERIODS). The gateway computes the price authoritatively (full
+// share of the monthly price as credit, discounted charge) and, on the verified
+// paid callback, extends validity by the period's days. For the "custom" plan,
+// priceUSD is the buyer-chosen whole-dollar MONTHLY price (server-validated to
+// $10–$199 and below the top tier) regardless of the period bought; it is
+// ignored for catalog plans.
 export async function createPlanOrder(
   planId: string,
-  months = 1,
+  period = "1m",
   priceUSD?: number,
-): Promise<GatewayNativeOrder & { plan_id: string; months: number }> {
-  const body: { months: number; price_usd?: number } = { months };
+): Promise<
+  GatewayNativeOrder & {
+    plan_id: string;
+    period: string;
+    duration_days: number;
+    months: number;
+  }
+> {
+  const body: { period: string; price_usd?: number } = { period };
   if (priceUSD !== undefined) {
     body.price_usd = priceUSD;
   }
   return await gatewayRequest<
-    GatewayNativeOrder & { plan_id: string; months: number }
+    GatewayNativeOrder & {
+      plan_id: string;
+      period: string;
+      duration_days: number;
+      months: number;
+    }
   >(
     `/v1/plans/${encodeURIComponent(planId)}/orders`,
     { method: "POST", body: JSON.stringify(body) },

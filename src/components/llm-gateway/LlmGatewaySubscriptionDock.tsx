@@ -107,7 +107,7 @@ interface PendingOrder {
   orderId: string;
   codeURL: string;
   planId: string;
-  months: number;
+  period: string;
   totalUSD: number;
   // Monthly price for the custom plan (label + retry context); catalog plans
   // derive it from TIERS.
@@ -147,11 +147,12 @@ const TIERS: {
   },
 ];
 
-// Self-serve custom plan: buyer names a whole-dollar monthly price and the
-// quota windows derive from it (5h = 1× price, week = 5× price). Bounds mirror
-// the server ($1–$199, and always below the $200 tier).
+// Self-serve custom plan: buyer names a whole-dollar MONTHLY price and the
+// quota windows derive from it (5h = 1× price, week = 5× price) — a weekly
+// period costs a quarter of it but is not throttled to a quarter. Bounds mirror
+// the server ($10–$199, and always below the $200 tier).
 const CUSTOM_TIER_ID = "custom";
-const CUSTOM_MIN_USD = 1;
+const CUSTOM_MIN_USD = 10;
 const CUSTOM_MAX_USD = 199;
 
 function parseCustomPrice(raw: string): number | null {
@@ -162,28 +163,105 @@ function parseCustomPrice(raw: string): number | null {
   return n;
 }
 
-// Month options + discount mirror the server, which is authoritative on price:
-// 1/3 months no discount, 6 months 5% off, 12 months 10% off. Used for display
-// only — the QR amount always comes from the gateway's response.
-const MONTH_OPTIONS = [1, 3, 6, 12];
-function monthDiscount(months: number): number {
-  if (months >= 12) return 0.9;
-  if (months >= 6) return 0.95;
-  return 1;
+// Purchasable periods, mirroring the server's planPeriods table (the server
+// stays authoritative on price — these drive display only, and the QR amount
+// always comes from the gateway's response). `num/den` is the share of the
+// monthly price the period costs: a week is 1/4 of a month. Weeks are custom-
+// only, and stop at 3 — a 4th week would cost the same as 1m but grant 28 days
+// instead of 30.
+interface PlanPeriod {
+  key: string;
+  label: string;
+  days: number;
+  num: number;
+  den: number;
+  discount: number;
+  customOnly?: boolean;
 }
-function monthDiscountLabel(months: number): string {
-  if (months >= 12) return "9折";
-  if (months >= 6) return "95折";
+
+const PERIODS: PlanPeriod[] = [
+  {
+    key: "1w",
+    label: "1 周",
+    days: 7,
+    num: 1,
+    den: 4,
+    discount: 1,
+    customOnly: true,
+  },
+  {
+    key: "2w",
+    label: "2 周",
+    days: 14,
+    num: 2,
+    den: 4,
+    discount: 1,
+    customOnly: true,
+  },
+  {
+    key: "3w",
+    label: "3 周",
+    days: 21,
+    num: 3,
+    den: 4,
+    discount: 1,
+    customOnly: true,
+  },
+  { key: "1m", label: "1 个月", days: 30, num: 1, den: 1, discount: 1 },
+  { key: "3m", label: "3 个月", days: 90, num: 3, den: 1, discount: 1 },
+  { key: "6m", label: "6 个月", days: 180, num: 6, den: 1, discount: 0.95 },
+  { key: "12m", label: "12 个月", days: 360, num: 12, den: 1, discount: 0.9 },
+];
+
+const DEFAULT_PERIOD = "1m";
+
+function findPeriod(key: string): PlanPeriod {
+  return PERIODS.find((p) => p.key === key) ?? PERIODS[3];
+}
+
+// Periods a given tier can buy: weekly options are custom-only.
+function periodsFor(planId: string): PlanPeriod[] {
+  return PERIODS.filter((p) => !p.customOnly || planId === CUSTOM_TIER_ID);
+}
+
+function periodDiscountLabel(period: PlanPeriod): string {
+  if (period.discount === 0.9) return "9折";
+  if (period.discount === 0.95) return "95折";
   return "";
 }
-// Totals keep cent precision: custom prices aren't multiples of $20, so the
-// 95%/90% discount can land on fractions (e.g. $58 × 12 × 0.9 = $626.40) and
-// the shown figure must match what the server actually charges.
-function planTotalUSD(priceUSD: number, months: number): number {
-  return Math.round(priceUSD * months * monthDiscount(months) * 100) / 100;
+
+// Totals keep cent precision: custom prices aren't multiples of $20, so both
+// the 95%/90% discount and the weekly quarter can land on fractions (e.g.
+// $58 × 12 × 0.9 = $626.40, $15 ÷ 4 = $3.75) and the shown figure must match
+// what the server actually charges.
+function planTotalUSD(priceUSD: number, period: PlanPeriod): number {
+  return (
+    Math.round(((priceUSD * period.num) / period.den) * period.discount * 100) /
+    100
+  );
 }
-function planPerMonthUSD(priceUSD: number, months: number): number {
-  return Math.round(priceUSD * monthDiscount(months) * 100) / 100;
+
+// Per-unit price for the option row: per month for monthly periods, per week
+// for weekly ones — comparing a weekly plan's "$3.75/月" against a monthly
+// plan's "$15/月" would read as a 4x discount rather than a shorter term.
+function planUnitUSD(
+  priceUSD: number,
+  period: PlanPeriod,
+): {
+  amount: number;
+  unit: string;
+} {
+  if (period.den !== 1) {
+    const weeks = period.num;
+    return {
+      amount: Math.round((planTotalUSD(priceUSD, period) / weeks) * 100) / 100,
+      unit: "周",
+    };
+  }
+  return {
+    amount: Math.round(priceUSD * period.discount * 100) / 100,
+    unit: "月",
+  };
 }
 
 const GATEWAY_PROVIDER_ID = "llm-gateway-local";
@@ -299,10 +377,10 @@ export function LlmGatewaySubscriptionDock() {
   const [fwdBusy, setFwdBusy] = useState(false);
   const [refreshBusy, setRefreshBusy] = useState(false);
   const [pending, setPending] = useState<PendingOrder | null>(null);
-  // Two-step purchase: pick a tier, then pick how many months before the QR.
+  // Two-step purchase: pick a tier, then pick the period before the QR.
   const [selectedTier, setSelectedTier] = useState<string | null>(null);
-  const [selectedMonths, setSelectedMonths] = useState(1);
-  // Custom tier: buyer-typed whole-dollar monthly price ($1–$199).
+  const [selectedPeriod, setSelectedPeriod] = useState(DEFAULT_PERIOD);
+  // Custom tier: buyer-typed whole-dollar monthly price ($10–$199).
   const [customPriceInput, setCustomPriceInput] = useState("30");
   // Editable gateway base URL. Seeded from the persisted value (or the baked
   // default) so users can point the client at the right gateway before logging
@@ -1030,7 +1108,7 @@ requires_openai_auth = true`,
 
   async function handlePurchasePlan(
     planId: string,
-    months: number,
+    periodKey: string,
     priceUSD?: number,
   ) {
     if (!login) {
@@ -1044,7 +1122,7 @@ requires_openai_auth = true`,
     }
     const tier = TIERS.find((t) => t.id === planId);
     const monthlyUSD = isCustom ? (priceUSD ?? 0) : (tier?.priceUSD ?? 0);
-    const totalUSD = planTotalUSD(monthlyUSD, months);
+    const totalUSD = planTotalUSD(monthlyUSD, findPeriod(periodKey));
     setBusy(true);
     try {
       // One flow for dev and prod: create the order, show the QR, poll until
@@ -1053,14 +1131,14 @@ requires_openai_auth = true`,
       // purchase immediately — no separate demo path.
       const order = await createPlanOrder(
         planId,
-        months,
+        periodKey,
         isCustom ? priceUSD : undefined,
       );
       setPending({
         orderId: order.order_id,
         codeURL: order.code_url,
         planId,
-        months,
+        period: periodKey,
         totalUSD,
         priceUSD: isCustom ? priceUSD : undefined,
       });
@@ -1510,7 +1588,8 @@ requires_openai_auth = true`,
                   {pending.priceUSD !== undefined
                     ? `自选 $${pending.priceUSD}`
                     : planLabel(pending.planId)}{" "}
-                  套餐 · {pending.months} 个月 · ${pending.totalUSD}
+                  套餐 · {findPeriod(pending.period).label} · $
+                  {pending.totalUSD}
                 </div>
                 <div className="rounded-xl border border-border bg-white p-3 shadow-md">
                   <QRCodeSVG value={pending.codeURL} size={168} />
@@ -1534,7 +1613,14 @@ requires_openai_auth = true`,
                 const price = isCustom
                   ? (customPrice ?? 0)
                   : (tier?.priceUSD ?? 0);
-                const total = planTotalUSD(price, selectedMonths);
+                const options = periodsFor(selectedTier);
+                // A tier switch can strand a weekly selection on a catalog
+                // tier that cannot buy one; fall back rather than send the
+                // server a period it will reject.
+                const period = options.some((p) => p.key === selectedPeriod)
+                  ? findPeriod(selectedPeriod)
+                  : findPeriod(DEFAULT_PERIOD);
+                const total = planTotalUSD(price, period);
                 const usage5h = isCustom ? price : (tier?.usage5hUSD ?? 0);
                 const usageWeek = isCustom
                   ? price * 5
@@ -1545,7 +1631,7 @@ requires_openai_auth = true`,
                   <>
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
                       {isCustom ? "自选套餐" : `${tier?.label} 套餐`} ·
-                      选择购买月数
+                      选择购买时长
                     </div>
                     {isCustom && (
                       <div className="mb-2.5 rounded-xl border-[1.5px] border-border px-3 py-2.5">
@@ -1586,18 +1672,22 @@ requires_openai_auth = true`,
                       </div>
                     )}
                     <div className="flex flex-col gap-2">
-                      {MONTH_OPTIONS.map((m) => {
-                        const mTotal = planTotalUSD(price, m);
-                        const per = planPerMonthUSD(price, m);
+                      {options.map((p) => {
+                        const pTotal = planTotalUSD(price, p);
+                        const unit = planUnitUSD(price, p);
+                        // "省" is the discount only — a shorter term costing
+                        // less is not a saving, so compare against the
+                        // undiscounted price for the SAME period.
                         const save =
-                          Math.round((price * m - mTotal) * 100) / 100;
-                        const badge = monthDiscountLabel(m);
-                        const sel = m === selectedMonths;
+                          Math.round(((price * p.num) / p.den - pTotal) * 100) /
+                          100;
+                        const badge = periodDiscountLabel(p);
+                        const sel = p.key === period.key;
                         return (
                           <button
-                            key={m}
+                            key={p.key}
                             type="button"
-                            onClick={() => setSelectedMonths(m)}
+                            onClick={() => setSelectedPeriod(p.key)}
                             className={`flex items-center justify-between rounded-xl border-[1.5px] px-3 py-2.5 text-left transition ${
                               sel
                                 ? "border-primary bg-primary/5"
@@ -1606,7 +1696,7 @@ requires_openai_auth = true`,
                           >
                             <div>
                               <div className="text-sm font-semibold">
-                                {m} 个月
+                                {p.label}
                                 {badge && (
                                   <span className="ml-1.5 rounded bg-primary px-1 py-0.5 text-[10px] font-bold text-primary-foreground">
                                     {badge}
@@ -1614,12 +1704,12 @@ requires_openai_auth = true`,
                                 )}
                               </div>
                               <div className="text-[11px] text-muted-foreground">
-                                ${per}/月
+                                ${unit.amount}/{unit.unit} · {p.days} 天
                               </div>
                             </div>
                             <div className="text-right">
                               <div className="text-[15px] font-bold">
-                                ${mTotal}
+                                ${pTotal}
                               </div>
                               {save > 0 && (
                                 <div className="text-[11px] font-medium text-green-600 dark:text-green-400">
@@ -1655,7 +1745,7 @@ requires_openai_auth = true`,
                               : " "}
                             基础上{" "}
                             <b className="text-foreground">
-                              延长 {selectedMonths} 个月
+                              延长 {period.label}
                             </b>
                             。
                           </>
@@ -1680,7 +1770,7 @@ requires_openai_auth = true`,
                       onClick={() =>
                         handlePurchasePlan(
                           selectedTier,
-                          selectedMonths,
+                          period.key,
                           isCustom ? (customPrice ?? undefined) : undefined,
                         )
                       }
@@ -1708,7 +1798,7 @@ requires_openai_auth = true`,
                       }`}
                       onClick={() => {
                         setSelectedTier(tier.id);
-                        setSelectedMonths(1);
+                        setSelectedPeriod(DEFAULT_PERIOD);
                       }}
                     >
                       {tier.id === "pro" && (
@@ -1732,12 +1822,12 @@ requires_openai_auth = true`,
                   className="mt-2 w-full rounded-xl border-[1.5px] border-dashed border-border bg-background px-3 py-2.5 text-center transition hover:border-primary disabled:opacity-60"
                   onClick={() => {
                     setSelectedTier(CUSTOM_TIER_ID);
-                    setSelectedMonths(1);
+                    setSelectedPeriod(DEFAULT_PERIOD);
                   }}
                 >
                   <span className="text-sm font-semibold">自选金额</span>
                   <span className="ml-2 text-[11px] text-muted-foreground">
-                    ${CUSTOM_MIN_USD}–${CUSTOM_MAX_USD}/月 · 用量随价格
+                    ${CUSTOM_MIN_USD}–${CUSTOM_MAX_USD}/月 · 可按周购买
                   </span>
                 </button>
                 <div className="mt-3 text-center text-[11px] text-muted-foreground">
