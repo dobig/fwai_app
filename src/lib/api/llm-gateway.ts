@@ -20,12 +20,29 @@ export interface GatewayAccountProfile {
   id: string;
 }
 
+// 一个独立计量的套餐。套餐可叠加，用户同时可以持有多个。
+// pending 为 true 表示这个套餐买的时候选了「到期后生效」，现在还没开始。
+export interface GatewaySubscriptionPlan {
+  grant_id: string;
+  tier: string;
+  usage_micros_per_5h: number;
+  usage_micros_per_week: number;
+  valid_from: string;
+  valid_until: string;
+  pending?: boolean;
+}
+
 export interface GatewaySubscriptionStatus {
   active: boolean;
+  // 以下标量字段是叠加之前的形状，服务端仍在返回：tier 是最贵的那个生效
+  // 套餐，两个上限是各生效套餐之和，valid_until 是最晚的到期时间。
+  // 展示明细请用 plans —— 标量字段表达不出「哪一层先被扣」。
   tier?: string;
   usage_micros_per_5h?: number;
   usage_micros_per_week?: number;
   valid_until?: string;
+  // 老版本服务端不返回这个字段，所以可能是 undefined。
+  plans?: GatewaySubscriptionPlan[];
 }
 
 export interface GatewayLoginResult extends GatewayTokens {
@@ -347,14 +364,19 @@ export async function getPaymentOrder(
 // createPlanOrder opens a real WeChat Native order for a plan bought for one
 // `period` (see PERIODS). The gateway computes the price authoritatively (full
 // share of the monthly price as credit, discounted charge) and, on the verified
-// paid callback, extends validity by the period's days. For the "custom" plan,
-// priceUSD is the buyer-chosen whole-dollar MONTHLY price (server-validated to
-// $10–$199 and below the top tier) regardless of the period bought; it is
-// ignored for catalog plans.
+// paid callback, grants the period's days. For the "custom" plan, priceUSD is
+// the buyer-chosen whole-dollar MONTHLY price (server-validated to $10–$199 and
+// below the top tier) regardless of the period bought; it is ignored for
+// catalog plans.
+//
+// startAfterCurrent 决定这一单和已有套餐的关系：默认（false）立刻叠加，
+// 额度相加；true 则排到当前套餐到期后再生效。纯续费该用 true —— 并行跑
+// 的话那份额度用不完就白费了。
 export async function createPlanOrder(
   planId: string,
   period = "1m",
   priceUSD?: number,
+  startAfterCurrent = false,
 ): Promise<
   GatewayNativeOrder & {
     plan_id: string;
@@ -363,9 +385,16 @@ export async function createPlanOrder(
     months: number;
   }
 > {
-  const body: { period: string; price_usd?: number } = { period };
+  const body: {
+    period: string;
+    price_usd?: number;
+    start_after_current?: boolean;
+  } = { period };
   if (priceUSD !== undefined) {
     body.price_usd = priceUSD;
+  }
+  if (startAfterCurrent) {
+    body.start_after_current = true;
   }
   return await gatewayRequest<
     GatewayNativeOrder & {

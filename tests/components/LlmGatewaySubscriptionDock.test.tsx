@@ -386,3 +386,163 @@ describe("LlmGatewaySubscriptionDock 登出", () => {
     expect(providersApi.stopForwarding).toHaveBeenCalledWith("codex");
   });
 });
+
+// 套餐可以叠加，一个用户同时可能有好几个在跑，还可能有一个排队等生效。
+// 这些 case 盯的是两件用户会付错钱的事：账户页要看得出手里有几个套餐，
+// 下单时「叠加还是排队」的选择必须真的传到服务端。
+describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
+  /** 已登录，服务端说手里有两个生效套餐 + 一个待生效。 */
+  function seedStackedPlans() {
+    seedLoggedOutOfPlan();
+    const login = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
+    login.subscription = {
+      active: true,
+      tier: "pro",
+      usage_micros_per_5h: 110_000_000,
+      usage_micros_per_week: 550_000_000,
+      valid_until: "2099-01-01T00:00:00Z",
+      plans: [
+        {
+          grant_id: "g_week",
+          tier: "custom",
+          usage_micros_per_5h: 10_000_000,
+          usage_micros_per_week: 50_000_000,
+          valid_from: "2026-07-01T00:00:00Z",
+          valid_until: "2026-07-08T00:00:00Z",
+        },
+        {
+          grant_id: "g_pro",
+          tier: "pro",
+          usage_micros_per_5h: 100_000_000,
+          usage_micros_per_week: 500_000_000,
+          valid_from: "2026-07-01T00:00:00Z",
+          valid_until: "2026-07-31T00:00:00Z",
+        },
+        {
+          grant_id: "g_queued",
+          tier: "pro",
+          usage_micros_per_5h: 100_000_000,
+          usage_micros_per_week: 500_000_000,
+          valid_from: "2026-07-31T00:00:00Z",
+          valid_until: "2026-08-30T00:00:00Z",
+          pending: true,
+        },
+      ],
+    };
+    localStorage.setItem(LOGIN_KEY, JSON.stringify(login));
+  }
+
+  it("账户页逐个列出持有的套餐，并标出待生效的那个", async () => {
+    seedStackedPlans();
+    renderDock();
+
+    // 三个套餐都看得到，不是只显示最贵的那个。
+    expect(await screen.findByText("$10/5h")).toBeTruthy();
+    expect(screen.getAllByText("$100/5h").length).toBe(2);
+    // 排队中的那个要明确标出来，否则用户以为额度已经到账了。
+    expect(screen.getByText("待生效")).toBeTruthy();
+  });
+
+  it("只有一个套餐时退回单行有效期，不显示列表", async () => {
+    seedLoggedOutOfPlan();
+    const login = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
+    login.subscription = {
+      active: true,
+      tier: "pro",
+      valid_until: "2026-07-31T00:00:00Z",
+      plans: [
+        {
+          grant_id: "g_pro",
+          tier: "pro",
+          usage_micros_per_5h: 100_000_000,
+          usage_micros_per_week: 500_000_000,
+          valid_from: "2026-07-01T00:00:00Z",
+          valid_until: "2026-07-31T00:00:00Z",
+        },
+      ],
+    };
+    localStorage.setItem(LOGIN_KEY, JSON.stringify(login));
+    renderDock();
+
+    expect(await screen.findByText(/有效期至/)).toBeTruthy();
+    expect(screen.queryByText("$100/5h")).toBeNull();
+  });
+
+  it("默认排队续费，选「立即叠加」才并行生效", async () => {
+    seedStackedPlans();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    const createOrder = vi
+      .spyOn(gateway, "createPlanOrder")
+      .mockResolvedValue({
+        order_id: "pay_1",
+        code_url: "weixin://wxpay/bizpayurl?pr=test",
+        plan_id: "pro",
+        period: "1m",
+        duration_days: 30,
+        months: 1,
+        amount_credits: 100_000_000,
+        amount_cents: 72000,
+        exchange_rate: 7.2,
+        currency: "CNY",
+      } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
+
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("$100"));
+
+    // 默认是「到期后生效」——选错方向的代价不对称：想续命买成并行的话，
+    // 那份额度会跟着套餐一起作废。
+    await userEvent.click(await screen.findByText(/^微信支付/));
+    await waitFor(() => expect(createOrder).toHaveBeenCalled());
+    expect(createOrder.mock.calls[0][3]).toBe(true);
+
+    // 改选叠加后必须真的把 false 传下去，否则用户买到的不是他选的东西。
+    // 下单后停在二维码页，得先取消才能回到选项。
+    createOrder.mockClear();
+    await userEvent.click(await screen.findByText("取消"));
+    await userEvent.click(await screen.findByText("立即叠加"));
+    await userEvent.click(screen.getByText(/^微信支付/));
+    await waitFor(() => expect(createOrder).toHaveBeenCalled());
+    expect(createOrder.mock.calls[0][3]).toBe(false);
+  });
+
+  it("没有生效套餐时不问排队，直接从现在起算", async () => {
+    seedLoggedOutOfPlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue({
+      subscription: { active: false },
+      user: {
+        id: "user_1",
+        username: "tester",
+        email: "tester@example.com",
+        role: "user" as const,
+        email_verified: true,
+      },
+    });
+    const createOrder = vi
+      .spyOn(gateway, "createPlanOrder")
+      .mockResolvedValue({
+        order_id: "pay_1",
+        code_url: "weixin://wxpay/bizpayurl?pr=test",
+        plan_id: "pro",
+        period: "1m",
+        duration_days: 30,
+        months: 1,
+        amount_credits: 100_000_000,
+        amount_cents: 72000,
+        exchange_rate: 7.2,
+        currency: "CNY",
+      } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
+
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("$100"));
+
+    // 无套餐时没有这个选项可选。
+    expect(screen.queryByText("立即叠加")).toBeNull();
+    await userEvent.click(await screen.findByText(/^微信支付/));
+    await waitFor(() => expect(createOrder).toHaveBeenCalled());
+    expect(createOrder.mock.calls[0][3]).toBe(false);
+  });
+});

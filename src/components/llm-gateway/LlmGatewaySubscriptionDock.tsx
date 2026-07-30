@@ -112,6 +112,8 @@ interface PendingOrder {
   // Monthly price for the custom plan (label + retry context); catalog plans
   // derive it from TIERS.
   priceUSD?: number;
+  // 这一单是排在现有套餐之后（true）还是立刻叠加。只用于二维码页的文案。
+  startAfterCurrent?: boolean;
 }
 
 // Plans mirror the gateway seed SKUs, named by their monthly price. The 5h /
@@ -380,6 +382,9 @@ export function LlmGatewaySubscriptionDock() {
   // Two-step purchase: pick a tier, then pick the period before the QR.
   const [selectedTier, setSelectedTier] = useState<string | null>(null);
   const [selectedPeriod, setSelectedPeriod] = useState(DEFAULT_PERIOD);
+  // 已有套餐时，新买的是排在后面（续费）还是立刻叠加。默认排队：想续命
+  // 却买成并行的话，那份额度会跟着套餐一起到期作废，反过来只是晚点拿到。
+  const [queueAfterCurrent, setQueueAfterCurrent] = useState(true);
   // Custom tier: buyer-typed whole-dollar monthly price ($10–$199).
   const [customPriceInput, setCustomPriceInput] = useState("30");
   // Editable gateway base URL. Seeded from the persisted value (or the baked
@@ -412,6 +417,10 @@ export function LlmGatewaySubscriptionDock() {
 
   const subscription = login?.subscription;
   const isActive = Boolean(subscription?.active);
+  // 用户持有的套餐列表（含待生效的）。服务端已按到期时间排好，先到期的
+  // 在前——那也是先被扣额度的那一层。老服务端不返回这个字段，取空数组，
+  // 展示逻辑会退回单套餐那一行。
+  const planList = subscription?.plans ?? [];
   // Treat a login saved before this field existed as verified: those accounts
   // were backfilled verified by migration 0020, and defaulting to "unverified"
   // would show an existing paying customer a badge telling them to verify an
@@ -1110,6 +1119,7 @@ requires_openai_auth = true`,
     planId: string,
     periodKey: string,
     priceUSD?: number,
+    startAfterCurrent = false,
   ) {
     if (!login) {
       toast.error("请先登录");
@@ -1133,6 +1143,7 @@ requires_openai_auth = true`,
         planId,
         periodKey,
         isCustom ? priceUSD : undefined,
+        startAfterCurrent,
       );
       setPending({
         orderId: order.order_id,
@@ -1141,6 +1152,7 @@ requires_openai_auth = true`,
         period: periodKey,
         totalUSD,
         priceUSD: isCustom ? priceUSD : undefined,
+        startAfterCurrent,
       });
     } catch (error) {
       // The server is the real gate — goToPurchase only intercepts early, and a
@@ -1442,11 +1454,46 @@ requires_openai_auth = true`,
               </span>
             </div>
 
-            {isActive && subscription?.valid_until && (
-              <div className="mb-3.5 -mt-1.5 text-center text-[11px] text-muted-foreground">
-                有效期至{" "}
-                {new Date(subscription.valid_until).toLocaleDateString("zh-CN")}
+            {/* 套餐可以叠加，所以这里是一份列表而不是单个有效期。只有一个
+                套餐时退化成原来那行字，多个时才逐个列出来——否则绝大多数
+                用户会为了一条信息看到一个多余的表格。
+                老服务端不返回 plans，这时仍按单套餐渲染。 */}
+            {isActive && planList.length > 1 ? (
+              <div className="mb-3.5 -mt-1 space-y-1">
+                {planList.map((p) => (
+                  <div
+                    key={p.grant_id}
+                    className="flex items-center justify-between gap-2 rounded-lg bg-muted/40 px-2.5 py-1.5 text-[11px]"
+                  >
+                    <span className="flex items-center gap-1.5 font-medium">
+                      {planLabel(p.tier)}
+                      <span className="text-muted-foreground">
+                        ${Math.round(p.usage_micros_per_5h / 1_000_000)}/5h
+                      </span>
+                      {p.pending && (
+                        <span className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                          待生效
+                        </span>
+                      )}
+                    </span>
+                    <span className="flex-none text-muted-foreground">
+                      {p.pending
+                        ? `${new Date(p.valid_from).toLocaleDateString("zh-CN")} 起`
+                        : `至 ${new Date(p.valid_until).toLocaleDateString("zh-CN")}`}
+                    </span>
+                  </div>
+                ))}
               </div>
+            ) : (
+              isActive &&
+              subscription?.valid_until && (
+                <div className="mb-3.5 -mt-1.5 text-center text-[11px] text-muted-foreground">
+                  有效期至{" "}
+                  {new Date(subscription.valid_until).toLocaleDateString(
+                    "zh-CN",
+                  )}
+                </div>
+              )
             )}
 
             {/* 未验证提示。说清楚挡的是什么（下单），别只写「请验证邮箱」——
@@ -1591,6 +1638,14 @@ requires_openai_auth = true`,
                   套餐 · {findPeriod(pending.period).label} · $
                   {pending.totalUSD}
                 </div>
+                {/* 付款前再说一次生效方式：这是付完就改不了的选择。 */}
+                {pending.startAfterCurrent !== undefined && isActive && (
+                  <div className="-mt-1.5 text-[11px] text-muted-foreground">
+                    {pending.startAfterCurrent
+                      ? "现有套餐到期后生效"
+                      : "立即生效，与现有套餐额度相加"}
+                  </div>
+                )}
                 <div className="rounded-xl border border-border bg-white p-3 shadow-md">
                   <QRCodeSVG value={pending.codeURL} size={168} />
                 </div>
@@ -1721,47 +1776,53 @@ requires_openai_auth = true`,
                         );
                       })}
                     </div>
-                    {isActive && subscription?.tier && (
-                      <div className="mt-3 rounded-lg border border-dashed border-border bg-muted/40 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
-                        {subscription.tier === selectedTier &&
-                        // Custom→custom only renews at the SAME price; a
-                        // different price converts remaining days by the
-                        // price ratio (compare against the current 5h cap,
-                        // which equals the monthly price for custom grants).
-                        (!isCustom ||
-                          price ===
-                            Math.round(
-                              (subscription.usage_micros_per_5h ?? 0) /
-                                1_000_000,
-                            )) ? (
-                          <>
-                            已有{" "}
-                            <b className="text-foreground">
-                              {planLabel(subscription.tier)}
-                            </b>{" "}
-                            生效中 —— 购买后将在当前到期
-                            {subscription.valid_until
-                              ? ` ${new Date(subscription.valid_until).toLocaleDateString("zh-CN")} `
-                              : " "}
-                            基础上{" "}
-                            <b className="text-foreground">
-                              延长 {period.label}
-                            </b>
-                            。
-                          </>
-                        ) : (
-                          <>
-                            当前{" "}
-                            <b className="text-foreground">
-                              {planLabel(subscription.tier)}
-                            </b>{" "}
-                            生效中 —— 购买后将{" "}
-                            <b className="text-foreground">
-                              切换到 {isCustom ? `自选 $${price}` : tier?.label}
-                            </b>
-                            ，剩余时长按新套餐日费率折算。
-                          </>
-                        )}
+                    {/* 已有套餐时，这一单是叠加还是排队，用户自己选。
+                        默认排队（续费），因为这是更常见的意图，而且选错的
+                        代价不对称：想续命却买成叠加，那份额度会随着套餐到期
+                        一起作废；反过来只是晚一点拿到额度。 */}
+                    {isActive && (
+                      <div className="mt-3 space-y-1.5">
+                        {(
+                          [
+                            {
+                              queue: true,
+                              title: "到期后生效",
+                              desc: `接在现有套餐之后，订阅延长 ${period.label}`,
+                            },
+                            {
+                              queue: false,
+                              title: "立即叠加",
+                              desc: "和现有套餐同时生效，额度相加",
+                            },
+                          ] as const
+                        ).map((opt) => (
+                          <button
+                            key={String(opt.queue)}
+                            type="button"
+                            className={`flex w-full items-start gap-2.5 rounded-lg border px-3 py-2 text-left transition ${
+                              queueAfterCurrent === opt.queue
+                                ? "border-primary bg-primary/5"
+                                : "border-border hover:bg-muted/40"
+                            }`}
+                            onClick={() => setQueueAfterCurrent(opt.queue)}
+                          >
+                            <span
+                              className={`mt-0.5 h-3 w-3 flex-none rounded-full border-2 ${
+                                queueAfterCurrent === opt.queue
+                                  ? "border-primary bg-primary"
+                                  : "border-muted-foreground/40"
+                              }`}
+                            />
+                            <span className="min-w-0">
+                              <span className="block text-xs font-semibold">
+                                {opt.title}
+                              </span>
+                              <span className="block text-[11px] leading-relaxed text-muted-foreground">
+                                {opt.desc}
+                              </span>
+                            </span>
+                          </button>
+                        ))}
                       </div>
                     )}
                     <button
@@ -1772,6 +1833,10 @@ requires_openai_auth = true`,
                           selectedTier,
                           period.key,
                           isCustom ? (customPrice ?? undefined) : undefined,
+                          // 没有生效套餐时无所谓排队，服务端会照常从现在起算。
+                          // 只看 isActive：plans 是新字段，服务端老版本不返回，
+                          // 拿它当条件会让续费悄悄变成并行叠加。
+                          isActive ? queueAfterCurrent : false,
                         )
                       }
                       className="mt-3.5 flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-2.5 font-semibold text-primary-foreground transition hover:brightness-105 disabled:opacity-60"
