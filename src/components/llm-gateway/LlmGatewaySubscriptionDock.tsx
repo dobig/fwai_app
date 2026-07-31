@@ -28,6 +28,7 @@ import type { Provider } from "@/types";
 import {
   clearGatewayLogin,
   createPlanOrder,
+  redeemPromoCode,
   fetchGatewaySubscription,
   fetchGatewayUsage,
   forgotPassword,
@@ -59,6 +60,7 @@ type Screen =
   | "auth"
   | "account"
   | "purchase"
+  | "redeem"
   | "verify-email"
   | "forgot-password";
 type AuthMode = "login" | "register";
@@ -385,6 +387,8 @@ export function LlmGatewaySubscriptionDock() {
   // 已有套餐时，新买的是排在后面（续费）还是立刻叠加。默认排队：想续命
   // 却买成并行的话，那份额度会跟着套餐一起到期作废，反过来只是晚点拿到。
   const [queueAfterCurrent, setQueueAfterCurrent] = useState(true);
+  const [redeemInput, setRedeemInput] = useState("");
+  const [redeemBusy, setRedeemBusy] = useState(false);
   // Custom tier: buyer-typed whole-dollar monthly price ($10–$199).
   const [customPriceInput, setCustomPriceInput] = useState("30");
   // Editable gateway base URL. Seeded from the persisted value (or the baked
@@ -1115,6 +1119,45 @@ requires_openai_auth = true`,
     setScreen("purchase");
   }
 
+  // 兑换码。服务端做归一化和全部校验，这里只负责把错误码翻成人话 ——
+  // 尤其是「不属于当前账号」：一个人可能有好几个账号，笼统说「无效」会让他
+  // 反复重试同一个正确的码。
+  async function handleRedeemPromo() {
+    const code = redeemInput.trim();
+    if (!code) {
+      toast.error("请输入兑换码");
+      return;
+    }
+    setRedeemBusy(true);
+    try {
+      await redeemPromoCode(code);
+      await onActivated();
+      setRedeemInput("");
+      setScreen("account");
+      toast.success("兑换成功，套餐已开通");
+    } catch (error) {
+      const messages: Record<string, string> = {
+        promo_code_not_found: "兑换码无效",
+        promo_code_not_yours: "此兑换码不属于当前账号",
+        promo_code_already_redeemed: "此兑换码已被使用",
+        promo_code_required: "请输入兑换码",
+        email_not_verified: "兑换前请先验证邮箱",
+      };
+      const code = gatewayErrorCode(error);
+      if (code === "email_not_verified") {
+        toast.info(messages[code]);
+        goToVerifyEmail();
+        return;
+      }
+      toast.error(
+        (code && messages[code]) ||
+          (error instanceof Error ? error.message : "兑换失败"),
+      );
+    } finally {
+      setRedeemBusy(false);
+    }
+  }
+
   async function handlePurchasePlan(
     planId: string,
     periodKey: string,
@@ -1213,23 +1256,27 @@ requires_openai_auth = true`,
         : "登录 llm_gateway"
       : screen === "purchase"
         ? "购买套餐"
-        : screen === "verify-email"
-          ? "验证邮箱"
-          : screen === "forgot-password"
-            ? "找回密码"
-            : "我的账号";
+        : screen === "redeem"
+          ? "使用兑换码"
+          : screen === "verify-email"
+            ? "验证邮箱"
+            : screen === "forgot-password"
+              ? "找回密码"
+              : "我的账号";
   const headSub =
     screen === "auth"
       ? "登录后即可在 Claude Code 中使用"
       : screen === "purchase"
         ? "微信扫码支付，支付成功即时开通"
-        : screen === "verify-email"
-          ? "验证后即可购买套餐"
-          : screen === "forgot-password"
-            ? "用注册邮箱收取验证码重设密码"
-            : forwarding
-              ? `转发中 · ${activeAppName} 正在走 llm_gateway`
-              : "已登录 · 开启转发后即可使用";
+        : screen === "redeem"
+          ? "输入兑换码即时开通，额度与现有套餐叠加"
+          : screen === "verify-email"
+            ? "验证后即可购买套餐"
+            : screen === "forgot-password"
+              ? "用注册邮箱收取验证码重设密码"
+              : forwarding
+                ? `转发中 · ${activeAppName} 正在走 llm_gateway`
+                : "已登录 · 开启转发后即可使用";
 
   const inputCls =
     "w-full rounded-lg border bg-muted/40 px-3 py-2 text-sm outline-none transition focus:border-primary focus:bg-background focus:ring-2 focus:ring-primary/20";
@@ -1578,6 +1625,19 @@ requires_openai_auth = true`,
               购买套餐
             </button>
 
+            {/* 兑换码入口。做成次要样式：绝大多数人没有码，它不该和购买抢
+                注意力，但有码的人得找得到。 */}
+            <button
+              className="mt-2 w-full rounded-lg py-2 text-xs text-muted-foreground transition hover:text-foreground disabled:opacity-60"
+              disabled={busy}
+              onClick={() => {
+                setRedeemInput("");
+                setScreen("redeem");
+              }}
+            >
+              使用兑换码
+            </button>
+
             {/* advanced */}
             <details className="mt-3.5 border-t border-border pt-1.5">
               <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1.5 text-xs text-muted-foreground [&::-webkit-details-marker]:hidden">
@@ -1610,6 +1670,46 @@ requires_openai_auth = true`,
               >
                 <LogOut className="h-3.5 w-3.5" />
                 登出
+              </button>
+            </div>
+          </ScreenView>
+        )}
+
+        {screen === "redeem" && (
+          <ScreenView key="redeem">
+            <button
+              className="mb-3 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground disabled:opacity-60"
+              disabled={redeemBusy}
+              onClick={() => setScreen("account")}
+            >
+              <ArrowLeft className="h-4 w-4" />
+              返回
+            </button>
+            <div className="space-y-3">
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                输入管理员发给你的兑换码。兑换后的套餐会和现有套餐叠加，额度相加。
+              </p>
+              <input
+                className="w-full rounded-lg border border-border bg-background px-3 py-2.5 text-center font-mono text-sm tracking-widest uppercase outline-none transition focus:border-primary"
+                placeholder="ABCDE-FGHJK"
+                autoFocus
+                spellCheck={false}
+                autoCapitalize="characters"
+                value={redeemInput}
+                onChange={(e) => setRedeemInput(e.target.value.toUpperCase())}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !redeemBusy) {
+                    void handleRedeemPromo();
+                  }
+                }}
+              />
+              <button
+                className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-2.5 font-semibold text-primary-foreground transition hover:brightness-105 disabled:opacity-60"
+                disabled={redeemBusy || !redeemInput.trim()}
+                onClick={() => void handleRedeemPromo()}
+              >
+                {redeemBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+                兑换
               </button>
             </div>
           </ScreenView>

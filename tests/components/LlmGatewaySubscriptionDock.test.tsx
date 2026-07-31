@@ -118,9 +118,13 @@ beforeEach(() => {
   vi.spyOn(providersApi, "startForwarding").mockResolvedValue(
     undefined as never,
   );
-  vi.spyOn(providersApi, "stopForwarding").mockResolvedValue(undefined as never);
+  vi.spyOn(providersApi, "stopForwarding").mockResolvedValue(
+    undefined as never,
+  );
   vi.spyOn(providersApi, "removeManaged").mockResolvedValue(true);
-  vi.spyOn(providersApi, "updateTrayMenu").mockResolvedValue(undefined as never);
+  vi.spyOn(providersApi, "updateTrayMenu").mockResolvedValue(
+    undefined as never,
+  );
 });
 
 describe("LlmGatewaySubscriptionDock 开启转发", () => {
@@ -473,20 +477,18 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
       serverSaysActive(),
     );
-    const createOrder = vi
-      .spyOn(gateway, "createPlanOrder")
-      .mockResolvedValue({
-        order_id: "pay_1",
-        code_url: "weixin://wxpay/bizpayurl?pr=test",
-        plan_id: "pro",
-        period: "1m",
-        duration_days: 30,
-        months: 1,
-        amount_credits: 100_000_000,
-        amount_cents: 72000,
-        exchange_rate: 7.2,
-        currency: "CNY",
-      } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
+    const createOrder = vi.spyOn(gateway, "createPlanOrder").mockResolvedValue({
+      order_id: "pay_1",
+      code_url: "weixin://wxpay/bizpayurl?pr=test",
+      plan_id: "pro",
+      period: "1m",
+      duration_days: 30,
+      months: 1,
+      amount_credits: 100_000_000,
+      amount_cents: 72000,
+      exchange_rate: 7.2,
+      currency: "CNY",
+    } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
 
     renderDock();
     await userEvent.click(await screen.findByText("购买套餐"));
@@ -520,20 +522,18 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
         email_verified: true,
       },
     });
-    const createOrder = vi
-      .spyOn(gateway, "createPlanOrder")
-      .mockResolvedValue({
-        order_id: "pay_1",
-        code_url: "weixin://wxpay/bizpayurl?pr=test",
-        plan_id: "pro",
-        period: "1m",
-        duration_days: 30,
-        months: 1,
-        amount_credits: 100_000_000,
-        amount_cents: 72000,
-        exchange_rate: 7.2,
-        currency: "CNY",
-      } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
+    const createOrder = vi.spyOn(gateway, "createPlanOrder").mockResolvedValue({
+      order_id: "pay_1",
+      code_url: "weixin://wxpay/bizpayurl?pr=test",
+      plan_id: "pro",
+      period: "1m",
+      duration_days: 30,
+      months: 1,
+      amount_credits: 100_000_000,
+      amount_cents: 72000,
+      exchange_rate: 7.2,
+      currency: "CNY",
+    } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
 
     renderDock();
     await userEvent.click(await screen.findByText("购买套餐"));
@@ -544,5 +544,67 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     await userEvent.click(await screen.findByText(/^微信支付/));
     await waitFor(() => expect(createOrder).toHaveBeenCalled());
     expect(createOrder.mock.calls[0][3]).toBe(false);
+  });
+});
+
+// 兑换码是发给特定用户的，只能用一次。这些 case 盯两件事：兑换成功后要
+// 立刻反映到账户页，以及三种失败必须给出各自的原因 —— 尤其「不属于当前
+// 账号」，笼统说「无效」会让有多个账号的人反复重试同一个正确的码。
+describe("LlmGatewaySubscriptionDock 兑换码", () => {
+  async function openRedeemScreen() {
+    renderDock();
+    await userEvent.click(await screen.findByText("使用兑换码"));
+    return screen.findByPlaceholderText("ABCDE-FGHJK");
+  }
+
+  it("兑换成功后刷新订阅并回到账户页", async () => {
+    seedActivePlan();
+    const redeem = vi.spyOn(gateway, "redeemPromoCode").mockResolvedValue({
+      subscription: { active: true, tier: "pro" },
+    });
+    const refresh = vi
+      .spyOn(gateway, "fetchGatewaySubscription")
+      .mockResolvedValue(serverSaysActive());
+
+    const input = await openRedeemScreen();
+    await userEvent.type(input, "ABCDE-FGHJK");
+    await userEvent.click(screen.getByRole("button", { name: "兑换" }));
+
+    await waitFor(() => expect(redeem).toHaveBeenCalledWith("ABCDE-FGHJK"));
+    // 兑换出来的套餐必须立刻可见，否则用户以为没生效又去点一次。
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(toasts.success).toHaveBeenCalledWith("兑换成功，套餐已开通"),
+    );
+  });
+
+  it("输入自动转大写，用户不必自己切键盘", async () => {
+    seedActivePlan();
+    const input = (await openRedeemScreen()) as HTMLInputElement;
+    await userEvent.type(input, "abcde-fghjk");
+    expect(input.value).toBe("ABCDE-FGHJK");
+  });
+
+  it.each([
+    ["promo_code_not_found", "兑换码无效"],
+    ["promo_code_not_yours", "此兑换码不属于当前账号"],
+    ["promo_code_already_redeemed", "此兑换码已被使用"],
+  ])("错误码 %s 给出对应提示", async (code, message) => {
+    seedActivePlan();
+    vi.spyOn(gateway, "redeemPromoCode").mockRejectedValue(
+      new GatewayApiError(code === "promo_code_not_found" ? 404 : 403, code),
+    );
+
+    const input = await openRedeemScreen();
+    await userEvent.type(input, "ABCDE-FGHJK");
+    await userEvent.click(screen.getByRole("button", { name: "兑换" }));
+
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith(message));
+  });
+
+  it("空输入时兑换按钮不可点", async () => {
+    seedActivePlan();
+    await openRedeemScreen();
+    expect(screen.getByRole("button", { name: "兑换" })).toBeDisabled();
   });
 });
