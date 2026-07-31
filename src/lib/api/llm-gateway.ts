@@ -415,6 +415,19 @@ export async function createPlanOrder(
 // it so a caller can also refresh `email_verified`, which may have changed on
 // another device or through a password reset — the cached login copy would
 // otherwise stay stale until the next sign-in.
+// redeemPromoCode 兑换管理员发的兑换码。码是发给特定用户的，只有本人能用，
+// 且只能用一次。兑换出来的套餐和已有套餐叠加，不会顶掉已经买的东西。
+// 服务端做归一化（大小写、中划线、空格），所以这里原样传用户输入的内容。
+export async function redeemPromoCode(
+  code: string,
+): Promise<{ subscription: GatewaySubscriptionStatus }> {
+  return await gatewayRequest<{ subscription: GatewaySubscriptionStatus }>(
+    "/v1/promo-codes/redeem",
+    { method: "POST", body: JSON.stringify({ code }) },
+    true,
+  );
+}
+
 export async function fetchGatewaySubscription(): Promise<{
   subscription: GatewaySubscriptionStatus;
   user?: GatewayUserProfile;
