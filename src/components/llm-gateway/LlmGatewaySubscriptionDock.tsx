@@ -107,7 +107,9 @@ interface SubscriptionRead {
 
 interface PendingOrder {
   orderId: string;
-  codeURL: string;
+  // 零元单（抵扣额 ≥ 新套餐价）没有二维码：服务端不下微信单。渲染前必须判空，
+  // 否则会画出一个扫不出东西的空码。完整的无二维码路径见 #12。
+  codeURL?: string;
   planId: string;
   period: string;
   totalUSD: number;
@@ -1746,9 +1748,11 @@ requires_openai_auth = true`,
                       : "立即生效，与现有套餐额度相加"}
                   </div>
                 )}
-                <div className="rounded-xl border border-border bg-white p-3 shadow-md">
-                  <QRCodeSVG value={pending.codeURL} size={168} />
-                </div>
+                {pending.codeURL && (
+                  <div className="rounded-xl border border-border bg-white p-3 shadow-md">
+                    <QRCodeSVG value={pending.codeURL} size={168} />
+                  </div>
+                )}
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   等待支付…支付成功后自动开通

@@ -20,8 +20,12 @@ export interface GatewayAccountProfile {
   id: string;
 }
 
+// 一个 grant 的角色。subscription 是订阅层（同时只有一张生效，可换档），
+// extra 是临时加量包（叠加，自然到期，不参与换档判定）。
+export type GatewayPlanRole = "subscription" | "extra";
+
 // 一个独立计量的套餐。套餐可叠加，用户同时可以持有多个。
-// pending 为 true 表示这个套餐买的时候选了「到期后生效」，现在还没开始。
+// pending 为 true 表示这个套餐还没开始生效（排队中）。
 export interface GatewaySubscriptionPlan {
   grant_id: string;
   tier: string;
@@ -30,6 +34,16 @@ export interface GatewaySubscriptionPlan {
   valid_from: string;
   valid_until: string;
   pending?: boolean;
+  // 老服务端不返回这个字段 —— 和 plans 本身可选是同一个先例。
+  // 读取一律走 planRole()，别直接读这里。
+  role?: GatewayPlanRole;
+}
+
+// 缺失的 role 按 subscription 处理：老服务端下所有套餐都落在「我的套餐」块里，
+// 退化成加换档之前的行为。写成函数而不是散落各处的 `?? "subscription"`，
+// 是因为这个默认值一旦有一处写反，加量包就会被当成订阅层显示。
+export function planRole(plan: GatewaySubscriptionPlan): GatewayPlanRole {
+  return plan.role === "extra" ? "extra" : "subscription";
 }
 
 export interface GatewaySubscriptionStatus {
@@ -361,49 +375,113 @@ export async function getPaymentOrder(
   );
 }
 
-// createPlanOrder opens a real WeChat Native order for a plan bought for one
-// `period` (see PERIODS). The gateway computes the price authoritatively (full
-// share of the monthly price as credit, discounted charge) and, on the verified
-// paid callback, grants the period's days. For the "custom" plan, priceUSD is
-// the buyer-chosen whole-dollar MONTHLY price (server-validated to $10–$199 and
-// below the top tier) regardless of the period bought; it is ignored for
-// catalog plans.
+// --- 套餐换档 ---------------------------------------------------------------
+
+// 服务端算出来的一次换档结果。四种 action 的语义：
+//   upgrade_now  低档 → 高档，立即生效，旧档剩余价值按天折成金额抵扣
+//   queue        同档（续费）或高档 → 低档，排到当前订阅到期后生效，不可取消
+//   activate_now 当前没有生效的订阅层，直接开通
+//   extra        加量包，立即生效并与当前套餐额度叠加
 //
-// startAfterCurrent 决定这一单和已有套餐的关系：默认（false）立刻叠加，
-// 额度相加；true 则排到当前套餐到期后再生效。纯续费该用 true —— 并行跑
-// 的话那份额度用不完就白费了。
+// 客户端不复算其中任何一个数字。抵扣额取决于旧档「实付」金额、已用天数和
+// 服务端的向上取整规则，本地算必然对不上，而一旦对不上，用户看到的价格和
+// 实际扣款就会不同。
+export interface GatewayPlanQuote {
+  action: "upgrade_now" | "queue" | "activate_now" | "extra";
+  credit_applied_micros: number; // 旧档剩余价值抵扣了多少
+  amount_due_micros: number; // 实际要付多少（可能为 0）
+  amount_cents: number; // 微信收款金额（分）
+  new_valid_until: string; // 换档后的到期日
+  resulting_balance_micros: number; // 换档后账户余额
+  current_tier: string;
+  target_tier: string;
+}
+
+// fetchPlanQuote 问服务端「现在下这一单会发生什么」。**纯只读** —— 不建订单、
+// 不动 grant、不改余额，所以用户还在犹豫时可以随便调。
+//
+// 老服务端没有这个端点，会 404。这里**不** catch 成 null：调用方必须能分辨
+// 「服务端没这个能力」（隐藏换档 UI，退回老流程）和「网络挂了」（提示重试），
+// 两者的正确处理完全相反。GatewayApiError 已经带 status 和 code，直接抛。
+export async function fetchPlanQuote(
+  planId: string,
+  period = "1m",
+  priceUSD?: number,
+  asExtra = false,
+): Promise<GatewayPlanQuote> {
+  const body: { period: string; price_usd?: number; as_extra?: boolean } = {
+    period,
+  };
+  if (priceUSD !== undefined) {
+    body.price_usd = priceUSD;
+  }
+  if (asExtra) {
+    body.as_extra = true;
+  }
+  return await gatewayRequest<GatewayPlanQuote>(
+    `/v1/plans/${encodeURIComponent(planId)}/quote`,
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+  );
+}
+
+// isPlanQuoteUnsupported 判断一次 fetchPlanQuote 的失败是不是「服务端没有换档
+// 能力」。只认 404 —— 别的失败（401、网络中断）是暂时性的，把它们也当成
+// 「不支持」会让换档 UI 因为一次网络抖动就消失。
+export function isPlanQuoteUnsupported(error: unknown): boolean {
+  return error instanceof GatewayApiError && error.status === 404;
+}
+
+// 下单响应。code_url 可选：抵扣额 ≥ 新套餐价时 amount_due_micros 为 0，
+// 微信最小收款是 1 分，服务端不会下单，响应里就没有二维码。**分流一律看
+// code_url 在不在**，不要看 order_id —— 服务端对零元单是否建 payment_orders
+// 记录还没定，两种实现都要能工作。
+export interface GatewayPlanOrder extends Omit<GatewayNativeOrder, "code_url"> {
+  code_url?: string;
+  plan_id: string;
+  period: string;
+  duration_days: number;
+  months: number;
+  // 服务端最终执行的动作，语义同 GatewayPlanQuote.action。老服务端不返回。
+  action?: GatewayPlanQuote["action"];
+  credit_applied_micros?: number;
+  amount_due_micros?: number;
+  new_valid_until?: string;
+  resulting_balance_micros?: number;
+}
+
+// createPlanOrder opens a WeChat Native order for a plan bought for one
+// `period` (see PERIODS). The gateway computes the price authoritatively and,
+// on the verified paid callback, grants the period's days. For the "custom"
+// plan, priceUSD is the buyer-chosen whole-dollar MONTHLY price
+// (server-validated to $10–$199 and below the top tier) regardless of the
+// period bought; it is ignored for catalog plans.
+//
+// asExtra 决定这一单动的是哪一层：false（默认）是订阅层，服务端按档位高低
+// 自己判定立即换档还是排队；true 是加量包，永远立即生效并叠加。
+//
+// @param startAfterCurrent @deprecated 服务端现在自己判定续费该排队，这个参数
+// 不再发送给服务端。位置留着不动是有意的 —— 把 asExtra 挪到第 4 位的话，还在
+// 传 startAfterCurrent 的调用点会照常通过类型检查，但那个 true 会被当成
+// 「买加量包」发出去，用户付了钱买到的不是他要的东西。宁可留一个死参数。
 export async function createPlanOrder(
   planId: string,
   period = "1m",
   priceUSD?: number,
-  startAfterCurrent = false,
-): Promise<
-  GatewayNativeOrder & {
-    plan_id: string;
-    period: string;
-    duration_days: number;
-    months: number;
-  }
-> {
-  const body: {
-    period: string;
-    price_usd?: number;
-    start_after_current?: boolean;
-  } = { period };
+  startAfterCurrent?: boolean,
+  asExtra = false,
+): Promise<GatewayPlanOrder> {
+  void startAfterCurrent;
+  const body: { period: string; price_usd?: number; as_extra?: boolean } = {
+    period,
+  };
   if (priceUSD !== undefined) {
     body.price_usd = priceUSD;
   }
-  if (startAfterCurrent) {
-    body.start_after_current = true;
+  if (asExtra) {
+    body.as_extra = true;
   }
-  return await gatewayRequest<
-    GatewayNativeOrder & {
-      plan_id: string;
-      period: string;
-      duration_days: number;
-      months: number;
-    }
-  >(
+  return await gatewayRequest<GatewayPlanOrder>(
     `/v1/plans/${encodeURIComponent(planId)}/orders`,
     { method: "POST", body: JSON.stringify(body) },
     true,
