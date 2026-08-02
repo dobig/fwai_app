@@ -126,8 +126,35 @@ interface PendingOrder {
   // Monthly price for the custom plan (label + retry context); catalog plans
   // derive it from TIERS.
   priceUSD?: number;
-  // 这一单是排在现有套餐之后（true）还是立刻叠加。只用于二维码页的文案。
-  startAfterCurrent?: boolean;
+  // 这一单动的是加量包还是订阅层。只用于二维码页的文案 —— 排队与否由服务端
+  // 判定并通过 quote 的 action 表达，客户端不再自己选。
+  asExtra?: boolean;
+}
+
+// 购买意图。订阅层走换档判定（服务端按档位高低决定立即生效还是排队），
+// 加量包永远立即生效并叠加。两者在服务端靠 as_extra 区分，所以客户端必须
+// 让用户先表达意图 —— 同一个「买套餐」动作在新模型下有两种完全不同的含义。
+type PurchaseIntent = "subscription" | "extra";
+
+// 加量包是独立 SKU：1 单位 = 月费 $20（5h $20 / 周 $100），N 单位线性放大，
+// 无折扣。服务端的报价/下单入参里没有「单位数」这个字段，只有 price_usd，
+// 所以 N 通过月价表达：price_usd = 20 × N，plan id 走 custom（那条路径的
+// 语义就是「买家自报月价」）。
+//
+// **这一处是按契约盲写的**：llm_gateway#189 定义了加量包的定价公式，但没有
+// 写明 as_extra=true 时 plan id 和 price_usd 该怎么填，也没说 custom 档
+// $10–$199 的价格上下界在加量包上是否仍然生效（issue 只说了「custom-only
+// 的**周期**限制不作用于加量包」）。若服务端确实沿用那个上界，N ≥ 10 会被
+// 拒；那条错误会照常显示给用户，不会静默买错东西。见 dobig/fwai_app#10 的
+// 评论。
+const EXTRA_PLAN_ID = CUSTOM_TIER_ID;
+const EXTRA_UNIT_USD = 20;
+const EXTRA_MAX_UNITS = 99;
+
+function parseExtraUnits(raw: string): number | null {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > EXTRA_MAX_UNITS) return null;
+  return n;
 }
 
 // Purchasable periods, mirroring the server's planPeriods table (the server
@@ -340,9 +367,11 @@ export function LlmGatewaySubscriptionDock() {
   // Two-step purchase: pick a tier, then pick the period before the QR.
   const [selectedTier, setSelectedTier] = useState<string | null>(null);
   const [selectedPeriod, setSelectedPeriod] = useState(DEFAULT_PERIOD);
-  // 已有套餐时，新买的是排在后面（续费）还是立刻叠加。默认排队：想续命
-  // 却买成并行的话，那份额度会跟着套餐一起到期作废，反过来只是晚点拿到。
-  const [queueAfterCurrent, setQueueAfterCurrent] = useState(true);
+  // 换档/续费还是补额度。默认订阅层 —— 大多数人要的是换档或续费，
+  // 而买错方向的代价不对称：想换档买成加量包的话，旧档照常计费到期。
+  const [intent, setIntent] = useState<PurchaseIntent>("subscription");
+  // 加量包买几个单位。
+  const [extraUnitsInput, setExtraUnitsInput] = useState("1");
   const [redeemInput, setRedeemInput] = useState("");
   const [redeemBusy, setRedeemBusy] = useState(false);
   // Custom tier: buyer-typed whole-dollar monthly price ($10–$199).
@@ -1059,7 +1088,10 @@ requires_openai_auth = true`,
   // 这一次刷新同时把 emailVerified 也校准了，所以放在验证拦截之前。
   // `known` 是调用方刚读到的订阅（读失败则为 null），传进来就不再重复请求；
   // 省略则在这里读一次。
-  async function goToPurchase(known?: SubscriptionRead | null) {
+  async function goToPurchase(
+    known?: SubscriptionRead | null,
+    nextIntent: PurchaseIntent = "subscription",
+  ) {
     let read = known;
     if (read === undefined && login) {
       setBusy(true);
@@ -1080,6 +1112,10 @@ requires_openai_auth = true`,
       return;
     }
     setSelectedTier(null);
+    setSelectedPeriod(DEFAULT_PERIOD);
+    // 意图不粘住上一次的选择：加量包是少数意图，下一次来换档的人不看提示
+    // 就点下去会买错东西。只有从「再买一个加量包」进来时才预置成 extra。
+    setIntent(nextIntent);
     setScreen("purchase");
   }
 
@@ -1126,7 +1162,7 @@ requires_openai_auth = true`,
     planId: string,
     periodKey: string,
     priceUSD?: number,
-    startAfterCurrent = false,
+    asExtra = false,
   ) {
     if (!login) {
       toast.error("请先登录");
@@ -1139,6 +1175,8 @@ requires_openai_auth = true`,
     }
     const tier = TIERS.find((t) => t.id === planId);
     const monthlyUSD = isCustom ? (priceUSD ?? 0) : (tier?.priceUSD ?? 0);
+    // 仅用于二维码页的行内说明。**付款金额一律取服务端返回的 amount_cents**，
+    // 这个本地值不参与任何付款判断（见 #13）。
     const totalUSD = planTotalUSD(monthlyUSD, findPeriod(periodKey));
     setBusy(true);
     try {
@@ -1150,7 +1188,8 @@ requires_openai_auth = true`,
         planId,
         periodKey,
         isCustom ? priceUSD : undefined,
-        startAfterCurrent,
+        undefined,
+        asExtra,
       );
       setPending({
         orderId: order.order_id,
@@ -1159,7 +1198,7 @@ requires_openai_auth = true`,
         period: periodKey,
         totalUSD,
         priceUSD: isCustom ? priceUSD : undefined,
-        startAfterCurrent,
+        asExtra,
       });
     } catch (error) {
       // The server is the real gate — goToPurchase only intercepts early, and a
@@ -1471,6 +1510,13 @@ requires_openai_auth = true`,
               <PlanSections
                 subscription={subscription}
                 canBuyExtra={hasActiveSubscriptionTier}
+                onSwitchPlan={() =>
+                  void goToPurchase(undefined, "subscription")
+                }
+                onBuyExtra={() => {
+                  setExtraUnitsInput("1");
+                  void goToPurchase(undefined, "extra");
+                }}
               />
             )}
 
@@ -1651,9 +1697,15 @@ requires_openai_auth = true`,
             <button
               className="mb-3 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground disabled:opacity-60"
               disabled={Boolean(pending)}
-              onClick={() =>
-                selectedTier ? setSelectedTier(null) : setScreen("account")
-              }
+              onClick={() => {
+                // 加量包那条路径没有档位选择这一层，直接退回账号屏；
+                // 订阅层则先退回档位列表。
+                if (intent === "extra" || !selectedTier) {
+                  setScreen("account");
+                  return;
+                }
+                setSelectedTier(null);
+              }}
             >
               <ArrowLeft className="h-4 w-4" />
               返回
@@ -1663,18 +1715,18 @@ requires_openai_auth = true`,
               <div className="flex flex-col items-center gap-3 py-1 text-center">
                 <h4 className="text-[15px] font-semibold">微信扫码支付</h4>
                 <div className="text-xs text-muted-foreground">
-                  {pending.priceUSD !== undefined
-                    ? `自选 $${pending.priceUSD}`
-                    : planLabel(pending.planId)}{" "}
-                  套餐 · {findPeriod(pending.period).label} · $
-                  {pending.totalUSD}
+                  {pending.asExtra
+                    ? `加量包 ${Math.round((pending.priceUSD ?? 0) / EXTRA_UNIT_USD)} 单位`
+                    : pending.priceUSD !== undefined
+                      ? `自选 $${pending.priceUSD}`
+                      : `${planLabel(pending.planId)} 套餐`}{" "}
+                  · {findPeriod(pending.period).label} · ${pending.totalUSD}
                 </div>
-                {/* 付款前再说一次生效方式：这是付完就改不了的选择。 */}
-                {pending.startAfterCurrent !== undefined && isActive && (
+                {/* 付款前再说一次这一单动的是哪一层。排队与否不在这里说 ——
+                    那由服务端判定并通过 quote 的 action 表达（见 #11）。 */}
+                {pending.asExtra && (
                   <div className="-mt-1.5 text-[11px] text-muted-foreground">
-                    {pending.startAfterCurrent
-                      ? "现有套餐到期后生效"
-                      : "立即生效，与现有套餐额度相加"}
+                    立即生效，与当前套餐额度叠加
                   </div>
                 )}
                 {pending.codeURL && (
@@ -1693,7 +1745,7 @@ requires_openai_auth = true`,
                   取消
                 </button>
               </div>
-            ) : selectedTier ? (
+            ) : intent === "subscription" && selectedTier ? (
               (() => {
                 const isCustom = selectedTier === CUSTOM_TIER_ID;
                 const tier = TIERS.find((t) => t.id === selectedTier);
@@ -1809,55 +1861,6 @@ requires_openai_auth = true`,
                         );
                       })}
                     </div>
-                    {/* 已有套餐时，这一单是叠加还是排队，用户自己选。
-                        默认排队（续费），因为这是更常见的意图，而且选错的
-                        代价不对称：想续命却买成叠加，那份额度会随着套餐到期
-                        一起作废；反过来只是晚一点拿到额度。 */}
-                    {isActive && (
-                      <div className="mt-3 space-y-1.5">
-                        {(
-                          [
-                            {
-                              queue: true,
-                              title: "到期后生效",
-                              desc: `接在现有套餐之后，订阅延长 ${period.label}`,
-                            },
-                            {
-                              queue: false,
-                              title: "立即叠加",
-                              desc: "和现有套餐同时生效，额度相加",
-                            },
-                          ] as const
-                        ).map((opt) => (
-                          <button
-                            key={String(opt.queue)}
-                            type="button"
-                            className={`flex w-full items-start gap-2.5 rounded-lg border px-3 py-2 text-left transition ${
-                              queueAfterCurrent === opt.queue
-                                ? "border-primary bg-primary/5"
-                                : "border-border hover:bg-muted/40"
-                            }`}
-                            onClick={() => setQueueAfterCurrent(opt.queue)}
-                          >
-                            <span
-                              className={`mt-0.5 h-3 w-3 flex-none rounded-full border-2 ${
-                                queueAfterCurrent === opt.queue
-                                  ? "border-primary bg-primary"
-                                  : "border-muted-foreground/40"
-                              }`}
-                            />
-                            <span className="min-w-0">
-                              <span className="block text-xs font-semibold">
-                                {opt.title}
-                              </span>
-                              <span className="block text-[11px] leading-relaxed text-muted-foreground">
-                                {opt.desc}
-                              </span>
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
                     <button
                       type="button"
                       disabled={purchaseDisabled}
@@ -1866,10 +1869,7 @@ requires_openai_auth = true`,
                           selectedTier,
                           period.key,
                           isCustom ? (customPrice ?? undefined) : undefined,
-                          // 没有生效套餐时无所谓排队，服务端会照常从现在起算。
-                          // 只看 isActive：plans 是新字段，服务端老版本不返回，
-                          // 拿它当条件会让续费悄悄变成并行叠加。
-                          isActive ? queueAfterCurrent : false,
+                          false,
                         )
                       }
                       className="mt-3.5 flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-2.5 font-semibold text-primary-foreground transition hover:brightness-105 disabled:opacity-60"
@@ -1880,8 +1880,134 @@ requires_openai_auth = true`,
                   </>
                 );
               })()
+            ) : intent === "extra" ? (
+              // 加量包路径：两个输入（买几个单位、买多久），**没有档位卡片、
+              // 没有折扣角标** —— 加量包无折扣，把订阅那边的角标搬过来会让
+              // 用户以为 12 个月的加量包也打 9 折。
+              (() => {
+                const units = parseExtraUnits(extraUnitsInput);
+                const monthlyUSD = (units ?? 0) * EXTRA_UNIT_USD;
+                const period = findPeriod(selectedPeriod);
+                return (
+                  <>
+                    <div className="mb-2 text-xs font-medium text-muted-foreground">
+                      购买加量包 · 立即生效，与当前套餐额度叠加
+                    </div>
+                    <div className="mb-2.5 rounded-xl border-[1.5px] border-border px-3 py-2.5">
+                      <label className="flex items-center justify-between gap-2 text-sm">
+                        <span className="text-muted-foreground">
+                          单位数（1 单位 = ${EXTRA_UNIT_USD}/月）
+                        </span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={EXTRA_MAX_UNITS}
+                          step={1}
+                          value={extraUnitsInput}
+                          onChange={(e) => setExtraUnitsInput(e.target.value)}
+                          className="w-16 rounded-md border border-border bg-background px-2 py-1 text-right text-sm font-semibold outline-none focus:border-primary"
+                        />
+                      </label>
+                      <div className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                        额度按单位线性叠加：5 小时 ${monthlyUSD || "—"} · 每周 $
+                        {monthlyUSD ? monthlyUSD * 5 : "—"}
+                      </div>
+                      {units === null && (
+                        <div className="mt-1 text-[11px] font-medium text-red-500">
+                          请输入 1–{EXTRA_MAX_UNITS} 的整数
+                        </div>
+                      )}
+                    </div>
+                    <div className="mb-1 text-xs font-medium text-muted-foreground">
+                      购买时长
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      {/* 周期全部开放：custom-only 的限制只作用于订阅层。 */}
+                      {PERIODS.map((p) => (
+                        <button
+                          key={p.key}
+                          type="button"
+                          onClick={() => setSelectedPeriod(p.key)}
+                          className={`flex items-center justify-between rounded-xl border-[1.5px] px-3 py-2.5 text-left transition ${
+                            p.key === period.key
+                              ? "border-primary bg-primary/5"
+                              : "border-border hover:border-primary/60"
+                          }`}
+                        >
+                          <span className="text-sm font-semibold">
+                            {p.label}
+                          </span>
+                          <span className="text-[11px] text-muted-foreground">
+                            {p.days} 天
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={busy || units === null}
+                      onClick={() =>
+                        handlePurchasePlan(
+                          EXTRA_PLAN_ID,
+                          period.key,
+                          monthlyUSD,
+                          true,
+                        )
+                      }
+                      className="mt-3.5 flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-2.5 font-semibold text-primary-foreground transition hover:brightness-105 disabled:opacity-60"
+                    >
+                      {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+                      下一步
+                    </button>
+                  </>
+                );
+              })()
             ) : (
               <>
+                {/* 意图分支。同一个「买套餐」动作在新模型下有两种完全不同的
+                    含义，服务端靠 as_extra 区分，所以用户必须先表达意图。
+                    没有生效订阅时不问 —— 多余的选择题只会让首购用户困惑，
+                    而且加量包本来也买不了。 */}
+                {hasActiveSubscriptionTier && (
+                  <div className="mb-3 grid grid-cols-2 gap-2">
+                    {(
+                      [
+                        {
+                          key: "subscription" as const,
+                          title: "更换 / 续费套餐",
+                          desc: "升档立即生效，同档或降档到期后生效",
+                        },
+                        {
+                          key: "extra" as const,
+                          title: "购买加量包",
+                          desc: "立即生效，额度叠加，不影响当前套餐",
+                        },
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        className={`rounded-xl border-[1.5px] px-2.5 py-2 text-left transition ${
+                          intent === opt.key
+                            ? "border-primary bg-primary/5"
+                            : "border-border hover:border-primary/60"
+                        }`}
+                        onClick={() => {
+                          setIntent(opt.key);
+                          setSelectedTier(null);
+                          setSelectedPeriod(DEFAULT_PERIOD);
+                        }}
+                      >
+                        <span className="block text-xs font-semibold">
+                          {opt.title}
+                        </span>
+                        <span className="block text-[10px] leading-relaxed text-muted-foreground">
+                          {opt.desc}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <div className="mb-2 text-xs font-medium text-muted-foreground">
                   选择套餐 · 微信支付
                 </div>

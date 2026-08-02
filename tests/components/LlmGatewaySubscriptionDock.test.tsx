@@ -393,7 +393,7 @@ describe("LlmGatewaySubscriptionDock 登出", () => {
 
 // 套餐可以叠加，一个用户同时可能有好几个在跑，还可能有一个排队等生效。
 // 这些 case 盯的是两件用户会付错钱的事：账户页要看得出手里有几个套餐，
-// 下单时「叠加还是排队」的选择必须真的传到服务端。
+// 下单时「换档还是买加量包」的意图必须真的传到服务端。
 describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
   /** 已登录，服务端说手里有两个生效套餐 + 一个待生效。 */
   function seedStackedPlans() {
@@ -448,7 +448,7 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     expect(screen.getByText(/到期后自动切换到 \$100/)).toBeTruthy();
   });
 
-  it("默认排队续费，选「立即叠加」才并行生效", async () => {
+  it("换档路径下单不带 as_extra", async () => {
     seedStackedPlans();
     vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
       serverSaysActive(),
@@ -468,25 +468,18 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
 
     renderDock();
     await userEvent.click(await screen.findByText("购买套餐"));
+    // 有生效套餐时先问意图，默认停在「更换 / 续费套餐」——粘住上一次选的
+    // 加量包会让来换档的人不看提示就买错东西。
+    expect(await screen.findByText("更换 / 续费套餐")).toBeTruthy();
     await userEvent.click(await screen.findByText("$100"));
-
-    // 默认是「到期后生效」——选错方向的代价不对称：想续命买成并行的话，
-    // 那份额度会跟着套餐一起作废。
     await userEvent.click(await screen.findByText(/^微信支付/));
-    await waitFor(() => expect(createOrder).toHaveBeenCalled());
-    expect(createOrder.mock.calls[0][3]).toBe(true);
 
-    // 改选叠加后必须真的把 false 传下去，否则用户买到的不是他选的东西。
-    // 下单后停在二维码页，得先取消才能回到选项。
-    createOrder.mockClear();
-    await userEvent.click(await screen.findByText("取消"));
-    await userEvent.click(await screen.findByText("立即叠加"));
-    await userEvent.click(screen.getByText(/^微信支付/));
     await waitFor(() => expect(createOrder).toHaveBeenCalled());
-    expect(createOrder.mock.calls[0][3]).toBe(false);
+    // 排队与否不再由客户端选，服务端按档位高低判定（quote 的 action）。
+    expect(createOrder.mock.calls[0][4]).toBe(false);
   });
 
-  it("没有生效套餐时不问排队，直接从现在起算", async () => {
+  it("没有生效套餐时不问意图，直接进档位列表", async () => {
     seedLoggedOutOfPlan();
     vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue({
       subscription: { active: false },
@@ -513,13 +506,71 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
 
     renderDock();
     await userEvent.click(await screen.findByText("购买套餐"));
-    await userEvent.click(await screen.findByText("$100"));
 
-    // 无套餐时没有这个选项可选。
-    expect(screen.queryByText("立即叠加")).toBeNull();
+    // 首购用户买不了加量包，多问一道选择题只会让人困惑。
+    expect(await screen.findByText("选择套餐 · 微信支付")).toBeTruthy();
+    expect(screen.queryByText("购买加量包")).toBeNull();
+    await userEvent.click(await screen.findByText("$100"));
     await userEvent.click(await screen.findByText(/^微信支付/));
     await waitFor(() => expect(createOrder).toHaveBeenCalled());
-    expect(createOrder.mock.calls[0][3]).toBe(false);
+    expect(createOrder.mock.calls[0][4]).toBe(false);
+  });
+
+  it("选加量包意图后按单位数 + 周期下单，带上 as_extra", async () => {
+    seedStackedPlans();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    const createOrder = vi.spyOn(gateway, "createPlanOrder").mockResolvedValue({
+      order_id: "pay_2",
+      code_url: "weixin://wxpay/bizpayurl?pr=extra",
+      plan_id: "custom",
+      period: "1m",
+      duration_days: 30,
+      months: 1,
+      amount_credits: 40_000_000,
+      amount_cents: 28800,
+      exchange_rate: 7.2,
+      currency: "CNY",
+    } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
+
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("购买加量包"));
+
+    // 加量包没有档位卡片，只有两个输入：买几个单位、买多久。
+    expect(screen.queryByText("选择套餐 · 微信支付")).toBeNull();
+    const units = await screen.findByRole("spinbutton");
+    await userEvent.clear(units);
+    await userEvent.type(units, "2");
+    await userEvent.click(await screen.findByText(/^下一步/));
+
+    await waitFor(() => expect(createOrder).toHaveBeenCalled());
+    const [planId, period, priceUSD, , asExtra] = createOrder.mock.calls[0];
+    expect(planId).toBe("custom");
+    expect(period).toBe("1m");
+    expect(priceUSD).toBe(40);
+    // 漏掉 as_extra 的话服务端会把这一单当成换档，直接顶掉现有套餐。
+    expect(asExtra).toBe(true);
+  });
+
+  it("单位数非法时不让下单", async () => {
+    seedStackedPlans();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    const createOrder = vi.spyOn(gateway, "createPlanOrder");
+
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("购买加量包"));
+    const units = await screen.findByRole("spinbutton");
+    await userEvent.clear(units);
+    await userEvent.type(units, "0");
+
+    expect(await screen.findByText(/请输入 1–99 的整数/)).toBeTruthy();
+    await userEvent.click(screen.getByText(/^下一步/));
+    expect(createOrder).not.toHaveBeenCalled();
   });
 });
 
