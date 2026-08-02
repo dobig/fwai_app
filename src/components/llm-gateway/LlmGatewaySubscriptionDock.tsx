@@ -28,6 +28,8 @@ import type { Provider } from "@/types";
 import {
   clearGatewayLogin,
   createPlanOrder,
+  fetchPlanQuote,
+  isPlanQuoteUnsupported,
   redeemPromoCode,
   fetchGatewaySubscription,
   fetchGatewayUsage,
@@ -51,17 +53,21 @@ import {
   setGatewayBaseURL,
   verifyEmail,
   type GatewayLoginResult,
+  type GatewayPlanQuote,
   type GatewaySubscriptionStatus,
   type GatewayUsage,
   type GatewayUsageWindow,
   type GatewayUserProfile,
 } from "@/lib/api/llm-gateway";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { PlanCheckout } from "./PlanCheckout";
 import { PlanSections } from "./PlanSections";
 import {
   CUSTOM_MAX_USD,
   CUSTOM_MIN_USD,
   CUSTOM_TIER_ID,
   TIERS,
+  formatPlanDate,
   parseCustomPrice,
   planLabel,
 } from "./planCatalog";
@@ -150,6 +156,16 @@ type PurchaseIntent = "subscription" | "extra";
 const EXTRA_PLAN_ID = CUSTOM_TIER_ID;
 const EXTRA_UNIT_USD = 20;
 const EXTRA_MAX_UNITS = 99;
+
+// 已确定要买什么，等着结账页确认的那一单。quote 和下单参数绑在一起存，
+// 免得用户在结账页停留时改了别处的选择、付款用的却是另一份报价。
+interface CheckoutDraft {
+  planId: string;
+  period: string;
+  priceUSD?: number;
+  asExtra: boolean;
+  quote: GatewayPlanQuote;
+}
 
 function parseExtraUnits(raw: string): number | null {
   const n = Number(raw);
@@ -372,6 +388,13 @@ export function LlmGatewaySubscriptionDock() {
   const [intent, setIntent] = useState<PurchaseIntent>("subscription");
   // 加量包买几个单位。
   const [extraUnitsInput, setExtraUnitsInput] = useState("1");
+  // 结账页。选完档位和周期后拉一次 quote，把抵扣额/新到期日/剩余余额/实付
+  // 四个数字摆给用户看，再让他付款。**只在点「下一步」时拉** —— 每改一次
+  // 选项就拉一次会让网络慢的用户看到数字闪烁。
+  const [checkout, setCheckout] = useState<CheckoutDraft | null>(null);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
+  // 排队（降档/续费）不退款、不可取消，点付款前再拦一道。
+  const [confirmQueue, setConfirmQueue] = useState(false);
   const [redeemInput, setRedeemInput] = useState("");
   const [redeemBusy, setRedeemBusy] = useState(false);
   // Custom tier: buyer-typed whole-dollar monthly price ($10–$199).
@@ -1113,6 +1136,8 @@ requires_openai_auth = true`,
     }
     setSelectedTier(null);
     setSelectedPeriod(DEFAULT_PERIOD);
+    setCheckout(null);
+    setQuoteError(null);
     // 意图不粘住上一次的选择：加量包是少数意图，下一次来换档的人不看提示
     // 就点下去会买错东西。只有从「再买一个加量包」进来时才预置成 extra。
     setIntent(nextIntent);
@@ -1156,6 +1181,68 @@ requires_openai_auth = true`,
     } finally {
       setRedeemBusy(false);
     }
+  }
+
+  // 选完档位和周期后拉报价，进结账页。
+  //
+  // **拉不到报价就不放行付款**：没有报价意味着客户端不知道点下去会发生什么
+  // ——可能立即换档，也可能排队到下个月，而后者不可撤销。唯一的例外是老服务
+  // 端（没有 quote 端点，404），那种情况下服务端本来也不会做换档判定，直接
+  // 沿用旧流程下单。
+  async function goToCheckout(
+    planId: string,
+    periodKey: string,
+    priceUSD?: number,
+    asExtra = false,
+  ) {
+    if (!login) {
+      toast.error("请先登录");
+      return;
+    }
+    const isCustom = planId === CUSTOM_TIER_ID;
+    setQuoteError(null);
+    setBusy(true);
+    try {
+      const quote = await fetchPlanQuote(
+        planId,
+        periodKey,
+        isCustom ? priceUSD : undefined,
+        asExtra,
+      );
+      setCheckout({ planId, period: periodKey, priceUSD, asExtra, quote });
+    } catch (error) {
+      if (isPlanQuoteUnsupported(error)) {
+        // 老服务端：整条换档流程都不存在，直接按旧流程下单。
+        setBusy(false);
+        await handlePurchasePlan(planId, periodKey, priceUSD, asExtra);
+        return;
+      }
+      if (gatewayErrorCode(error) === "email_not_verified") {
+        toast.info("购买前请先验证邮箱");
+        goToVerifyEmail();
+        return;
+      }
+      setQuoteError(
+        error instanceof Error ? error.message : "获取报价失败，请重试",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 结账页点确认。排队不可撤销，先弹二次确认。 */
+  function handleCheckoutConfirm() {
+    if (!checkout) return;
+    if (checkout.quote.action === "queue") {
+      setConfirmQueue(true);
+      return;
+    }
+    void handlePurchasePlan(
+      checkout.planId,
+      checkout.period,
+      checkout.priceUSD,
+      checkout.asExtra,
+    );
   }
 
   async function handlePurchasePlan(
@@ -1230,6 +1317,7 @@ requires_openai_auth = true`,
           if (cancelled) return;
           await onActivatedRef.current();
           setPending(null);
+          setCheckout(null);
           setScreen("account");
           toast.success("支付成功，会员已开通");
           return;
@@ -1698,6 +1786,12 @@ requires_openai_auth = true`,
               className="mb-3 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground disabled:opacity-60"
               disabled={Boolean(pending)}
               onClick={() => {
+                // 结账页退回选择页，重新选就得重新报价 —— 留着旧 quote 会让
+                // 用户按上一次的报价付这一次的款。
+                if (checkout) {
+                  setCheckout(null);
+                  return;
+                }
                 // 加量包那条路径没有档位选择这一层，直接退回账号屏；
                 // 订阅层则先退回档位列表。
                 if (intent === "extra" || !selectedTier) {
@@ -1745,6 +1839,13 @@ requires_openai_auth = true`,
                   取消
                 </button>
               </div>
+            ) : checkout ? (
+              <PlanCheckout
+                quote={checkout.quote}
+                currentValidUntil={subscription?.valid_until}
+                busy={busy}
+                onConfirm={handleCheckoutConfirm}
+              />
             ) : intent === "subscription" && selectedTier ? (
               (() => {
                 const isCustom = selectedTier === CUSTOM_TIER_ID;
@@ -1865,7 +1966,7 @@ requires_openai_auth = true`,
                       type="button"
                       disabled={purchaseDisabled}
                       onClick={() =>
-                        handlePurchasePlan(
+                        void goToCheckout(
                           selectedTier,
                           period.key,
                           isCustom ? (customPrice ?? undefined) : undefined,
@@ -1875,8 +1976,16 @@ requires_openai_auth = true`,
                       className="mt-3.5 flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-2.5 font-semibold text-primary-foreground transition hover:brightness-105 disabled:opacity-60"
                     >
                       {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-                      微信支付 ${total}
+                      {/* 这里显示的是目录价，实付要等服务端报价（抵扣后可能
+                          是 $0）。所以按钮写「下一步」而不是「微信支付」——
+                          金额只作为参考挂在后面。 */}
+                      下一步 · 约 ${total}
                     </button>
+                    {quoteError && (
+                      <div className="mt-2 text-center text-[11px] font-medium text-red-500">
+                        {quoteError}
+                      </div>
+                    )}
                   </>
                 );
               })()
@@ -1947,7 +2056,7 @@ requires_openai_auth = true`,
                       type="button"
                       disabled={busy || units === null}
                       onClick={() =>
-                        handlePurchasePlan(
+                        void goToCheckout(
                           EXTRA_PLAN_ID,
                           period.key,
                           monthlyUSD,
@@ -1959,6 +2068,11 @@ requires_openai_auth = true`,
                       {busy && <Loader2 className="h-4 w-4 animate-spin" />}
                       下一步
                     </button>
+                    {quoteError && (
+                      <div className="mt-2 text-center text-[11px] font-medium text-red-500">
+                        {quoteError}
+                      </div>
+                    )}
                   </>
                 );
               })()
@@ -2220,6 +2334,36 @@ requires_openai_auth = true`,
           </ScreenView>
         )}
       </div>
+
+      {/* 排队生效的换档（降档或同档续费）服务端不提供取消端点，也不退款。
+          页面上那行小字挡不住误操作，这里再拦一道，把三件事说清楚：什么时候
+          生效、不可撤销、期间当前套餐照常可用。 */}
+      <ConfirmDialog
+        isOpen={confirmQueue}
+        title="确认排队切换套餐？"
+        message={
+          checkout
+            ? `当前套餐到期后${
+                formatPlanDate(subscription?.valid_until)
+                  ? `（${formatPlanDate(subscription?.valid_until)}）`
+                  : ""
+              }自动切换到 ${planLabel(checkout.quote.target_tier)}。\n\n此操作不可撤销、不退款。\n\n切换前当前套餐照常可用，额度不受影响。`
+            : ""
+        }
+        confirmText="确认切换"
+        cancelText="再想想"
+        onCancel={() => setConfirmQueue(false)}
+        onConfirm={() => {
+          setConfirmQueue(false);
+          if (!checkout) return;
+          void handlePurchasePlan(
+            checkout.planId,
+            checkout.period,
+            checkout.priceUSD,
+            checkout.asExtra,
+          );
+        }}
+      />
     </div>
   );
 }

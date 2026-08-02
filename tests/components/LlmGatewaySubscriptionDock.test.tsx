@@ -59,6 +59,24 @@ function seedActivePlan() {
   localStorage.setItem(LOGIN_KEY, JSON.stringify(login));
 }
 
+/**
+ * 桩一次服务端报价。付款前必须先拿到报价 —— 拿不到就不放行，所以凡是走到
+ * 下单的 case 都要先桩这个。
+ */
+function mockQuote(patch: Partial<gateway.GatewayPlanQuote> = {}) {
+  return vi.spyOn(gateway, "fetchPlanQuote").mockResolvedValue({
+    action: "activate_now",
+    credit_applied_micros: 0,
+    amount_due_micros: 100_000_000,
+    amount_cents: 72000,
+    new_valid_until: "2026-08-31T12:00:00Z",
+    resulting_balance_micros: 0,
+    current_tier: "",
+    target_tier: "pro",
+    ...patch,
+  });
+}
+
 /** 服务端说：套餐是开着的（管理员刚开的）。 */
 function serverSaysActive() {
   return {
@@ -472,6 +490,8 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     // 加量包会让来换档的人不看提示就买错东西。
     expect(await screen.findByText("更换 / 续费套餐")).toBeTruthy();
     await userEvent.click(await screen.findByText("$100"));
+    mockQuote({ action: "upgrade_now" });
+    await userEvent.click(await screen.findByText(/^下一步/));
     await userEvent.click(await screen.findByText(/^微信支付/));
 
     await waitFor(() => expect(createOrder).toHaveBeenCalled());
@@ -511,6 +531,8 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     expect(await screen.findByText("选择套餐 · 微信支付")).toBeTruthy();
     expect(screen.queryByText("购买加量包")).toBeNull();
     await userEvent.click(await screen.findByText("$100"));
+    mockQuote();
+    await userEvent.click(await screen.findByText(/^下一步/));
     await userEvent.click(await screen.findByText(/^微信支付/));
     await waitFor(() => expect(createOrder).toHaveBeenCalled());
     expect(createOrder.mock.calls[0][4]).toBe(false);
@@ -543,7 +565,16 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     const units = await screen.findByRole("spinbutton");
     await userEvent.clear(units);
     await userEvent.type(units, "2");
+    const quote = mockQuote({
+      action: "extra",
+      amount_due_micros: 40_000_000,
+      target_tier: "custom",
+    });
     await userEvent.click(await screen.findByText(/^下一步/));
+    await waitFor(() => expect(quote).toHaveBeenCalled());
+    // 报价也要带 as_extra，否则服务端按换档算钱，结账页上的四个数字全是错的。
+    expect(quote.mock.calls[0][3]).toBe(true);
+    await userEvent.click(await screen.findByText(/^微信支付/));
 
     await waitFor(() => expect(createOrder).toHaveBeenCalled());
     const [planId, period, priceUSD, , asExtra] = createOrder.mock.calls[0];
@@ -571,6 +602,162 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     expect(await screen.findByText(/请输入 1–99 的整数/)).toBeTruthy();
     await userEvent.click(screen.getByText(/^下一步/));
     expect(createOrder).not.toHaveBeenCalled();
+  });
+});
+
+// 结账页。金额抵扣模式下升档**不延长到期日**，而是按新买的时长重算——
+// 用户看到到期日从 300 天后变成 30 天后一定会炸，唯一的解法是付款前把
+// 抵扣额/新到期日/剩余余额/实付四个数字同时摆出来。
+describe("LlmGatewaySubscriptionDock 换档结账页", () => {
+  /** 走到结账页：有生效套餐 → 选 $200 档 → 下一步。 */
+  async function openCheckout(patch: Partial<gateway.GatewayPlanQuote>) {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    const quote = mockQuote(patch);
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("$200"));
+    await userEvent.click(await screen.findByText(/^下一步/));
+    await waitFor(() => expect(quote).toHaveBeenCalled());
+    return quote;
+  }
+
+  it("Pro 剩 300 天升 Business 月付：新到期日、抵扣额、余额同屏可见", async () => {
+    // 本 epic 的核心用例。旧套餐剩的 300 天折成 $666.67 余额，抵扣掉
+    // $200 的月费后还剩 $466.67，新到期日是 30 天后而不是 300 天后。
+    await openCheckout({
+      action: "upgrade_now",
+      credit_applied_micros: 200_000_000,
+      amount_due_micros: 0,
+      amount_cents: 0,
+      new_valid_until: "2026-09-01T12:00:00Z",
+      resulting_balance_micros: 466_670_000,
+      current_tier: "pro",
+      target_tier: "business",
+    });
+
+    // 到期日必须显示在同一屏上——只说「已抵扣」而不说到期日变了，
+    // 用户会在下个月发现套餐没了才反应过来。
+    expect(await screen.findByText("2026/9/1")).toBeTruthy();
+    expect(screen.getByText("-$200")).toBeTruthy();
+    expect(screen.getByText("$466.67")).toBeTruthy();
+    expect(screen.getByText(/余额自动用于后续购买/)).toBeTruthy();
+    expect(screen.getByText(/立即升级到 \$200/)).toBeTruthy();
+    // 抵扣够了就没有微信单可下，按钮不能写「微信支付 $0」。
+    expect(screen.getByText(/确认（余额已够，无需付款）/)).toBeTruthy();
+  });
+
+  it("queue 弹二次确认，取消则不下单", async () => {
+    const createOrder = vi.spyOn(gateway, "createPlanOrder");
+    await openCheckout({
+      action: "queue",
+      credit_applied_micros: 0,
+      amount_due_micros: 20_000_000,
+      new_valid_until: "2099-02-01T00:00:00Z",
+      resulting_balance_micros: 0,
+      current_tier: "pro",
+      target_tier: "starter",
+    });
+
+    expect(await screen.findByText(/自动切换到 \$20/)).toBeTruthy();
+    expect(screen.getByText(/此操作不可撤销、不退款/)).toBeTruthy();
+
+    await userEvent.click(screen.getByText(/^微信支付/));
+    // 降档不退款也不可取消，一行小字挡不住误操作。
+    expect(await screen.findByText("确认排队切换套餐？")).toBeTruthy();
+    expect(
+      screen.getAllByText(/切换前当前套餐照常可用/).length,
+    ).toBeGreaterThan(0);
+
+    await userEvent.click(screen.getByText("再想想"));
+    expect(createOrder).not.toHaveBeenCalled();
+  });
+
+  it("queue 确认后才下单", async () => {
+    const createOrder = vi.spyOn(gateway, "createPlanOrder").mockResolvedValue({
+      order_id: "pay_q",
+      code_url: "weixin://wxpay/bizpayurl?pr=q",
+      plan_id: "business",
+      period: "1m",
+      duration_days: 30,
+      months: 1,
+      amount_credits: 20_000_000,
+      amount_cents: 14400,
+      exchange_rate: 7.2,
+      currency: "CNY",
+    } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
+    await openCheckout({
+      action: "queue",
+      amount_due_micros: 20_000_000,
+      target_tier: "starter",
+    });
+
+    await userEvent.click(await screen.findByText(/^微信支付/));
+    await userEvent.click(await screen.findByText("确认切换"));
+    await waitFor(() => expect(createOrder).toHaveBeenCalled());
+  });
+
+  it("activate_now / extra 各有自己的文案", async () => {
+    await openCheckout({ action: "activate_now", target_tier: "business" });
+    expect(await screen.findByText(/立即生效：\$200/)).toBeTruthy();
+    // 立即生效不该出现不可撤销的警告——那只属于排队。
+    expect(screen.queryByText(/此操作不可撤销/)).toBeNull();
+  });
+
+  it("报价失败不放行付款", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    const quote = vi
+      .spyOn(gateway, "fetchPlanQuote")
+      .mockRejectedValue(new Error("网络开小差了"));
+    const createOrder = vi.spyOn(gateway, "createPlanOrder");
+
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("$200"));
+    await userEvent.click(await screen.findByText(/^下一步/));
+    await waitFor(() => expect(quote).toHaveBeenCalled());
+
+    // 没有报价就意味着客户端不知道点下去会发生什么——可能立即换档，
+    // 也可能排队到下个月，而后者不可撤销。
+    expect(await screen.findByText("网络开小差了")).toBeTruthy();
+    expect(screen.queryByText(/^微信支付 \$/)).toBeNull();
+    expect(createOrder).not.toHaveBeenCalled();
+  });
+
+  it("老服务端没有 quote 端点时退回旧流程直接下单", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    vi.spyOn(gateway, "fetchPlanQuote").mockRejectedValue(
+      new GatewayApiError(404, "not_found"),
+    );
+    const createOrder = vi.spyOn(gateway, "createPlanOrder").mockResolvedValue({
+      order_id: "pay_old",
+      code_url: "weixin://wxpay/bizpayurl?pr=old",
+      plan_id: "business",
+      period: "1m",
+      duration_days: 30,
+      months: 1,
+      amount_credits: 200_000_000,
+      amount_cents: 144000,
+      exchange_rate: 7.2,
+      currency: "CNY",
+    } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
+
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("$200"));
+    await userEvent.click(await screen.findByText(/^下一步/));
+
+    // 老服务端本来也不做换档判定，卡住等报价只会让人买不了东西。
+    await waitFor(() => expect(createOrder).toHaveBeenCalled());
+    expect(await screen.findByText("微信扫码支付")).toBeTruthy();
   });
 });
 
