@@ -67,6 +67,7 @@ import {
   CUSTOM_MIN_USD,
   CUSTOM_TIER_ID,
   TIERS,
+  formatMicrosUSD,
   formatPlanDate,
   parseCustomPrice,
   planLabel,
@@ -165,6 +166,21 @@ interface CheckoutDraft {
   priceUSD?: number;
   asExtra: boolean;
   quote: GatewayPlanQuote;
+}
+
+// 零元单结清后的成功态。
+//
+// 抵扣额 ≥ 新套餐价时服务端**不下微信单**（微信最小收款 1 分），响应里没有
+// code_url。这条路径不能渲染二维码、不能启动轮询 —— 轮询一个可能根本不存在
+// 的订单会让用户永远停在「等待支付…」。
+//
+// 用户一分钱没付，但套餐确实变了，所以成功提示要说清发生了什么：换成了哪一
+// 档、新到期日是哪天、还剩多少余额。只说「购买成功」的话，用户会以为没生效。
+interface SettledOrder {
+  action: GatewayPlanQuote["action"];
+  targetTier: string;
+  newValidUntil?: string;
+  resultingBalanceMicros?: number;
 }
 
 function parseExtraUnits(raw: string): number | null {
@@ -395,6 +411,8 @@ export function LlmGatewaySubscriptionDock() {
   const [quoteError, setQuoteError] = useState<string | null>(null);
   // 排队（降档/续费）不退款、不可取消，点付款前再拦一道。
   const [confirmQueue, setConfirmQueue] = useState(false);
+  // 零元单（余额抵扣够了）直接结清，没有二维码这一步。
+  const [settled, setSettled] = useState<SettledOrder | null>(null);
   const [redeemInput, setRedeemInput] = useState("");
   const [redeemBusy, setRedeemBusy] = useState(false);
   // Custom tier: buyer-typed whole-dollar monthly price ($10–$199).
@@ -1138,6 +1156,7 @@ requires_openai_auth = true`,
     setSelectedPeriod(DEFAULT_PERIOD);
     setCheckout(null);
     setQuoteError(null);
+    setSettled(null);
     // 意图不粘住上一次的选择：加量包是少数意图，下一次来换档的人不看提示
     // 就点下去会买错东西。只有从「再买一个加量包」进来时才预置成 extra。
     setIntent(nextIntent);
@@ -1278,6 +1297,29 @@ requires_openai_auth = true`,
         undefined,
         asExtra,
       );
+      // 零元单：抵扣额 ≥ 新套餐价，服务端不下微信单，响应里没有 code_url。
+      //
+      // **判据只看 code_url，不看 order_id**：服务端对零元单是否建
+      // payment_orders 记录还没最终定（llm_gateway#192 里标注了二选一），
+      // 依赖 order_id 存在的话其中一种实现会挂。也不看结账页那份 quote ——
+      // 用户可能在结账页停了很久，余额状态变了，以本次响应为准。
+      if (!order.code_url) {
+        // 刷新订阅：换档已经生效（或已排队），账号屏必须立刻反映出来。
+        // 余额没有单独的刷新动作 —— 客户端目前不显示余额，成功页那个数字
+        // 直接取服务端在这一单里给的 resulting_balance_micros。
+        await onActivated();
+        setSettled({
+          action: order.action ?? checkout?.quote.action ?? "activate_now",
+          targetTier: checkout?.quote.target_tier ?? planId,
+          newValidUntil:
+            order.new_valid_until ?? checkout?.quote.new_valid_until,
+          resultingBalanceMicros:
+            order.resulting_balance_micros ??
+            checkout?.quote.resulting_balance_micros,
+        });
+        setCheckout(null);
+        return;
+      }
       setPending({
         orderId: order.order_id,
         codeURL: order.code_url,
@@ -1306,6 +1348,10 @@ requires_openai_auth = true`,
   // time out), then activate + dismiss the QR.
   useEffect(() => {
     if (!pending) return;
+    // 没有二维码就没有微信单可等（零元单）。显式守卫而不是靠「反正订单不存在
+    // 所以轮询会失败」—— 那样用户会看到一串报错，最后还被超时提示告知支付
+    // 未完成，而他本来就不需要支付。
+    if (!pending.codeURL) return;
     let cancelled = false;
     const deadline = Date.now() + 5 * 60 * 1000; // 5 minutes
     const timer = setInterval(async () => {
@@ -1786,6 +1832,13 @@ requires_openai_auth = true`,
               className="mb-3 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground disabled:opacity-60"
               disabled={Boolean(pending)}
               onClick={() => {
+                // 零元单已经结清了，返回只能回账号屏 —— 退回选择页会让人
+                // 以为可以再买一次。
+                if (settled) {
+                  setSettled(null);
+                  setScreen("account");
+                  return;
+                }
                 // 结账页退回选择页，重新选就得重新报价 —— 留着旧 quote 会让
                 // 用户按上一次的报价付这一次的款。
                 if (checkout) {
@@ -1805,7 +1858,55 @@ requires_openai_auth = true`,
               返回
             </button>
 
-            {pending ? (
+            {settled ? (
+              // 零元单成功态。用户一分钱没付，但套餐确实变了 —— 只说
+              // 「购买成功」的话他会以为没生效，所以把换成了哪一档、新到期日
+              // 是哪天、还剩多少余额一并说清。
+              <div className="flex flex-col items-center gap-2.5 py-1 text-center">
+                <MailCheck className="h-8 w-8 text-green-500" />
+                <h4 className="text-[15px] font-semibold">
+                  {settled.action === "queue"
+                    ? "切换已安排"
+                    : "已完成，无需付款"}
+                </h4>
+                <div className="text-xs leading-relaxed text-muted-foreground">
+                  已用账户余额完成
+                  {settled.action === "extra"
+                    ? "加量包购买"
+                    : `换档到 ${planLabel(settled.targetTier)}`}
+                  ，未产生新的付款。
+                </div>
+                <div className="w-full rounded-xl border border-border px-3 py-2.5 text-[11px] leading-relaxed">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-muted-foreground">
+                      {settled.action === "queue"
+                        ? "切换后有效期至"
+                        : "有效期至"}
+                    </span>
+                    <span className="font-medium">
+                      {formatPlanDate(settled.newValidUntil) || "—"}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex items-center justify-between gap-2">
+                    <span className="text-muted-foreground">剩余余额</span>
+                    <span className="font-medium">
+                      {settled.resultingBalanceMicros === undefined
+                        ? "—"
+                        : formatMicrosUSD(settled.resultingBalanceMicros)}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  className="mt-1 w-full rounded-lg bg-primary py-2.5 font-semibold text-primary-foreground transition hover:brightness-105"
+                  onClick={() => {
+                    setSettled(null);
+                    setScreen("account");
+                  }}
+                >
+                  完成
+                </button>
+              </div>
+            ) : pending ? (
               <div className="flex flex-col items-center gap-3 py-1 text-center">
                 <h4 className="text-[15px] font-semibold">微信扫码支付</h4>
                 <div className="text-xs text-muted-foreground">

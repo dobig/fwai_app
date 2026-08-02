@@ -761,6 +761,100 @@ describe("LlmGatewaySubscriptionDock 换档结账页", () => {
   });
 });
 
+// 零元单。抵扣额 ≥ 新套餐价时服务端不下微信单（微信最小收款 1 分），响应里
+// 没有 code_url。旧流程假定一定有二维码，会渲染一个空码然后无限轮询一个可能
+// 根本不存在的订单——这是整个改造里漏了就彻底卡住用户的那条分支。
+describe("LlmGatewaySubscriptionDock 零元单", () => {
+  async function buyWith(
+    order: Record<string, unknown>,
+    quotePatch: Partial<gateway.GatewayPlanQuote> = {},
+  ) {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    mockQuote({
+      action: "upgrade_now",
+      credit_applied_micros: 250_000_000,
+      amount_due_micros: 0,
+      amount_cents: 0,
+      new_valid_until: "2026-09-01T12:00:00Z",
+      resulting_balance_micros: 50_000_000,
+      current_tier: "pro",
+      target_tier: "business",
+      ...quotePatch,
+    });
+    const getOrder = vi.spyOn(gateway, "getPaymentOrder");
+    const createOrder = vi
+      .spyOn(gateway, "createPlanOrder")
+      .mockResolvedValue(
+        order as unknown as Awaited<ReturnType<typeof gateway.createPlanOrder>>,
+      );
+
+    const { container } = renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("$200"));
+    await userEvent.click(await screen.findByText(/^下一步/));
+    await userEvent.click(
+      await screen.findByText(/^(确认（余额已够|微信支付 \$)/),
+    );
+    await waitFor(() => expect(createOrder).toHaveBeenCalled());
+    return { getOrder, container };
+  }
+
+  it("响应缺 code_url 时不渲染二维码、不轮询，直接进成功态", async () => {
+    // order_id 故意留空：服务端对零元单是否建 payment_orders 记录还没最终定
+    // （llm_gateway#192 二选一），客户端只能靠 code_url 分流。
+    const { getOrder } = await buyWith({
+      plan_id: "business",
+      period: "1m",
+      duration_days: 30,
+      months: 1,
+      amount_credits: 0,
+      amount_cents: 0,
+      exchange_rate: 7.2,
+      currency: "CNY",
+      action: "upgrade_now",
+      new_valid_until: "2026-09-01T12:00:00Z",
+      resulting_balance_micros: 50_000_000,
+    });
+
+    expect(await screen.findByText("已完成，无需付款")).toBeTruthy();
+    expect(screen.queryByText("微信扫码支付")).toBeNull();
+    // 用户一分钱没付但套餐确实变了，只说「成功」他会以为没生效。
+    expect(screen.getByText(/已用账户余额完成/)).toBeTruthy();
+    expect(screen.getByText("2026/9/1")).toBeTruthy();
+    expect(screen.getByText("$50")).toBeTruthy();
+    // 轮询一个可能不存在的订单会让用户看到一串报错，最后还被告知支付未完成。
+    expect(getOrder).not.toHaveBeenCalled();
+  });
+
+  it("部分抵扣仍走二维码路径", async () => {
+    // 回归断言：0 < amount_due < 套餐价 时服务端照常下微信单，这条路不能
+    // 被零元单的分支顺手改掉。
+    const { container } = await buyWith(
+      {
+        order_id: "pay_partial",
+        code_url: "weixin://wxpay/bizpayurl?pr=partial",
+        plan_id: "business",
+        period: "1m",
+        duration_days: 30,
+        months: 1,
+        amount_credits: 50_000_000,
+        amount_cents: 36000,
+        exchange_rate: 7.2,
+        currency: "CNY",
+      },
+      { amount_due_micros: 50_000_000, amount_cents: 36000 },
+    );
+
+    expect(await screen.findByText("微信扫码支付")).toBeTruthy();
+    expect(screen.queryByText("已完成，无需付款")).toBeNull();
+    // 二维码真的画出来了（轮询是 3 秒一次的 interval，测里等它太慢）。
+    expect(container.querySelector("svg[height='168']")).toBeTruthy();
+  });
+});
+
 // 加了 grant 角色之后账号屏分两块。平铺的话用户分不清哪张是「我的档位」、
 // 哪张是临时补的加量包，点「换档」时不知道会换掉哪一个。
 describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
