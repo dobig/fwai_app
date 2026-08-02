@@ -44,6 +44,7 @@ import {
   saveGatewayLogin,
   saveGatewayUsageCache,
   loadGatewayUsageCache,
+  planRole,
   clearGatewayUsageCache,
   registerGateway,
   sendEmailCode,
@@ -55,6 +56,15 @@ import {
   type GatewayUsageWindow,
   type GatewayUserProfile,
 } from "@/lib/api/llm-gateway";
+import { PlanSections } from "./PlanSections";
+import {
+  CUSTOM_MAX_USD,
+  CUSTOM_MIN_USD,
+  CUSTOM_TIER_ID,
+  TIERS,
+  parseCustomPrice,
+  planLabel,
+} from "./planCatalog";
 
 type Screen =
   | "auth"
@@ -118,55 +128,6 @@ interface PendingOrder {
   priceUSD?: number;
   // 这一单是排在现有套餐之后（true）还是立刻叠加。只用于二维码页的文案。
   startAfterCurrent?: boolean;
-}
-
-// Plans mirror the gateway seed SKUs, named by their monthly price. The 5h /
-// weekly quota windows shown here mirror the server derivation (default 1×/5×
-// of price; business overrides with 2×/10×) — the server stays authoritative.
-const TIERS: {
-  id: string;
-  label: string;
-  priceUSD: number;
-  usage5hUSD: number;
-  usageWeekUSD: number;
-}[] = [
-  {
-    id: "starter",
-    label: "$20",
-    priceUSD: 20,
-    usage5hUSD: 20,
-    usageWeekUSD: 100,
-  },
-  {
-    id: "pro",
-    label: "$100",
-    priceUSD: 100,
-    usage5hUSD: 100,
-    usageWeekUSD: 500,
-  },
-  {
-    id: "business",
-    label: "$200",
-    priceUSD: 200,
-    usage5hUSD: 400,
-    usageWeekUSD: 2000,
-  },
-];
-
-// Self-serve custom plan: buyer names a whole-dollar MONTHLY price and the
-// quota windows derive from it (5h = 1× price, week = 5× price) — a weekly
-// period costs a quarter of it but is not throttled to a quarter. Bounds mirror
-// the server ($10–$199, and always below the $200 tier).
-const CUSTOM_TIER_ID = "custom";
-const CUSTOM_MIN_USD = 10;
-const CUSTOM_MAX_USD = 199;
-
-function parseCustomPrice(raw: string): number | null {
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < CUSTOM_MIN_USD || n > CUSTOM_MAX_USD) {
-    return null;
-  }
-  return n;
 }
 
 // Purchasable periods, mirroring the server's planPeriods table (the server
@@ -272,13 +233,6 @@ function planUnitUSD(
 
 const GATEWAY_PROVIDER_ID = "llm-gateway-local";
 const DOCK_OPEN_KEY = "llm-gateway-dock-open";
-
-function planLabel(tier?: string): string {
-  if (!tier) return "会员";
-  if (tier === CUSTOM_TIER_ID) return "自选";
-  const known = TIERS.find((t) => t.id === tier);
-  return known ? known.label : tier.charAt(0).toUpperCase() + tier.slice(1);
-}
 
 function initials(name: string): string {
   return (name || "U").slice(0, 2).toUpperCase();
@@ -427,6 +381,14 @@ export function LlmGatewaySubscriptionDock() {
   // 在前——那也是先被扣额度的那一层。老服务端不返回这个字段，取空数组，
   // 展示逻辑会退回单套餐那一行。
   const planList = subscription?.plans ?? [];
+  // 有没有生效的**订阅层**。加量包必须有订阅层才能买——只有加量包、订阅已
+  // 过期时服务端会拒（subscription_required），所以入口就要置灰。
+  // 注意这里查的不是「任何生效 grant」：那样的话加量包能给自己续命，门槛
+  // 形同虚设。老服务端不返回 role 也不返回 plans，退回看 isActive。
+  const hasActiveSubscriptionTier =
+    planList.length > 0
+      ? planList.some((p) => planRole(p) === "subscription" && !p.pending)
+      : isActive;
   // Treat a login saved before this field existed as verified: those accounts
   // were backfilled verified by migration 0020, and defaulting to "unverified"
   // would show an existing paying customer a badge telling them to verify an
@@ -1503,46 +1465,13 @@ requires_openai_auth = true`,
               </span>
             </div>
 
-            {/* 套餐可以叠加，所以这里是一份列表而不是单个有效期。只有一个
-                套餐时退化成原来那行字，多个时才逐个列出来——否则绝大多数
-                用户会为了一条信息看到一个多余的表格。
-                老服务端不返回 plans，这时仍按单套餐渲染。 */}
-            {isActive && planList.length > 1 ? (
-              <div className="mb-3.5 -mt-1 space-y-1">
-                {planList.map((p) => (
-                  <div
-                    key={p.grant_id}
-                    className="flex items-center justify-between gap-2 rounded-lg bg-muted/40 px-2.5 py-1.5 text-[11px]"
-                  >
-                    <span className="flex items-center gap-1.5 font-medium">
-                      {planLabel(p.tier)}
-                      <span className="text-muted-foreground">
-                        ${Math.round(p.usage_micros_per_5h / 1_000_000)}/5h
-                      </span>
-                      {p.pending && (
-                        <span className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
-                          待生效
-                        </span>
-                      )}
-                    </span>
-                    <span className="flex-none text-muted-foreground">
-                      {p.pending
-                        ? `${new Date(p.valid_from).toLocaleDateString("zh-CN")} 起`
-                        : `至 ${new Date(p.valid_until).toLocaleDateString("zh-CN")}`}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              isActive &&
-              subscription?.valid_until && (
-                <div className="mb-3.5 -mt-1.5 text-center text-[11px] text-muted-foreground">
-                  有效期至{" "}
-                  {new Date(subscription.valid_until).toLocaleDateString(
-                    "zh-CN",
-                  )}
-                </div>
-              )
+            {/* 订阅层和加量包分开显示。平铺的话用户分不清哪张是「我的档位」、
+                哪张是临时补的量，点「换档」时不知道会换掉哪一个。 */}
+            {subscription && (
+              <PlanSections
+                subscription={subscription}
+                canBuyExtra={hasActiveSubscriptionTier}
+              />
             )}
 
             {/* 未验证提示。说清楚挡的是什么（下单），别只写「请验证邮箱」——

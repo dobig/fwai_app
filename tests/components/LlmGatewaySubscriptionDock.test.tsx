@@ -436,40 +436,16 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     localStorage.setItem(LOGIN_KEY, JSON.stringify(login));
   }
 
-  it("账户页逐个列出持有的套餐，并标出待生效的那个", async () => {
+  it("账户页逐个列出持有的套餐，并说明排队中的那个何时切换", async () => {
     seedStackedPlans();
     renderDock();
 
-    // 三个套餐都看得到，不是只显示最贵的那个。
-    expect(await screen.findByText("$10/5h")).toBeTruthy();
-    expect(screen.getAllByText("$100/5h").length).toBe(2);
-    // 排队中的那个要明确标出来，否则用户以为额度已经到账了。
-    expect(screen.getByText("待生效")).toBeTruthy();
-  });
-
-  it("只有一个套餐时退回单行有效期，不显示列表", async () => {
-    seedLoggedOutOfPlan();
-    const login = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
-    login.subscription = {
-      active: true,
-      tier: "pro",
-      valid_until: "2026-07-31T00:00:00Z",
-      plans: [
-        {
-          grant_id: "g_pro",
-          tier: "pro",
-          usage_micros_per_5h: 100_000_000,
-          usage_micros_per_week: 500_000_000,
-          valid_from: "2026-07-01T00:00:00Z",
-          valid_until: "2026-07-31T00:00:00Z",
-        },
-      ],
-    };
-    localStorage.setItem(LOGIN_KEY, JSON.stringify(login));
-    renderDock();
-
-    expect(await screen.findByText(/有效期至/)).toBeTruthy();
-    expect(screen.queryByText("$100/5h")).toBeNull();
+    // 老服务端不返回 role，所有套餐都落在「我的套餐」块里。
+    expect(await screen.findByText("我的套餐")).toBeTruthy();
+    expect(screen.getByText("5h $10 · 周 $50")).toBeTruthy();
+    expect(screen.getAllByText("5h $100 · 周 $500").length).toBe(1);
+    // 排队中的那个要说清换的是哪一档、什么时候换，否则用户以为额度已经到账了。
+    expect(screen.getByText(/到期后自动切换到 \$100/)).toBeTruthy();
   });
 
   it("默认排队续费，选「立即叠加」才并行生效", async () => {
@@ -544,6 +520,169 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     await userEvent.click(await screen.findByText(/^微信支付/));
     await waitFor(() => expect(createOrder).toHaveBeenCalled());
     expect(createOrder.mock.calls[0][3]).toBe(false);
+  });
+});
+
+// 加了 grant 角色之后账号屏分两块。平铺的话用户分不清哪张是「我的档位」、
+// 哪张是临时补的加量包，点「换档」时不知道会换掉哪一个。
+describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
+  function seedPlans(plans: unknown[], extra: Record<string, unknown> = {}) {
+    seedLoggedOutOfPlan();
+    const login = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
+    login.subscription = {
+      active: true,
+      tier: "pro",
+      usage_micros_per_5h: 140_000_000,
+      usage_micros_per_week: 700_000_000,
+      valid_until: "2099-01-01T00:00:00Z",
+      plans,
+      ...extra,
+    };
+    localStorage.setItem(LOGIN_KEY, JSON.stringify(login));
+  }
+
+  const subPlan = {
+    grant_id: "g_pro",
+    tier: "pro",
+    role: "subscription",
+    usage_micros_per_5h: 100_000_000,
+    usage_micros_per_week: 500_000_000,
+    valid_from: "2026-07-01T00:00:00Z",
+    valid_until: "2026-07-31T00:00:00Z",
+  };
+
+  it("单订阅无加量包：只渲染「我的套餐」块", async () => {
+    seedPlans([subPlan]);
+    renderDock();
+
+    expect(await screen.findByText("我的套餐")).toBeTruthy();
+    // 大多数用户不会买加量包，不该给他们一个空标题。
+    expect(screen.queryByText("加量包")).toBeNull();
+  });
+
+  it("订阅 + 2 个加量包：两块都渲染，加量包按服务端顺序显示", async () => {
+    seedPlans([
+      subPlan,
+      {
+        grant_id: "g_x1",
+        tier: "extra",
+        role: "extra",
+        usage_micros_per_5h: 20_000_000,
+        usage_micros_per_week: 100_000_000,
+        valid_from: "2026-07-01T00:00:00Z",
+        valid_until: "2026-07-08T00:00:00Z",
+      },
+      {
+        grant_id: "g_x2",
+        tier: "extra",
+        role: "extra",
+        usage_micros_per_5h: 40_000_000,
+        usage_micros_per_week: 200_000_000,
+        valid_from: "2026-07-01T00:00:00Z",
+        valid_until: "2026-07-20T00:00:00Z",
+      },
+    ]);
+    renderDock();
+
+    expect(await screen.findByText("我的套餐")).toBeTruthy();
+    expect(screen.getByText("加量包")).toBeTruthy();
+    // 服务端已按 valid_until 排好，客户端不重排 —— 那个顺序表达的是
+    // 「先扣哪一层」。
+    const quotas = screen
+      .getAllByText(/^5h \$/)
+      .map((el) => el.textContent ?? "");
+    expect(quotas).toEqual([
+      "5h $100 · 周 $500",
+      "5h $20 · 周 $100",
+      "5h $40 · 周 $200",
+    ]);
+  });
+
+  it("有排队中的套餐时显示切换提示行", async () => {
+    seedPlans([
+      subPlan,
+      {
+        grant_id: "g_queued",
+        tier: "starter",
+        role: "subscription",
+        usage_micros_per_5h: 20_000_000,
+        usage_micros_per_week: 100_000_000,
+        valid_from: "2026-07-31T00:00:00Z",
+        valid_until: "2026-08-30T00:00:00Z",
+        pending: true,
+      },
+    ]);
+    renderDock();
+
+    // 降档是排队生效的，用户必须看得到「换的是哪一档、什么时候换」。
+    expect(await screen.findByText(/到期后自动切换到 \$20/)).toBeTruthy();
+  });
+
+  it("顶部额度上限仍是总和，并标明含加量包", async () => {
+    seedPlans([
+      subPlan,
+      {
+        grant_id: "g_x1",
+        tier: "extra",
+        role: "extra",
+        usage_micros_per_5h: 40_000_000,
+        usage_micros_per_week: 200_000_000,
+        valid_from: "2026-07-01T00:00:00Z",
+        valid_until: "2026-07-20T00:00:00Z",
+      },
+    ]);
+    renderDock();
+
+    // 显示订阅层自己的 $100 是错的 —— 实际卡用户的是 $140 这个总和。
+    expect(
+      await screen.findByText(/额度上限 5h \$140 · 每周 \$700（含加量包）/),
+    ).toBeTruthy();
+  });
+
+  it("订阅已过期但仍有加量包：加量包正常显示，购买入口置灰并给出原因", async () => {
+    // 服务端规定加量包必须有生效的**订阅层**才能买；只有加量包时必须拒绝，
+    // 否则加量包能给自己续命，那道门槛就形同虚设。
+    seedPlans([
+      {
+        grant_id: "g_x1",
+        tier: "extra",
+        role: "extra",
+        usage_micros_per_5h: 40_000_000,
+        usage_micros_per_week: 200_000_000,
+        valid_from: "2026-07-01T00:00:00Z",
+        valid_until: "2026-07-20T00:00:00Z",
+      },
+    ]);
+    renderDock();
+
+    // 已买的加量包继续供额度到它自己的到期日 —— 不隐藏、不标失效。
+    expect(await screen.findByText("加量包")).toBeTruthy();
+    expect(screen.getByText("5h $40 · 周 $200")).toBeTruthy();
+    // 置灰而不是隐藏：手上还有加量包在跑却找不到再买一个的地方，会以为是 bug。
+    expect(
+      screen.getByText(/需要有生效的套餐才能购买加量包/),
+    ).toBeInTheDocument();
+  });
+
+  it("老服务端（无 role）：所有套餐落在「我的套餐」块，不崩不空白", async () => {
+    const { role: _dropped, ...legacy } = subPlan;
+    seedPlans([
+      legacy,
+      {
+        ...legacy,
+        grant_id: "g_starter",
+        tier: "starter",
+        usage_micros_per_5h: 20_000_000,
+        usage_micros_per_week: 100_000_000,
+      },
+    ]);
+    renderDock();
+
+    expect(await screen.findByText("我的套餐")).toBeTruthy();
+    expect(screen.getByText("5h $100 · 周 $500")).toBeTruthy();
+    expect(screen.getByText("5h $20 · 周 $100")).toBeTruthy();
+    // 空的加量包块比平铺更糟：它在暗示用户少了点什么。
+    expect(screen.queryByText("加量包")).toBeNull();
   });
 });
 
