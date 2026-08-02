@@ -404,6 +404,10 @@ export interface GatewayPlanQuote {
   credit_applied_micros: number; // 旧档剩余价值抵扣了多少
   amount_due_micros: number; // 实际要付多少（可能为 0）
   amount_cents: number; // 微信收款金额（分）
+  // 新套餐的生效日。**排队时不要拿当前生效档的到期日代替它** —— 服务端排到的是
+  // 订阅层里最远的那个到期日（含已排队的档），已经排了一个降档时，两者会差一整个
+  // 周期，用户会看到一个比实际早一个月的切换日期。可选是因为老服务端不发。
+  new_valid_from?: string;
   new_valid_until: string; // 换档后的到期日
   resulting_balance_micros: number; // 换档后账户余额
   current_tier: string;

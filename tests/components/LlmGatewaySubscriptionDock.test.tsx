@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { LlmGatewaySubscriptionDock } from "@/components/llm-gateway/LlmGatewaySubscriptionDock";
+import { formatPlanDate } from "@/components/llm-gateway/planCatalog";
 import {
   ActiveAppProvider,
   useActiveApp,
@@ -650,6 +651,46 @@ describe("LlmGatewaySubscriptionDock 换档结账页", () => {
     expect(screen.getByText(/立即升级到 \$200/)).toBeTruthy();
     // 抵扣够了就没有微信单可下，按钮不能写「微信支付 $0」。
     expect(screen.getByText(/确认（余额已够，无需付款）/)).toBeTruthy();
+  });
+
+  it("queue 的切换日期取服务端的 new_valid_from，不是当前档到期日", async () => {
+    // 服务端排队排到的是订阅层里**最远**的到期日（含已经排了的档），不是当前
+    // 生效档的到期日。用户已经排了一个降档时两者差一整个周期，照当前档到期日
+    // 写文案会显示一个比实际早一个月的切换日期 —— 联调时对着真 gateway 抓到的。
+    await openCheckout({
+      action: "queue",
+      amount_due_micros: 20_000_000,
+      // 当前生效档 2099-01-01 到期（serverSaysActive），但队尾在一个月后。
+      new_valid_from: "2099-02-01T00:00:00Z",
+      new_valid_until: "2099-03-01T00:00:00Z",
+      current_tier: "pro",
+      target_tier: "starter",
+    });
+
+    // 日期用同一个格式化函数算，免得把测试钉死在某个时区上。
+    const queueTail = formatPlanDate("2099-02-01T00:00:00Z");
+    const liveEnd = formatPlanDate("2099-01-01T00:00:00Z");
+    expect(queueTail).not.toBe(liveEnd);
+    expect(
+      await screen.findByText(`当前套餐到期后（${queueTail}）自动切换到 $20`),
+    ).toBeTruthy();
+    expect(screen.queryByText(new RegExp(`${liveEnd}.*自动切换`))).toBeNull();
+  });
+
+  it("老服务端不发 new_valid_from 时退回当前档到期日", async () => {
+    await openCheckout({
+      action: "queue",
+      amount_due_micros: 20_000_000,
+      new_valid_until: "2099-02-01T00:00:00Z",
+      current_tier: "pro",
+      target_tier: "starter",
+    });
+
+    expect(
+      await screen.findByText(
+        `当前套餐到期后（${formatPlanDate("2099-01-01T00:00:00Z")}）自动切换到 $20`,
+      ),
+    ).toBeTruthy();
   });
 
   it("queue 弹二次确认，取消则不下单", async () => {

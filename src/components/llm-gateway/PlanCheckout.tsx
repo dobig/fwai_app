@@ -31,7 +31,10 @@ function actionHeadline(
       // 规则对不上时反而制造客诉。
       return `立即升级到 ${planLabel(quote.target_tier)}，旧套餐剩余时长已折算抵扣 ${formatMicrosUSD(quote.credit_applied_micros)}`;
     case "queue": {
-      const when = formatPlanDate(currentValidUntil);
+      // 优先用服务端算好的生效日。currentValidUntil 只是老服务端（不发
+      // new_valid_from）的兜底：它取的是**当前生效档**的到期日，而服务端排到的是
+      // 订阅层里最远的到期日，用户已经排了一个降档时两者差一整个周期。
+      const when = formatPlanDate(quote.new_valid_from ?? currentValidUntil);
       return `当前套餐到期后${when ? `（${when}）` : ""}自动切换到 ${planLabel(quote.target_tier)}`;
     }
     case "activate_now":
