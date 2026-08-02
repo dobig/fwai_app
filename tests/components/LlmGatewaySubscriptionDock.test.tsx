@@ -853,6 +853,52 @@ describe("LlmGatewaySubscriptionDock 零元单", () => {
     // 二维码真的画出来了（轮询是 3 秒一次的 interval，测里等它太慢）。
     expect(container.querySelector("svg[height='168']")).toBeTruthy();
   });
+
+  it("结账金额和二维码金额都取服务端，本地算出来的不作数", async () => {
+    // $200 档买 1 个月，本地预览算出来是 $200。服务端说抵扣后只要 $37.5 ——
+    // 结账页和二维码页显示的都必须是服务端那个数。本地算法和服务端只要有
+    // 一处不一致，用户看到的价格就和实际扣款不同。
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    mockQuote({
+      action: "upgrade_now",
+      credit_applied_micros: 162_500_000,
+      amount_due_micros: 37_500_000,
+      amount_cents: 27000,
+      target_tier: "business",
+    });
+    const createOrder = vi.spyOn(gateway, "createPlanOrder").mockResolvedValue({
+      order_id: "pay_srv",
+      code_url: "weixin://wxpay/bizpayurl?pr=srv",
+      plan_id: "business",
+      period: "1m",
+      duration_days: 30,
+      months: 1,
+      // 服务端最终扣的又比报价少一点（用户在结账页停留期间余额涨了）——
+      // 二维码那行也得跟着服务端走，不能拿报价或本地预览凑。
+      amount_credits: 30_000_000,
+      amount_cents: 21600,
+      exchange_rate: 7.2,
+      currency: "CNY",
+    } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
+
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("$200"));
+    // 选择页那个数字是预览价，明确写成「下一步 · 约 $200」。
+    expect(await screen.findByText("下一步 · 约 $200")).toBeTruthy();
+    await userEvent.click(screen.getByText("下一步 · 约 $200"));
+
+    // 结账页：服务端报价，不是本地的 $200。
+    expect(await screen.findByText(/^微信支付 \$37\.50$/)).toBeTruthy();
+    await userEvent.click(screen.getByText(/^微信支付 \$37\.50$/));
+    await waitFor(() => expect(createOrder).toHaveBeenCalled());
+
+    // 二维码页：下单响应里的 amount_credits，不是报价也不是本地预览。
+    expect(await screen.findByText(/\$30$/)).toBeTruthy();
+  });
 });
 
 // 加了 grant 角色之后账号屏分两块。平铺的话用户分不清哪张是「我的档位」、

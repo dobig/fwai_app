@@ -72,6 +72,17 @@ import {
   parseCustomPrice,
   planLabel,
 } from "./planCatalog";
+// 这些全部是**预览用**的价格逻辑。实付金额一律取服务端：结账页取 quote 的
+// amount_due_micros，二维码页取下单响应的 amount_credits。
+import {
+  DEFAULT_PERIOD,
+  PERIODS,
+  findPeriod,
+  periodDiscountLabel,
+  periodsFor,
+  previewTotalUSD,
+  previewUnitUSD,
+} from "./planPeriods";
 
 type Screen =
   | "auth"
@@ -129,7 +140,10 @@ interface PendingOrder {
   codeURL?: string;
   planId: string;
   period: string;
-  totalUSD: number;
+  // 二维码上方那行金额，**取服务端下单响应里的 amount_credits**（micro-USD）。
+  // 本地那套预览价不参与 —— 换档时它必然偏高（不含任何抵扣），而扫码扣的是
+  // 服务端算出来的数，两个数字对不上是最伤信任的一类 bug。见 #13。
+  amountMicros: number;
   // Monthly price for the custom plan (label + retry context); catalog plans
   // derive it from TIERS.
   priceUSD?: number;
@@ -187,107 +201,6 @@ function parseExtraUnits(raw: string): number | null {
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1 || n > EXTRA_MAX_UNITS) return null;
   return n;
-}
-
-// Purchasable periods, mirroring the server's planPeriods table (the server
-// stays authoritative on price — these drive display only, and the QR amount
-// always comes from the gateway's response). `num/den` is the share of the
-// monthly price the period costs: a week is 1/4 of a month. Weeks are custom-
-// only, and stop at 3 — a 4th week would cost the same as 1m but grant 28 days
-// instead of 30.
-interface PlanPeriod {
-  key: string;
-  label: string;
-  days: number;
-  num: number;
-  den: number;
-  discount: number;
-  customOnly?: boolean;
-}
-
-const PERIODS: PlanPeriod[] = [
-  {
-    key: "1w",
-    label: "1 周",
-    days: 7,
-    num: 1,
-    den: 4,
-    discount: 1,
-    customOnly: true,
-  },
-  {
-    key: "2w",
-    label: "2 周",
-    days: 14,
-    num: 2,
-    den: 4,
-    discount: 1,
-    customOnly: true,
-  },
-  {
-    key: "3w",
-    label: "3 周",
-    days: 21,
-    num: 3,
-    den: 4,
-    discount: 1,
-    customOnly: true,
-  },
-  { key: "1m", label: "1 个月", days: 30, num: 1, den: 1, discount: 1 },
-  { key: "3m", label: "3 个月", days: 90, num: 3, den: 1, discount: 1 },
-  { key: "6m", label: "6 个月", days: 180, num: 6, den: 1, discount: 0.95 },
-  { key: "12m", label: "12 个月", days: 360, num: 12, den: 1, discount: 0.9 },
-];
-
-const DEFAULT_PERIOD = "1m";
-
-function findPeriod(key: string): PlanPeriod {
-  return PERIODS.find((p) => p.key === key) ?? PERIODS[3];
-}
-
-// Periods a given tier can buy: weekly options are custom-only.
-function periodsFor(planId: string): PlanPeriod[] {
-  return PERIODS.filter((p) => !p.customOnly || planId === CUSTOM_TIER_ID);
-}
-
-function periodDiscountLabel(period: PlanPeriod): string {
-  if (period.discount === 0.9) return "9折";
-  if (period.discount === 0.95) return "95折";
-  return "";
-}
-
-// Totals keep cent precision: custom prices aren't multiples of $20, so both
-// the 95%/90% discount and the weekly quarter can land on fractions (e.g.
-// $58 × 12 × 0.9 = $626.40, $15 ÷ 4 = $3.75) and the shown figure must match
-// what the server actually charges.
-function planTotalUSD(priceUSD: number, period: PlanPeriod): number {
-  return (
-    Math.round(((priceUSD * period.num) / period.den) * period.discount * 100) /
-    100
-  );
-}
-
-// Per-unit price for the option row: per month for monthly periods, per week
-// for weekly ones — comparing a weekly plan's "$3.75/月" against a monthly
-// plan's "$15/月" would read as a 4x discount rather than a shorter term.
-function planUnitUSD(
-  priceUSD: number,
-  period: PlanPeriod,
-): {
-  amount: number;
-  unit: string;
-} {
-  if (period.den !== 1) {
-    const weeks = period.num;
-    return {
-      amount: Math.round((planTotalUSD(priceUSD, period) / weeks) * 100) / 100,
-      unit: "周",
-    };
-  }
-  return {
-    amount: Math.round(priceUSD * period.discount * 100) / 100,
-    unit: "月",
-  };
 }
 
 const GATEWAY_PROVIDER_ID = "llm-gateway-local";
@@ -1279,11 +1192,6 @@ requires_openai_auth = true`,
       toast.error(`请输入 $${CUSTOM_MIN_USD}–$${CUSTOM_MAX_USD} 的整数月费`);
       return;
     }
-    const tier = TIERS.find((t) => t.id === planId);
-    const monthlyUSD = isCustom ? (priceUSD ?? 0) : (tier?.priceUSD ?? 0);
-    // 仅用于二维码页的行内说明。**付款金额一律取服务端返回的 amount_cents**，
-    // 这个本地值不参与任何付款判断（见 #13）。
-    const totalUSD = planTotalUSD(monthlyUSD, findPeriod(periodKey));
     setBusy(true);
     try {
       // One flow for dev and prod: create the order, show the QR, poll until
@@ -1325,7 +1233,7 @@ requires_openai_auth = true`,
         codeURL: order.code_url,
         planId,
         period: periodKey,
-        totalUSD,
+        amountMicros: order.amount_credits,
         priceUSD: isCustom ? priceUSD : undefined,
         asExtra,
       });
@@ -1915,7 +1823,8 @@ requires_openai_auth = true`,
                     : pending.priceUSD !== undefined
                       ? `自选 $${pending.priceUSD}`
                       : `${planLabel(pending.planId)} 套餐`}{" "}
-                  · {findPeriod(pending.period).label} · ${pending.totalUSD}
+                  · {findPeriod(pending.period).label} ·{" "}
+                  {formatMicrosUSD(pending.amountMicros)}
                 </div>
                 {/* 付款前再说一次这一单动的是哪一层。排队与否不在这里说 ——
                     那由服务端判定并通过 quote 的 action 表达（见 #11）。 */}
@@ -1962,7 +1871,7 @@ requires_openai_auth = true`,
                 const period = options.some((p) => p.key === selectedPeriod)
                   ? findPeriod(selectedPeriod)
                   : findPeriod(DEFAULT_PERIOD);
-                const total = planTotalUSD(price, period);
+                const total = previewTotalUSD(price, period);
                 const usage5h = isCustom ? price : (tier?.usage5hUSD ?? 0);
                 const usageWeek = isCustom
                   ? price * 5
@@ -2015,8 +1924,8 @@ requires_openai_auth = true`,
                     )}
                     <div className="flex flex-col gap-2">
                       {options.map((p) => {
-                        const pTotal = planTotalUSD(price, p);
-                        const unit = planUnitUSD(price, p);
+                        const pTotal = previewTotalUSD(price, p);
+                        const unit = previewUnitUSD(price, p);
                         // "省" is the discount only — a shorter term costing
                         // less is not a saving, so compare against the
                         // undiscounted price for the SAME period.
