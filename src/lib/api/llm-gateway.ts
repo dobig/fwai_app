@@ -1,3 +1,10 @@
+import {
+  CLIENT_UPGRADE_HEADER,
+  CLIENT_VERSION_HEADER,
+  CLIENT_VERSION_VALUE,
+  recordUpgradeSignal,
+} from "@/lib/clientUpgrade";
+
 export interface GatewayTokens {
   token_type: "Bearer";
   access_token: string;
@@ -157,10 +164,16 @@ async function gatewayRequest<T>(
     ...init,
     headers: {
       "Content-Type": "application/json",
+      // 在这一层统一注入，所有调用点自动带上。逐个改调用点的话，下一个新增
+      // 的端点一定会漏掉。
+      [CLIENT_VERSION_HEADER]: CLIENT_VERSION_VALUE,
       ...(authenticated && token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init.headers || {}),
     },
   });
+  // 失败响应上也读：401/403 一样可能带升级提示，而且「版本太老」正是服务端
+  // 打回请求的原因之一。
+  recordUpgradeSignal(response.headers.get(CLIENT_UPGRADE_HEADER));
   if (!response.ok) {
     // Surface the gateway's error code (e.g. {"error":"create_payment_failed"})
     // instead of swallowing it behind a bare status — callers branch on it and

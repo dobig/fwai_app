@@ -59,6 +59,7 @@ import {
   type GatewayUsageWindow,
   type GatewayUserProfile,
 } from "@/lib/api/llm-gateway";
+import { useClientUpgradeSignal } from "@/lib/clientUpgrade";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PlanCheckout } from "./PlanCheckout";
 import { PlanSections } from "./PlanSections";
@@ -329,6 +330,10 @@ export function LlmGatewaySubscriptionDock() {
   // 请求），要么得等一个新端点。代价是老网关下第一次点「下一步」会白跑一次
   // 请求然后退回旧流程 —— 用户看到的仍是能用的购买流程，只是没有结账页。
   const [quoteSupported, setQuoteSupported] = useState<boolean | null>(null);
+  // 服务端说这个客户端版本太老。只挡购买 —— 转发 AI 流量和其它功能照常，
+  // 把整个客户端锁死会造成一批用户既用不了也不知道为什么，而他们的订阅还
+  // 在计费。
+  const upgradeRequired = useClientUpgradeSignal() === "required";
   // 排队（降档/续费）不退款、不可取消，点付款前再拦一道。
   const [confirmQueue, setConfirmQueue] = useState(false);
   // 零元单（余额抵扣够了）直接结清，没有二维码这一步。
@@ -1053,6 +1058,13 @@ requires_openai_auth = true`,
     known?: SubscriptionRead | null,
     nextIntent: PurchaseIntent = "subscription",
   ) {
+    // 版本太老时服务端会拒单/算错账，进购买屏只会让人走到最后一步才失败。
+    // UI 上已经把入口禁掉了，这里是兜底 —— goToPurchase 还有别的调用点
+    // （比如登录后发现没订阅时自动跳转）。
+    if (upgradeRequired) {
+      toast.error("当前版本过旧，请更新后再购买");
+      return;
+    }
     let read = known;
     if (read === undefined && login) {
       setBusy(true);
@@ -1565,13 +1577,13 @@ requires_openai_auth = true`,
                 canBuyExtra={hasActiveSubscriptionTier}
                 onSwitchPlan={
                   // 老网关不做换档判定，给个换档入口只会让人点进去买到
-                  // 一份并行叠加的套餐。
-                  quoteSupported === false
+                  // 一份并行叠加的套餐。版本过旧同理：点进去也买不成。
+                  quoteSupported === false || upgradeRequired
                     ? undefined
                     : () => void goToPurchase(undefined, "subscription")
                 }
                 onBuyExtra={
-                  quoteSupported === false
+                  quoteSupported === false || upgradeRequired
                     ? undefined
                     : () => {
                         setExtraUnitsInput("1");
@@ -1649,10 +1661,19 @@ requires_openai_auth = true`,
               </p>
             )}
 
+            {/* 版本过旧提示。挡的只有购买 —— 上面的转发开关照常可用，说清楚
+                这一点，不然人会以为整个客户端废了。 */}
+            {upgradeRequired && (
+              <div className="mt-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+                当前版本过旧，暂时无法购买套餐。请更新到最新版本后再试 ——
+                转发和其它功能不受影响。
+              </div>
+            )}
+
             {/* purchase */}
             <button
               className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-muted/40 py-2.5 font-medium transition hover:border-border/80 hover:bg-muted disabled:opacity-60"
-              disabled={busy}
+              disabled={busy || upgradeRequired}
               onClick={() => void goToPurchase()}
             >
               {busy ? (

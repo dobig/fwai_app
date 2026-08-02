@@ -24,6 +24,7 @@ import {
 } from "@/lib/api";
 import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
 import { dismissVersion, isVersionDismissed } from "@/lib/updateCheck";
+import { APP_VERSION, useClientUpgradeSignal } from "@/lib/clientUpgrade";
 import { useProviderActions } from "@/hooks/useProviderActions";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
 import { extractErrorMessage } from "@/utils/errorUtils";
@@ -215,6 +216,36 @@ function App() {
 
     checkMigration();
   }, [t]);
+
+  // 服务端在响应头里说「该升级了」。required 不在这里处理——那条只挡购买
+  // 入口（见 LlmGatewaySubscriptionDock），锁死整个 app 会让一批用户既用不了
+  // 也不知道为什么，而他们的订阅还在计费。
+  const upgradeSignal = useClientUpgradeSignal();
+  useEffect(() => {
+    if (upgradeSignal !== "suggest") return;
+    // 复用 GitHub 更新提示的 dismiss 逻辑，但存的是**当前**版本号而不是最新
+    // 版本号——服务端只说「你旧了」，没说新的是哪个。语义因此是「这个版本上
+    // 我已经不想再被提醒了」，升级之后 APP_VERSION 变了会重新提醒。
+    if (isVersionDismissed(APP_VERSION)) return;
+    // 用独立的文案而不是复用 updateAvailable：那条要填版本号，而服务端只说
+    // 「你旧了」，填不出来。
+    toast(t("settings.serverSuggestsUpdate"), {
+      duration: 10000,
+      closeButton: true,
+      action: {
+        label: t("common.view"),
+        onClick: () => {
+          void settingsApi
+            .checkAppUpdate()
+            .then((info) => settingsApi.openExternal(info.releaseUrl))
+            .catch((error) => {
+              console.error("[App] Failed to open releases page:", error);
+            });
+        },
+      },
+      onDismiss: () => dismissVersion(APP_VERSION),
+    });
+  }, [upgradeSignal, t]);
 
   // 启动时静默检查新版本。只提示，不安装——点「查看」跳到 releases 页手动下载。
   useEffect(() => {

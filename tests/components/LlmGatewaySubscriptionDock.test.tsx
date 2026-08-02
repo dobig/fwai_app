@@ -11,6 +11,7 @@ import * as gateway from "@/lib/api/llm-gateway";
 import { GatewayApiError } from "@/lib/api/llm-gateway";
 import { providersApi, type AppId } from "@/lib/api";
 import { createTestQueryClient } from "../utils/testQueryClient";
+import { recordUpgradeSignal, resetUpgradeSignal } from "@/lib/clientUpgrade";
 
 // 这些 case 围绕两个问题：
 // 1. 本地缓存的 subscription 是登录那一刻的快照，管理员在后台开通套餐不经过
@@ -120,6 +121,8 @@ const startButton = () => screen.findByText(/^开启转发/);
 beforeEach(() => {
   localStorage.clear();
   vi.restoreAllMocks();
+  // 升级信号存在模块级，不清会漏到后面的 case 里把购买入口一直挡着。
+  resetUpgradeSignal();
   toasts.error.mockClear();
   toasts.info.mockClear();
   toasts.success.mockClear();
@@ -1249,5 +1252,56 @@ describe("LlmGatewaySubscriptionDock 四种 action 的文案", () => {
     ).toBeTruthy();
     // 加量包不动订阅层，不该出现「不可撤销」那条警告。
     expect(screen.queryByText(/此操作不可撤销/)).toBeNull();
+  });
+});
+
+// 服务端说这个客户端版本太老（X-Client-Upgrade: required）。挡的**只有购买**
+// —— 老版本转发 AI 流量是正常的，把整个客户端锁死会造成一批用户既用不了也不
+// 知道为什么，而他们的订阅还在计费。
+describe("LlmGatewaySubscriptionDock 版本过旧", () => {
+  it("挡住购买入口并说明原因", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    const createOrder = vi.spyOn(gateway, "createPlanOrder");
+    recordUpgradeSignal("required");
+    renderDock();
+
+    const buy = await screen.findByText("购买套餐");
+    expect(buy.closest("button")!.disabled).toBe(true);
+    expect(await screen.findByText(/当前版本过旧/)).toBeTruthy();
+
+    await userEvent.click(buy);
+    expect(screen.queryByText("选择套餐 · 微信支付")).toBeNull();
+    expect(createOrder).not.toHaveBeenCalled();
+  });
+
+  it("转发和其它功能不受影响", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    recordUpgradeSignal("required");
+    renderDock();
+
+    // 这才是老版本用户真正在做的事，买不了套餐不该连活都干不了。
+    await userEvent.click(await startButton());
+    await waitFor(() =>
+      expect(providersApi.startForwarding).toHaveBeenCalled(),
+    );
+  });
+
+  it("suggest 不挡任何东西", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    recordUpgradeSignal("suggest");
+    renderDock();
+
+    const buy = await screen.findByText("购买套餐");
+    expect(buy.closest("button")!.disabled).toBe(false);
+    expect(screen.queryByText(/当前版本过旧/)).toBeNull();
   });
 });
