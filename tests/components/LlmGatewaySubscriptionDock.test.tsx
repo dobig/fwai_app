@@ -1125,3 +1125,129 @@ describe("LlmGatewaySubscriptionDock 兑换码", () => {
     expect(screen.getByRole("button", { name: "兑换" })).toBeDisabled();
   });
 });
+
+// 新旧版本错配。fwai_app 的发布版本和网关分开部署，线上同时存在多个客户端
+// 版本。这些 case 测的是「不崩、不卡死、不出现空块」，不是体验好坏。
+describe("LlmGatewaySubscriptionDock 新端连老网关", () => {
+  /** 老网关：没有 quote 端点，也不返回 grant 的 role。 */
+  function seedOldGateway() {
+    seedLoggedOutOfPlan();
+    const login = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
+    login.subscription = {
+      active: true,
+      tier: "pro",
+      usage_micros_per_5h: 100_000_000,
+      usage_micros_per_week: 500_000_000,
+      valid_until: "2099-01-01T00:00:00Z",
+      plans: [
+        {
+          grant_id: "g_pro",
+          tier: "pro",
+          usage_micros_per_5h: 100_000_000,
+          usage_micros_per_week: 500_000_000,
+          valid_from: "2026-07-01T00:00:00Z",
+          valid_until: "2099-01-01T00:00:00Z",
+        },
+      ],
+    };
+    localStorage.setItem(LOGIN_KEY, JSON.stringify(login));
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    return vi
+      .spyOn(gateway, "fetchPlanQuote")
+      .mockRejectedValue(new GatewayApiError(404, "not_found"));
+  }
+
+  it("role 缺失时所有套餐落在「我的套餐」，不渲染空的加量包块", async () => {
+    seedOldGateway();
+    renderDock();
+
+    expect(await screen.findByText("我的套餐")).toBeTruthy();
+    expect(screen.getByText("5h $100 · 周 $500")).toBeTruthy();
+    // 空标题比没有标题更让人困惑：用户会以为加量包没加载出来。
+    expect(screen.queryByText("加量包")).toBeNull();
+  });
+
+  it("404 之后换档 UI 全部收起，购买流程仍可用", async () => {
+    seedOldGateway();
+    const createOrder = vi.spyOn(gateway, "createPlanOrder").mockResolvedValue({
+      order_id: "pay_old",
+      code_url: "weixin://wxpay/bizpayurl?pr=old",
+      plan_id: "pro",
+      period: "1m",
+      duration_days: 30,
+      months: 1,
+      amount_credits: 100_000_000,
+      amount_cents: 72000,
+      exchange_rate: 7.2,
+      currency: "CNY",
+    } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
+
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("$100"));
+    await userEvent.click(await screen.findByText(/^下一步/));
+
+    // 探测是惰性的：第一次拉报价拿到 404 才知道，那一次直接退回旧流程下单。
+    await waitFor(() => expect(createOrder).toHaveBeenCalled());
+    expect(await screen.findByText("微信扫码支付")).toBeTruthy();
+    expect(screen.queryByText("确认订单")).toBeNull();
+
+    // 知道之后就不再问意图了——老网关不认 as_extra，选加量包只会买到一份
+    // 并行叠加的普通套餐。
+    await userEvent.click(await screen.findByText("取消"));
+    await userEvent.click(await screen.findByText("返回"));
+    await userEvent.click(await screen.findByText("购买套餐"));
+    expect(await screen.findByText("选择套餐 · 微信支付")).toBeTruthy();
+    expect(screen.queryByText("购买加量包")).toBeNull();
+    expect(screen.queryByText("换档")).toBeNull();
+  });
+});
+
+// 四种 action 的结账页文案。选错分支意味着用户对「点下去会发生什么」的预期
+// 是错的——尤其 queue 那条不可撤销。
+describe("LlmGatewaySubscriptionDock 四种 action 的文案", () => {
+  async function checkoutWith(patch: Partial<gateway.GatewayPlanQuote>) {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    mockQuote(patch);
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("$200"));
+    await userEvent.click(await screen.findByText(/^下一步/));
+  }
+
+  it.each([
+    ["upgrade_now", /立即升级到 \$200/],
+    ["queue", /自动切换到 \$200/],
+    ["activate_now", /立即生效：\$200/],
+  ] as const)("%s 的主文案", async (action, pattern) => {
+    await checkoutWith({ action, target_tier: "business" });
+    expect(await screen.findByText(pattern)).toBeTruthy();
+    // 四个数字任何一种 action 下都得在。
+    expect(screen.getByText("余额抵扣")).toBeTruthy();
+    expect(screen.getByText("剩余余额")).toBeTruthy();
+    expect(screen.getByText("实付")).toBeTruthy();
+  });
+
+  it("extra 说的是叠加而不是换档", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    mockQuote({ action: "extra", target_tier: "custom" });
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("购买加量包"));
+    await userEvent.click(await screen.findByText(/^下一步/));
+
+    expect(
+      await screen.findByText(/加量包立即生效，与当前套餐额度叠加/),
+    ).toBeTruthy();
+    // 加量包不动订阅层，不该出现「不可撤销」那条警告。
+    expect(screen.queryByText(/此操作不可撤销/)).toBeNull();
+  });
+});

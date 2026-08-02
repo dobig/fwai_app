@@ -322,6 +322,13 @@ export function LlmGatewaySubscriptionDock() {
   // 选项就拉一次会让网络慢的用户看到数字闪烁。
   const [checkout, setCheckout] = useState<CheckoutDraft | null>(null);
   const [quoteError, setQuoteError] = useState<string | null>(null);
+  // 服务端支不支持换档。null = 还没探过。
+  //
+  // 探测是**惰性**的：第一次拉报价拿到 404 才知道。不在挂载时主动探一次，
+  // 因为那要么得先编一组套餐参数去 POST（会在服务端日志里留下无意义的报价
+  // 请求），要么得等一个新端点。代价是老网关下第一次点「下一步」会白跑一次
+  // 请求然后退回旧流程 —— 用户看到的仍是能用的购买流程，只是没有结账页。
+  const [quoteSupported, setQuoteSupported] = useState<boolean | null>(null);
   // 排队（降档/续费）不退款、不可取消，点付款前再拦一道。
   const [confirmQueue, setConfirmQueue] = useState(false);
   // 零元单（余额抵扣够了）直接结清，没有二维码这一步。
@@ -1141,10 +1148,14 @@ requires_openai_auth = true`,
         isCustom ? priceUSD : undefined,
         asExtra,
       );
+      setQuoteSupported(true);
       setCheckout({ planId, period: periodKey, priceUSD, asExtra, quote });
     } catch (error) {
       if (isPlanQuoteUnsupported(error)) {
-        // 老服务端：整条换档流程都不存在，直接按旧流程下单。
+        // 老服务端：整条换档流程都不存在，直接按旧流程下单。记下来，
+        // 换档相关的 UI（意图分支、账号屏的换档入口）随之隐藏。
+        setQuoteSupported(false);
+        setIntent("subscription");
         setBusy(false);
         await handlePurchasePlan(planId, periodKey, priceUSD, asExtra);
         return;
@@ -1552,13 +1563,21 @@ requires_openai_auth = true`,
               <PlanSections
                 subscription={subscription}
                 canBuyExtra={hasActiveSubscriptionTier}
-                onSwitchPlan={() =>
-                  void goToPurchase(undefined, "subscription")
+                onSwitchPlan={
+                  // 老网关不做换档判定，给个换档入口只会让人点进去买到
+                  // 一份并行叠加的套餐。
+                  quoteSupported === false
+                    ? undefined
+                    : () => void goToPurchase(undefined, "subscription")
                 }
-                onBuyExtra={() => {
-                  setExtraUnitsInput("1");
-                  void goToPurchase(undefined, "extra");
-                }}
+                onBuyExtra={
+                  quoteSupported === false
+                    ? undefined
+                    : () => {
+                        setExtraUnitsInput("1");
+                        void goToPurchase(undefined, "extra");
+                      }
+                }
               />
             )}
 
@@ -2091,8 +2110,11 @@ requires_openai_auth = true`,
                 {/* 意图分支。同一个「买套餐」动作在新模型下有两种完全不同的
                     含义，服务端靠 as_extra 区分，所以用户必须先表达意图。
                     没有生效订阅时不问 —— 多余的选择题只会让首购用户困惑，
-                    而且加量包本来也买不了。 */}
-                {hasActiveSubscriptionTier && (
+                    而且加量包本来也买不了。
+
+                    老网关（探测到没有 quote 端点）也不问：那边不认 as_extra，
+                    选了加量包只会买到一份并行叠加的普通套餐。 */}
+                {hasActiveSubscriptionTier && quoteSupported !== false && (
                   <div className="mb-3 grid grid-cols-2 gap-2">
                     {(
                       [
