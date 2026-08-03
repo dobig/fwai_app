@@ -4,7 +4,14 @@ import {
   type GatewaySubscriptionPlan,
   type GatewaySubscriptionStatus,
 } from "@/lib/api/llm-gateway";
-import { formatMicrosUSD, formatPlanDate, planLabel } from "./planCatalog";
+import {
+  formatMultiple,
+  formatPlanDate,
+  planLabel,
+  starterMultiple,
+  tierDescription,
+  TIERS,
+} from "./planCatalog";
 
 // 账号屏的套餐区。分两块是因为加了 grant 角色之后，平铺显示分不清哪张是
 // 「我的档位」、哪张是临时补的加量包 —— 用户看到一堆并列的套餐，不知道点
@@ -29,10 +36,27 @@ export interface PlanSectionsProps {
   canBuyExtra: boolean;
 }
 
-function quotaLine(plan: GatewaySubscriptionPlan): string {
-  return `5h ${formatMicrosUSD(plan.usage_micros_per_5h)} · 周 ${formatMicrosUSD(
-    plan.usage_micros_per_week,
-  )}`;
+// 一份额度怎么描述给用户。**永远不显示 5h/周的具体金额** —— 那两个数字对
+// 用户没有意义，只会引出「$400 能用多久」这类回答不了的追问。
+//
+// 三级回落，顺序即优先级：
+//
+//   1. title  —— admin 发这份额度时写的标题（「新春回馈」）。他既然特地写了，
+//                就比任何自动生成的描述更贴切。
+//   2. extra  —— 真加量包。1 单位恒等于 $20 = 1× Starter，倍数是精确的。
+//   3. custom —— admin 直接发放/兑换码得来的专属额度。**不给倍数**：服务端只
+//                要求两个窗口都 > 0，彼此没有比例约束，硬算出「1.85× Starter」
+//                既难看又不准（5h 和周可能是完全不同的倍数）。这一档返回空串,
+//                因为 planLabel("custom") 已经是「专属额度」了,再来一句同样的
+//                话就成了「专属额度 专属额度」。调用方负责跳过空串。
+function planDescription(plan: GatewaySubscriptionPlan): string {
+  if (plan.title) return plan.title;
+  if (plan.tier === "extra") {
+    const n = starterMultiple(plan.usage_micros_per_5h / 1_000_000);
+    return `${formatMultiple(n)}× Starter 用量`;
+  }
+  const known = TIERS.find((t) => t.id === plan.tier);
+  return known ? tierDescription(known) : "";
 }
 
 export function PlanSections({
@@ -92,7 +116,11 @@ export function PlanSections({
               >
                 <span className="flex items-center gap-1.5 font-medium">
                   {planLabel(p.tier)}
-                  <span className="text-muted-foreground">{quotaLine(p)}</span>
+                  {planDescription(p) && (
+                    <span className="text-muted-foreground">
+                      {planDescription(p)}
+                    </span>
+                  )}
                 </span>
                 <span className="flex-none text-muted-foreground">
                   至 {formatPlanDate(p.valid_until)}
@@ -112,24 +140,30 @@ export function PlanSections({
             {formatPlanDate(p.valid_from)}）
           </div>
         ))}
-        {/* 额度上限显示的是服务端给的总和（订阅层 + 所有加量包），因为那才是
-            实际卡用户的值。只显示订阅层的话，买了加量包的人会以为钱白花了。 */}
-        {subscription.usage_micros_per_5h != null &&
-          subscription.usage_micros_per_week != null && (
-            <div className="mt-1 px-0.5 text-[10px] text-muted-foreground">
-              额度上限 5h {formatMicrosUSD(subscription.usage_micros_per_5h)} ·
-              每周 {formatMicrosUSD(subscription.usage_micros_per_week)}
-              {extras.length > 0 && "（含加量包）"}
-            </div>
-          )}
+        {/* 汇总的是服务端给的总额度（订阅层 + 所有额外额度），因为那才是实际
+            卡用户的值。只显示订阅层的话，买了加量包的人会以为钱白花了。
+            这里用倍数而不是金额 —— 理由同 planDescription。总和里可能混进
+            admin 发的任意额度，所以倍数会有小数，formatMultiple 负责收敛。 */}
+        {subscription.usage_micros_per_5h != null && (
+          <div className="mt-1 px-0.5 text-[10px] text-muted-foreground">
+            总用量{" "}
+            {formatMultiple(
+              starterMultiple(subscription.usage_micros_per_5h / 1_000_000),
+            )}
+            × Starter
+            {extras.length > 0 && "（含额外额度）"}
+          </div>
+        )}
       </section>
 
-      {/* 没有加量包就整块不渲染 —— 大多数用户不会买，不该给他们一个空标题。 */}
+      {/* 没有额外额度就整块不渲染 —— 大多数用户不会有，不该给他们一个空标题。
+          标题不叫「加量包」：这一块同时装着自助买的加量包和 admin 发放/兑换码
+          得来的专属额度，后者不是买来的，叫加量包会让用户以为自己付过钱。 */}
       {extras.length > 0 && (
         <section>
           <div className="mb-1 flex items-center justify-between gap-2">
             <span className="text-[11px] font-medium text-muted-foreground">
-              加量包
+              额外额度
             </span>
             {onBuyExtra && (
               <button
@@ -156,7 +190,11 @@ export function PlanSections({
                   {/* 档位名而不是又一句「加量包」：块标题已经说过了，
                       重复一遍反而看不出这几张之间的差别。 */}
                   {planLabel(p.tier)}
-                  <span className="text-muted-foreground">{quotaLine(p)}</span>
+                  {planDescription(p) && (
+                    <span className="text-muted-foreground">
+                      {planDescription(p)}
+                    </span>
+                  )}
                   {p.pending && (
                     <span className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
                       待生效

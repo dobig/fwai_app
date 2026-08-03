@@ -13,11 +13,9 @@
 // 不出现，购买流程退回旧形态，本地计算仍是唯一的价格来源。所以只能降级，
 // 不能删。
 
-import { CUSTOM_TIER_ID } from "./planCatalog";
-
 // 镜像服务端的 planPeriods 表。`num/den` 是这个周期占月费的比例：一周是
-// 月费的 1/4。周选项只对自选档开放，且停在 3 周 —— 第 4 周的价格和 1 个月
-// 一样，但只给 28 天而不是 30 天。
+// 月费的 1/4。周选项只对加量包开放（自选金额档已删除，订阅层一律按月起售），
+// 且停在 3 周 —— 第 4 周的价格和 1 个月一样，但只给 28 天而不是 30 天。
 export interface PlanPeriod {
   key: string;
   label: string;
@@ -25,7 +23,7 @@ export interface PlanPeriod {
   num: number;
   den: number;
   discount: number;
-  customOnly?: boolean;
+  extraOnly?: boolean;
 }
 
 export const PERIODS: PlanPeriod[] = [
@@ -36,7 +34,7 @@ export const PERIODS: PlanPeriod[] = [
     num: 1,
     den: 4,
     discount: 1,
-    customOnly: true,
+    extraOnly: true,
   },
   {
     key: "2w",
@@ -45,7 +43,7 @@ export const PERIODS: PlanPeriod[] = [
     num: 2,
     den: 4,
     discount: 1,
-    customOnly: true,
+    extraOnly: true,
   },
   {
     key: "3w",
@@ -54,7 +52,7 @@ export const PERIODS: PlanPeriod[] = [
     num: 3,
     den: 4,
     discount: 1,
-    customOnly: true,
+    extraOnly: true,
   },
   { key: "1m", label: "1 个月", days: 30, num: 1, den: 1, discount: 1 },
   { key: "3m", label: "3 个月", days: 90, num: 3, den: 1, discount: 1 },
@@ -68,9 +66,9 @@ export function findPeriod(key: string): PlanPeriod {
   return PERIODS.find((p) => p.key === key) ?? PERIODS[3];
 }
 
-/** 哪些周期对哪个档位开放。纯规则，不是钱。 */
-export function periodsFor(planId: string): PlanPeriod[] {
-  return PERIODS.filter((p) => !p.customOnly || planId === CUSTOM_TIER_ID);
+/** 哪些周期对哪种购买开放。纯规则，不是钱。 */
+export function periodsFor(asExtra: boolean): PlanPeriod[] {
+  return PERIODS.filter((p) => !p.extraOnly || asExtra);
 }
 
 /** 折扣角标。这是**营销文案**不是金额，留在本地没有对不上账的风险。 */
@@ -87,8 +85,9 @@ export function periodDiscountLabel(period: PlanPeriod): string {
  * 「大概多少钱」。真正扣多少由服务端说了算 —— 抵扣、排队、按天折算都在
  * 服务端，客户端算出来的这个值在换档场景下必然偏高（它不含任何抵扣）。
  *
- * 保留分位精度：自选价不是 20 的倍数，95%/90% 折扣和周的 1/4 都可能落到
- * 小数上（$58 × 12 × 0.9 = $626.40，$15 ÷ 4 = $3.75）。
+ * 保留分位精度：95%/90% 折扣和周的 1/4 都可能落到小数上
+ * （$20 × 12 × 0.9 = $216，但 $20 ÷ 4 = $5、$100 × 0.95 = $95 这类组合里
+ * 加量包的多单位价格会出现分位）。
  */
 export function previewTotalUSD(priceUSD: number, period: PlanPeriod): number {
   return (

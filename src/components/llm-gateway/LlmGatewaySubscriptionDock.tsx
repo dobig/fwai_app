@@ -64,14 +64,12 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PlanCheckout } from "./PlanCheckout";
 import { PlanSections } from "./PlanSections";
 import {
-  CUSTOM_MAX_USD,
-  CUSTOM_MIN_USD,
-  CUSTOM_TIER_ID,
   TIERS,
   formatMicrosUSD,
   formatPlanDate,
-  parseCustomPrice,
   planLabel,
+  tierBlurb,
+  tierDescription,
 } from "./planCatalog";
 // 这些全部是**预览用**的价格逻辑。实付金额一律取服务端：结账页取 quote 的
 // amount_due_micros，二维码页取下单响应的 amount_credits。
@@ -160,16 +158,15 @@ type PurchaseIntent = "subscription" | "extra";
 
 // 加量包是独立 SKU：1 单位 = 月费 $20（5h $20 / 周 $100），N 单位线性放大，
 // 无折扣。服务端的报价/下单入参里没有「单位数」这个字段，只有 price_usd，
-// 所以 N 通过月价表达：price_usd = 20 × N，plan id 走 custom（那条路径的
-// 语义就是「买家自报月价」）。
+// 所以 N 通过月价表达：price_usd = 20 × N。
 //
-// **这一处是按契约盲写的**：llm_gateway#189 定义了加量包的定价公式，但没有
-// 写明 as_extra=true 时 plan id 和 price_usd 该怎么填，也没说 custom 档
-// $10–$199 的价格上下界在加量包上是否仍然生效（issue 只说了「custom-only
-// 的**周期**限制不作用于加量包」）。若服务端确实沿用那个上界，N ≥ 10 会被
-// 拒；那条错误会照常显示给用户，不会静默买错东西。见 dobig/fwai_app#10 的
-// 评论。
-const EXTRA_PLAN_ID = CUSTOM_TIER_ID;
+// plan id 就是 "extra"，与已删除的自选金额档没有任何关系。这里一度写成
+// CUSTOM_TIER_ID —— #189 定义了定价公式却没写明 as_extra=true 时 plan id 填什么，
+// 当时按「买家自报月价」猜到了 custom 那条路径上。能跑通纯粹是被服务端救了：
+// `if body.AsExtra { planID = extraPlanID }` 第一步就把 URL 里的 id 丢弃。
+// 契约已在 llm_gateway#189 的评论里写死：as_extra 时服务端强制改写为 extra，
+// quote.target_tier 和 grant 的 plan_id 回读都是 "extra"。
+const EXTRA_PLAN_ID = "extra";
 const EXTRA_UNIT_USD = 20;
 const EXTRA_MAX_UNITS = 99;
 
@@ -340,8 +337,6 @@ export function LlmGatewaySubscriptionDock() {
   const [settled, setSettled] = useState<SettledOrder | null>(null);
   const [redeemInput, setRedeemInput] = useState("");
   const [redeemBusy, setRedeemBusy] = useState(false);
-  // Custom tier: buyer-typed whole-dollar monthly price ($10–$199).
-  const [customPriceInput, setCustomPriceInput] = useState("30");
   // Editable gateway base URL. Seeded from the persisted value (or the baked
   // default) so users can point the client at the right gateway before logging
   // in — the redesign previously had no way to change it.
@@ -1150,14 +1145,15 @@ requires_openai_auth = true`,
       toast.error("请先登录");
       return;
     }
-    const isCustom = planId === CUSTOM_TIER_ID;
     setQuoteError(null);
     setBusy(true);
     try {
+      // price_usd 只对加量包有意义（承载单位数：20 × N）。目录档的价格一律由
+      // 服务端按 plan 行决定，多发一个金额只会让人以为客户端能议价。
       const quote = await fetchPlanQuote(
         planId,
         periodKey,
-        isCustom ? priceUSD : undefined,
+        asExtra ? priceUSD : undefined,
         asExtra,
       );
       setQuoteSupported(true);
@@ -1210,9 +1206,8 @@ requires_openai_auth = true`,
       toast.error("请先登录");
       return;
     }
-    const isCustom = planId === CUSTOM_TIER_ID;
-    if (isCustom && priceUSD === undefined) {
-      toast.error(`请输入 $${CUSTOM_MIN_USD}–$${CUSTOM_MAX_USD} 的整数月费`);
+    if (asExtra && priceUSD === undefined) {
+      toast.error(`请输入 1–${EXTRA_MAX_UNITS} 的整数单位数`);
       return;
     }
     setBusy(true);
@@ -1221,10 +1216,13 @@ requires_openai_auth = true`,
       // the paid callback activates the plan. In dev the gateway's fake payment
       // client auto-pays within ~100ms, so the poll effect completes the
       // purchase immediately — no separate demo path.
+      //
+      // price_usd 只随加量包发出（20 × 单位数）。目录档发了也会被服务端忽略，
+      // 但不发才是对的：价格是服务端权威，客户端没有报价的余地。
       const order = await createPlanOrder(
         planId,
         periodKey,
-        isCustom ? priceUSD : undefined,
+        asExtra ? priceUSD : undefined,
         undefined,
         asExtra,
       );
@@ -1257,7 +1255,7 @@ requires_openai_auth = true`,
         planId,
         period: periodKey,
         amountMicros: order.amount_credits,
-        priceUSD: isCustom ? priceUSD : undefined,
+        priceUSD: asExtra ? priceUSD : undefined,
         asExtra,
       });
     } catch (error) {
@@ -1821,7 +1819,11 @@ requires_openai_auth = true`,
                   已用账户余额完成
                   {settled.action === "extra"
                     ? "加量包购买"
-                    : `换档到 ${planLabel(settled.targetTier)}`}
+                    : settled.action === "renew"
+                      ? // 续费不是换档：档位一个字都没变，变的只是到期日。
+                        // 说「换档到 pro」会让刚续了 pro 的人以为自己动错了档。
+                        `${planLabel(settled.targetTier)} 续费`
+                      : `换档到 ${planLabel(settled.targetTier)}`}
                   ，未产生新的付款。
                 </div>
                 <div className="w-full rounded-xl border border-border px-3 py-2.5 text-[11px] leading-relaxed">
@@ -1898,13 +1900,10 @@ requires_openai_auth = true`,
               />
             ) : intent === "subscription" && selectedTier ? (
               (() => {
-                const isCustom = selectedTier === CUSTOM_TIER_ID;
                 const tier = TIERS.find((t) => t.id === selectedTier);
-                const customPrice = parseCustomPrice(customPriceInput);
-                const price = isCustom
-                  ? (customPrice ?? 0)
-                  : (tier?.priceUSD ?? 0);
-                const options = periodsFor(selectedTier);
+                const price = tier?.priceUSD ?? 0;
+                // 这一屏是订阅层的周期列表，周期档（1w/2w/3w）只卖给加量包。
+                const options = periodsFor(false);
                 // A tier switch can strand a weekly selection on a catalog
                 // tier that cannot buy one; fall back rather than send the
                 // server a period it will reject.
@@ -1912,54 +1911,15 @@ requires_openai_auth = true`,
                   ? findPeriod(selectedPeriod)
                   : findPeriod(DEFAULT_PERIOD);
                 const total = previewTotalUSD(price, period);
-                const usage5h = isCustom ? price : (tier?.usage5hUSD ?? 0);
-                const usageWeek = isCustom
-                  ? price * 5
-                  : (tier?.usageWeekUSD ?? 0);
-                const purchaseDisabled =
-                  busy || (isCustom && customPrice === null);
+                const purchaseDisabled = busy;
                 return (
                   <>
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
-                      {isCustom ? "自选套餐" : `${tier?.label} 套餐`} ·
-                      选择购买时长
+                      {tier?.label} 套餐 · 选择购买时长
                     </div>
-                    {isCustom && (
-                      <div className="mb-2.5 rounded-xl border-[1.5px] border-border px-3 py-2.5">
-                        <label className="flex items-center justify-between gap-2 text-sm">
-                          <span className="text-muted-foreground">
-                            月费（美元）
-                          </span>
-                          <span className="flex items-center gap-1 font-semibold">
-                            $
-                            <input
-                              type="number"
-                              min={CUSTOM_MIN_USD}
-                              max={CUSTOM_MAX_USD}
-                              step={1}
-                              value={customPriceInput}
-                              onChange={(e) =>
-                                setCustomPriceInput(e.target.value)
-                              }
-                              className="w-16 rounded-md border border-border bg-background px-2 py-1 text-right text-sm font-semibold outline-none focus:border-primary"
-                            />
-                          </span>
-                        </label>
-                        <div className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                          整数 ${CUSTOM_MIN_USD}–${CUSTOM_MAX_USD}
-                          ；用量上限随价格：5 小时 ${price || "—"} · 每周 $
-                          {price ? price * 5 : "—"}
-                        </div>
-                        {customPrice === null && (
-                          <div className="mt-1 text-[11px] font-medium text-red-500">
-                            请输入 ${CUSTOM_MIN_USD}–${CUSTOM_MAX_USD} 的整数
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    {!isCustom && (
+                    {tier && (
                       <div className="mb-2.5 rounded-lg bg-muted/40 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
-                        用量上限：5 小时 ${usage5h} · 每周 ${usageWeek}
+                        {tierDescription(tier)}
                       </div>
                     )}
                     <div className="flex flex-col gap-2">
@@ -2019,7 +1979,7 @@ requires_openai_auth = true`,
                         void goToCheckout(
                           selectedTier,
                           period.key,
-                          isCustom ? (customPrice ?? undefined) : undefined,
+                          undefined,
                           false,
                         )
                       }
@@ -2142,7 +2102,7 @@ requires_openai_auth = true`,
                         {
                           key: "subscription" as const,
                           title: "更换 / 续费套餐",
-                          desc: "升档立即生效，同档或降档到期后生效",
+                          desc: "升档、续费立即生效，降档到期后生效",
                         },
                         {
                           key: "extra" as const,
@@ -2200,30 +2160,13 @@ requires_openai_auth = true`,
                       <div className="my-0.5 text-xl font-bold tracking-tight">
                         ${tier.priceUSD}
                       </div>
+                      {/* 额度用相对描述，不给具体金额 —— 「5h $400」对用户是
+                          个无从解读的数字，「20× Starter」才说明得了买哪档。 */}
                       <div className="text-[10px] leading-relaxed text-muted-foreground">
-                        5h ${tier.usage5hUSD}
-                        <br />周 ${tier.usageWeekUSD}
+                        {tierBlurb(tier)}
                       </div>
                     </button>
                   ))}
-                </div>
-                <button
-                  type="button"
-                  disabled={busy}
-                  className="mt-2 w-full rounded-xl border-[1.5px] border-dashed border-border bg-background px-3 py-2.5 text-center transition hover:border-primary disabled:opacity-60"
-                  onClick={() => {
-                    setSelectedTier(CUSTOM_TIER_ID);
-                    setSelectedPeriod(DEFAULT_PERIOD);
-                  }}
-                >
-                  <span className="text-sm font-semibold">自选金额</span>
-                  <span className="ml-2 text-[11px] text-muted-foreground">
-                    ${CUSTOM_MIN_USD}–${CUSTOM_MAX_USD}/月 · 可按周购买
-                  </span>
-                </button>
-                <div className="mt-3 text-center text-[11px] text-muted-foreground">
-                  月费 $X 对应用量上限：5 小时窗口 $X、每周 $5X（$200 档为
-                  2×/10×）
                 </div>
               </>
             )}

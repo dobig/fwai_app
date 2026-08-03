@@ -7,6 +7,10 @@
 // Plans mirror the gateway seed SKUs, named by their monthly price. The 5h /
 // weekly quota windows shown here mirror the server derivation (default 1×/5×
 // of price; business overrides with 2×/10×) — the server stays authoritative.
+//
+// **这两个额度字段永远不直接显示给用户。** 它们只用来推导「N× Starter」这样的
+// 相对描述（见 tierBlurb / extraUnitsBlurb）。用户不需要知道我们的窗口是多少
+// 美元，那个数字对他毫无意义，只会引出「$100 能用多久」这类无法回答的追问。
 export interface PlanTier {
   id: string;
   label: string;
@@ -39,24 +43,44 @@ export const TIERS: PlanTier[] = [
   },
 ];
 
-// Self-serve custom plan: buyer names a whole-dollar MONTHLY price and the
-// quota windows derive from it (5h = 1× price, week = 5× price). Bounds mirror
-// the server ($10–$199, and always below the $200 tier).
-export const CUSTOM_TIER_ID = "custom";
-export const CUSTOM_MIN_USD = 10;
-export const CUSTOM_MAX_USD = 199;
+// 一份额度是 Starter 的几倍。倍数是**精确**的而非近似：starter 是 5h $20 /
+// 周 $100，pro 两项各 5×，business 因为服务端给了 2×/10× 系数而是 20×，
+// 加量包 1 单位 = $20/月 = 恰好 1×。两个窗口的倍数一致，所以取 5h 的即可。
+//
+// 从字段推导而不是写死字符串：以后调价改系数，文案自动跟随。
+export function starterMultiple(usage5hUSD: number): number {
+  const base = TIERS[0].usage5hUSD;
+  return base > 0 ? usage5hUSD / base : 0;
+}
 
-export function parseCustomPrice(raw: string): number | null {
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < CUSTOM_MIN_USD || n > CUSTOM_MAX_USD) {
-    return null;
-  }
-  return n;
+// 选档卡片里的一行小字。三列窄卡片，只放得下一个短语。
+// Starter 是基准，说倍数没有意义（「1× Starter」是废话），改说它是什么。
+export function tierBlurb(tier: PlanTier): string {
+  if (tier.id === TIERS[0].id) return "Starter";
+  return `${formatMultiple(starterMultiple(tier.usage5hUSD))}× Starter 用量`;
+}
+
+// 选周期页的整行说明，比卡片宽得多，Starter 这里能把「适合谁」说完整 ——
+// 那句话正是大多数用户唯一需要读的一句。
+export function tierDescription(tier: PlanTier): string {
+  if (tier.id === TIERS[0].id) return "Starter · 适合大部分普通用户";
+  return tierBlurb(tier);
+}
+
+// 倍数取整显示。目录三档都是整数倍（5×/20×），小数分支给两种情况兜底：将来
+// 调系数，以及账户页把 admin 发的任意额度也加进总和时（那个和几乎必然不是整数）。
+export function formatMultiple(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
 export function planLabel(tier?: string): string {
   if (!tier) return "会员";
-  if (tier === CUSTOM_TIER_ID) return "自选";
+  // custom 不再能被购买（服务端只认目录三档），但 admin 直接发放和兑换码激活
+  // 得来的 grant 仍以 tier: "custom" 回读（NULL plan_id 的兜底），账号屏要显示
+  // 得出来。文案是「专属额度」而非「自选」—— 用户已经没有「自选」这个动作了，
+  // 那份额度是发给他的。
+  if (tier === "custom") return "专属额度";
+  if (tier === "extra") return "加量包";
   const known = TIERS.find((t) => t.id === tier);
   return known ? known.label : tier.charAt(0).toUpperCase() + tier.slice(1);
 }

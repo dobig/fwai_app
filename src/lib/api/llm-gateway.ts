@@ -36,6 +36,11 @@ export type GatewayPlanRole = "subscription" | "extra";
 export interface GatewaySubscriptionPlan {
   grant_id: string;
   tier: string;
+  // admin 发放/兑换码签发时填的用户可见标题（如「新春回馈」）。自助购买的
+  // grant 永远没有，老服务端也不返回 —— 服务端用 omitempty，所以这里是可选。
+  // 只有额外额度（role=extra）会有：订阅层那一行没有放标题的位置。
+  // 有值时顶替额度描述，没有则回落到按 tier 推导的描述（见 planDescription）。
+  title?: string;
   usage_micros_per_5h: number;
   usage_micros_per_week: number;
   valid_from: string;
@@ -392,7 +397,9 @@ export async function getPaymentOrder(
 
 // 服务端算出来的一次换档结果。四种 action 的语义：
 //   upgrade_now  低档 → 高档，立即生效，旧档剩余价值按天折成金额抵扣
-//   queue        同档（续费）或高档 → 低档，排到当前订阅到期后生效，不可取消
+//   renew        买的是当前正在生效的同一个档 → 就地延长现有 grant 的到期日,
+//                不新建 grant、不重置周额度窗口。同档不存在「切换」这回事。
+//   queue        高档 → 低档，排到当前订阅到期后生效，不可取消
 //   activate_now 当前没有生效的订阅层，直接开通
 //   extra        加量包，立即生效并与当前套餐额度叠加
 //
@@ -400,7 +407,7 @@ export async function getPaymentOrder(
 // 服务端的向上取整规则，本地算必然对不上，而一旦对不上，用户看到的价格和
 // 实际扣款就会不同。
 export interface GatewayPlanQuote {
-  action: "upgrade_now" | "queue" | "activate_now" | "extra";
+  action: "upgrade_now" | "renew" | "queue" | "activate_now" | "extra";
   credit_applied_micros: number; // 旧档剩余价值抵扣了多少
   amount_due_micros: number; // 实际要付多少（可能为 0）
   amount_cents: number; // 微信收款金额（分）
@@ -469,10 +476,11 @@ export interface GatewayPlanOrder extends Omit<GatewayNativeOrder, "code_url"> {
 
 // createPlanOrder opens a WeChat Native order for a plan bought for one
 // `period` (see PERIODS). The gateway computes the price authoritatively and,
-// on the verified paid callback, grants the period's days. For the "custom"
-// plan, priceUSD is the buyer-chosen whole-dollar MONTHLY price
-// (server-validated to $10–$199 and below the top tier) regardless of the
-// period bought; it is ignored for catalog plans.
+// on the verified paid callback, grants the period's days.
+//
+// priceUSD 只在 asExtra 时有意义：它是加量包的**单位数 × $20**，即等效月价，
+// 与买的周期无关。目录三档（starter/pro/business）的价格一律由服务端的目录决定,
+// 传了也会被忽略 —— 用户不能自己给自己定价（自选金额档已删除）。
 //
 // asExtra 决定这一单动的是哪一层：false（默认）是订阅层，服务端按档位高低
 // 自己判定立即换档还是排队；true 是加量包，永远立即生效并叠加。

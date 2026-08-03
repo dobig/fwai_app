@@ -30,6 +30,10 @@ function actionHeadline(
       // 只说金额，不说「剩余 X 天」—— 天数得从抵扣额反推，和服务端的取整
       // 规则对不上时反而制造客诉。
       return `立即升级到 ${planLabel(quote.target_tier)}，旧套餐剩余时长已折算抵扣 ${formatMicrosUSD(quote.credit_applied_micros)}`;
+    case "renew":
+      // 不提抵扣 —— 续费没有任何东西被替换掉，旧的时长一天都不作废，
+      // 说「抵扣 $0」只会让用户以为亏了。用户要确认的是新的到期日。
+      return `续费 ${planLabel(quote.target_tier)}，有效期延长至 ${formatPlanDate(quote.new_valid_until)}`;
     case "queue": {
       // 优先用服务端算好的生效日。currentValidUntil 只是老服务端（不发
       // new_valid_from）的兜底：它取的是**当前生效档**的到期日，而服务端排到的是

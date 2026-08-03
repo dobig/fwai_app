@@ -464,8 +464,10 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
 
     // 老服务端不返回 role，所有套餐都落在「我的套餐」块里。
     expect(await screen.findByText("我的套餐")).toBeTruthy();
-    expect(screen.getByText("5h $10 · 周 $50")).toBeTruthy();
-    expect(screen.getAllByText("5h $100 · 周 $500").length).toBe(1);
+    // 不显示 5h/周的具体金额。这条 tier="custom"（admin 发的专属额度）
+    // 没有干净的倍数可言，档位名就是全部说明，不再补一句描述。
+    expect(screen.getByText("专属额度")).toBeTruthy();
+    expect(screen.getAllByText("5× Starter 用量").length).toBe(1);
     // 排队中的那个要说清换的是哪一档、什么时候换，否则用户以为额度已经到账了。
     expect(screen.getByText(/到期后自动切换到 \$100/)).toBeTruthy();
   });
@@ -572,7 +574,7 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     const quote = mockQuote({
       action: "extra",
       amount_due_micros: 40_000_000,
-      target_tier: "custom",
+      target_tier: "extra",
     });
     await userEvent.click(await screen.findByText(/^下一步/));
     await waitFor(() => expect(quote).toHaveBeenCalled());
@@ -582,7 +584,9 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
 
     await waitFor(() => expect(createOrder).toHaveBeenCalled());
     const [planId, period, priceUSD, , asExtra] = createOrder.mock.calls[0];
-    expect(planId).toBe("custom");
+    // 加量包打的是 /v1/plans/extra/orders。历史上这里写的是 "custom",
+    // 服务端靠 as_extra 覆盖才没出事 —— 那个绕道已经拆掉。
+    expect(planId).toBe("extra");
     expect(period).toBe("1m");
     expect(priceUSD).toBe(40);
     // 漏掉 as_extra 的话服务端会把这一单当成换档，直接顶掉现有套餐。
@@ -979,7 +983,7 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
 
     expect(await screen.findByText("我的套餐")).toBeTruthy();
     // 大多数用户不会买加量包，不该给他们一个空标题。
-    expect(screen.queryByText("加量包")).toBeNull();
+    expect(screen.queryByText("额外额度")).toBeNull();
   });
 
   it("订阅 + 2 个加量包：两块都渲染，加量包按服务端顺序显示", async () => {
@@ -1007,16 +1011,16 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
     renderDock();
 
     expect(await screen.findByText("我的套餐")).toBeTruthy();
-    expect(screen.getByText("加量包")).toBeTruthy();
+    expect(screen.getByText("额外额度")).toBeTruthy();
     // 服务端已按 valid_until 排好，客户端不重排 —— 那个顺序表达的是
     // 「先扣哪一层」。
     const quotas = screen
-      .getAllByText(/^5h \$/)
+      .getAllByText(/× Starter 用量$/)
       .map((el) => el.textContent ?? "");
     expect(quotas).toEqual([
-      "5h $100 · 周 $500",
-      "5h $20 · 周 $100",
-      "5h $40 · 周 $200",
+      "5× Starter 用量",
+      "1× Starter 用量",
+      "2× Starter 用量",
     ]);
   });
 
@@ -1040,6 +1044,52 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
     expect(await screen.findByText(/到期后自动切换到 \$20/)).toBeTruthy();
   });
 
+  // 额外额度的描述有三级回落：title > extra 的倍数 > custom 的档位名。
+  // 三条一起测，因为它们是同一个函数的三个分支，分开写会让「谁顶替谁」看不出来。
+  it("额外额度描述：有 title 用 title，没有则回落到倍数/专属额度", async () => {
+    seedPlans([
+      subPlan,
+      {
+        grant_id: "g_gift",
+        tier: "custom",
+        role: "extra",
+        title: "新春回馈",
+        usage_micros_per_5h: 37_000_000,
+        usage_micros_per_week: 412_000_000,
+        valid_from: "2026-07-01T00:00:00Z",
+        valid_until: "2026-07-20T00:00:00Z",
+      },
+      {
+        grant_id: "g_gift2",
+        tier: "custom",
+        role: "extra",
+        usage_micros_per_5h: 37_000_000,
+        usage_micros_per_week: 412_000_000,
+        valid_from: "2026-07-01T00:00:00Z",
+        valid_until: "2026-07-21T00:00:00Z",
+      },
+      {
+        grant_id: "g_x1",
+        tier: "extra",
+        role: "extra",
+        usage_micros_per_5h: 40_000_000,
+        usage_micros_per_week: 200_000_000,
+        valid_from: "2026-07-01T00:00:00Z",
+        valid_until: "2026-07-22T00:00:00Z",
+      },
+    ]);
+    renderDock();
+
+    // (a) title 顶替额度描述。
+    expect(await screen.findByText("新春回馈")).toBeTruthy();
+    // (b) 无 title 的 custom 只剩档位名 —— 5h/周互不成比例，算不出干净的倍数。
+    expect(screen.getAllByText("专属额度").length).toBe(2);
+    // (c) 无 title 的真加量包按单位数换算成 Starter 倍数。
+    expect(screen.getByText("2× Starter 用量")).toBeTruthy();
+    // 礼物的额度绝不能泄露成金额。
+    expect(screen.queryByText(/\$37/)).toBeNull();
+  });
+
   it("顶部额度上限仍是总和，并标明含加量包", async () => {
     seedPlans([
       subPlan,
@@ -1055,9 +1105,9 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
     ]);
     renderDock();
 
-    // 显示订阅层自己的 $100 是错的 —— 实际卡用户的是 $140 这个总和。
+    // 只显示订阅层自己的 5× 是错的 —— 实际卡用户的是 7× 这个总和。
     expect(
-      await screen.findByText(/额度上限 5h \$140 · 每周 \$700（含加量包）/),
+      await screen.findByText(/总用量 7× Starter（含额外额度）/),
     ).toBeTruthy();
   });
 
@@ -1078,8 +1128,8 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
     renderDock();
 
     // 已买的加量包继续供额度到它自己的到期日 —— 不隐藏、不标失效。
-    expect(await screen.findByText("加量包")).toBeTruthy();
-    expect(screen.getByText("5h $40 · 周 $200")).toBeTruthy();
+    expect(await screen.findByText("额外额度")).toBeTruthy();
+    expect(screen.getByText("2× Starter 用量")).toBeTruthy();
     // 置灰而不是隐藏：手上还有加量包在跑却找不到再买一个的地方，会以为是 bug。
     expect(
       screen.getByText(/需要有生效的套餐才能购买加量包/),
@@ -1101,10 +1151,10 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
     renderDock();
 
     expect(await screen.findByText("我的套餐")).toBeTruthy();
-    expect(screen.getByText("5h $100 · 周 $500")).toBeTruthy();
-    expect(screen.getByText("5h $20 · 周 $100")).toBeTruthy();
-    // 空的加量包块比平铺更糟：它在暗示用户少了点什么。
-    expect(screen.queryByText("加量包")).toBeNull();
+    expect(screen.getByText("5× Starter 用量")).toBeTruthy();
+    expect(screen.getByText("Starter · 适合大部分普通用户")).toBeTruthy();
+    // 空的额外额度块比平铺更糟：它在暗示用户少了点什么。
+    expect(screen.queryByText("额外额度")).toBeNull();
   });
 });
 
@@ -1208,9 +1258,9 @@ describe("LlmGatewaySubscriptionDock 新端连老网关", () => {
     renderDock();
 
     expect(await screen.findByText("我的套餐")).toBeTruthy();
-    expect(screen.getByText("5h $100 · 周 $500")).toBeTruthy();
-    // 空标题比没有标题更让人困惑：用户会以为加量包没加载出来。
-    expect(screen.queryByText("加量包")).toBeNull();
+    expect(screen.getByText("5× Starter 用量")).toBeTruthy();
+    // 空标题比没有标题更让人困惑：用户会以为额外额度没加载出来。
+    expect(screen.queryByText("额外额度")).toBeNull();
   });
 
   it("404 之后换档 UI 全部收起，购买流程仍可用", async () => {
@@ -1282,7 +1332,7 @@ describe("LlmGatewaySubscriptionDock 四种 action 的文案", () => {
     vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
       serverSaysActive(),
     );
-    mockQuote({ action: "extra", target_tier: "custom" });
+    mockQuote({ action: "extra", target_tier: "extra" });
     renderDock();
     await userEvent.click(await screen.findByText("购买套餐"));
     await userEvent.click(await screen.findByText("购买加量包"));
