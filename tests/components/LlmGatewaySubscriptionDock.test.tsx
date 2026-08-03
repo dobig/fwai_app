@@ -1411,10 +1411,62 @@ describe("LlmGatewaySubscriptionDock 四种 action 的文案", () => {
   ] as const)("%s 的主文案", async (action, pattern) => {
     await checkoutWith({ action, target_tier: "business" });
     expect(await screen.findByText(pattern)).toBeTruthy();
-    // 四个数字任何一种 action 下都得在。
-    expect(screen.getByText("余额抵扣")).toBeTruthy();
+    // 结算后的状态两行任何一种 action 下都得在。两笔抵扣不在这里断言：这个
+    // 桩的两笔都是 0，而零抵扣的正确呈现是整行不出现（见下面两个用例）。
     expect(screen.getByText("剩余余额")).toBeTruthy();
     expect(screen.getByText("实付")).toBeTruthy();
+    expect(screen.queryByText("套餐折抵")).toBeNull();
+    expect(screen.queryByText("余额抵扣")).toBeNull();
+  });
+
+  it("套餐折抵与余额抵扣分两行，各自记各自的钱", async () => {
+    // 这两个数字必须分开显示，服务端分成两个字段发就是为了这个。合在一行的
+    // 后果是双向的：升档时几百刀的套餐折抵会被贴上「余额」的标签，用户以为
+    // 账户里有这么多钱；而真正花掉的余额一行都没有，用户看着余额变少却在页面
+    // 上找不到任何解释 —— 后者是实测中真踩到的（business 生效时排 $20 降档，
+    // 折抵 $0、余额花掉 $16.67，页面上只有一行「余额抵扣 -$0」）。
+    await checkoutWith({
+      action: "queue",
+      target_tier: "starter",
+      credit_applied_micros: 20_000_000,
+      balance_applied_micros: 16_660_000,
+      amount_due_micros: 3_340_000,
+      resulting_balance_micros: 0,
+    });
+
+    expect(await screen.findByText("套餐折抵")).toBeTruthy();
+    expect(screen.getByText("-$20")).toBeTruthy();
+    expect(screen.getByText("余额抵扣")).toBeTruthy();
+    expect(screen.getByText("-$16.66")).toBeTruthy();
+  });
+
+  it("只花了余额、没有套餐折抵时不渲染折抵行", async () => {
+    // 绝大多数「账户里有余额的普通购买」是这条路径。写「套餐折抵 -$0」既没有
+    // 信息又会让人以为有什么东西被折算掉了。
+    await checkoutWith({
+      action: "queue",
+      target_tier: "starter",
+      credit_applied_micros: 0,
+      balance_applied_micros: 16_660_000,
+      amount_due_micros: 3_340_000,
+    });
+
+    expect(await screen.findByText("余额抵扣")).toBeTruthy();
+    expect(screen.queryByText("套餐折抵")).toBeNull();
+  });
+
+  it("老服务端不发 balance_applied_micros 时不渲染余额抵扣行", async () => {
+    // 这个字段是可选的。undefined 必须读成「没花余额」，而不是渲染成 NaN 或
+    // 者 -$0 —— 老网关下这一行永远不该出现。
+    await checkoutWith({
+      action: "upgrade_now",
+      target_tier: "business",
+      credit_applied_micros: 50_000_000,
+      balance_applied_micros: undefined,
+    });
+
+    expect(await screen.findByText("套餐折抵")).toBeTruthy();
+    expect(screen.queryByText("余额抵扣")).toBeNull();
   });
 
   it("extra 说的是叠加而不是换档", async () => {

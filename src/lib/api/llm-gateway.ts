@@ -408,7 +408,12 @@ export async function getPaymentOrder(
 // 实际扣款就会不同。
 export interface GatewayPlanQuote {
   action: "upgrade_now" | "renew" | "queue" | "activate_now" | "extra";
-  credit_applied_micros: number; // 旧档剩余价值抵扣了多少
+  credit_applied_micros: number; // 旧档剩余价值 + 被吸收的排队档，抵扣了多少
+  // 这一单花掉了多少**账户余额**。和 credit_applied_micros 是两回事，服务端
+  // 分开给就是要求分开显示：前者是这次换档换算出来的，后者是账户里本来就有的
+  // 钱。合成一个数字的话，用户看到余额少了却在页面上找不到任何一行解释它 ——
+  // 这正是最容易变成工单的那类困惑。老服务端不发，所以可选。
+  balance_applied_micros?: number;
   amount_due_micros: number; // 实际要付多少（可能为 0）
   amount_cents: number; // 微信收款金额（分）
   // 新套餐的生效日。**排队时不要拿当前生效档的到期日代替它** —— 服务端排到的是

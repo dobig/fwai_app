@@ -64,11 +64,32 @@ export function PlanCheckout({
   busy,
   onConfirm,
 }: PlanCheckoutProps) {
+  // 两笔抵扣分两行，因为它们是两回事：套餐折抵是这次换档现算出来的（旧档剩余
+  // 价值 + 被吸收的排队档），余额抵扣花的是账户里本来就有的钱。这一行原先只有
+  // 一个「余额抵扣」，读的却是 credit_applied_micros —— 于是升档时几百刀的套餐
+  // 折抵被贴上「余额」的标签（用户以为账户里有这么多钱），而真正花掉的余额一行
+  // 都没有（用户看着余额变少，页面上找不到解释）。服务端从一开始就把两个字段
+  // 分开发，就是为了让这里分开显示。
+  //
+  // 各自为零时整行不渲染：写「-$0」既没有信息又占位置，而「这一单没动余额」本来
+  // 就该由「没有这一行」来表达。剩余余额那行则无条件显示 —— 它是状态不是事件。
   const rows: { label: string; value: string; hint?: string }[] = [
-    {
-      label: "余额抵扣",
-      value: `-${formatMicrosUSD(quote.credit_applied_micros)}`,
-    },
+    ...(quote.credit_applied_micros > 0
+      ? [
+          {
+            label: "套餐折抵",
+            value: `-${formatMicrosUSD(quote.credit_applied_micros)}`,
+          },
+        ]
+      : []),
+    ...((quote.balance_applied_micros ?? 0) > 0
+      ? [
+          {
+            label: "余额抵扣",
+            value: `-${formatMicrosUSD(quote.balance_applied_micros ?? 0)}`,
+          },
+        ]
+      : []),
     {
       label: quote.action === "queue" ? "切换后有效期至" : "新的有效期至",
       value: formatPlanDate(quote.new_valid_until) || "—",
