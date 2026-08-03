@@ -20,7 +20,9 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./tests/setupGlobals.ts"],
     globals: true,
-    include: ["tests/live/**/*.live.test.ts"],
+    // .tsx 也收进来：epic 的联调用例要 render 真组件（tests/live/planEpic），
+    // 只验 API 层的字段验不出「字段对了但组件走错分支」。
+    include: ["tests/live/**/*.live.test.ts", "tests/live/**/*.live.test.tsx"],
     // 真的要连一个进程、下真实订单、轮询回调，比单测慢一个量级。
     testTimeout: 60_000,
     hookTimeout: 60_000,
