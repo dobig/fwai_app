@@ -371,10 +371,11 @@ export function LlmGatewaySubscriptionDock() {
   // 在前——那也是先被扣额度的那一层。老服务端不返回这个字段，取空数组，
   // 展示逻辑会退回单套餐那一行。
   const planList = subscription?.plans ?? [];
-  // 有没有生效的**订阅层**。加量包必须有订阅层才能买——只有加量包、订阅已
-  // 过期时服务端会拒（subscription_required），所以入口就要置灰。
-  // 注意这里查的不是「任何生效 grant」：那样的话加量包能给自己续命，门槛
-  // 形同虚设。老服务端不返回 role 也不返回 plans，退回看 isActive。
+  // 有没有生效的**订阅层**。这曾经是「能不能买加量包」的判据 —— 服务端要求
+  // 底下必须垫一个订阅层，否则 409。那个前置已经取消（赠送的额度是 extra
+  // 角色，被赠送的用户根本没有订阅层，却最该能加量），所以这个标志现在**只
+  // 决定文案**：有档位时说「更换 / 续费」，没有时说「购买」。
+  // 老服务端不返回 role 也不返回 plans，退回看 isActive。
   const hasActiveSubscriptionTier =
     planList.length > 0
       ? planList.some((p) => planRole(p) === "subscription" && !p.pending)
@@ -1572,7 +1573,6 @@ requires_openai_auth = true`,
             {subscription && (
               <PlanSections
                 subscription={subscription}
-                canBuyExtra={hasActiveSubscriptionTier}
                 onSwitchPlan={
                   // 老网关不做换档判定，给个换档入口只会让人点进去买到
                   // 一份并行叠加的套餐。版本过旧同理：点进去也买不成。
@@ -2097,24 +2097,37 @@ requires_openai_auth = true`,
               <>
                 {/* 意图分支。同一个「买套餐」动作在新模型下有两种完全不同的
                     含义，服务端靠 as_extra 区分，所以用户必须先表达意图。
-                    没有生效订阅时不问 —— 多余的选择题只会让首购用户困惑，
-                    而且加量包本来也买不了。
 
-                    老网关（探测到没有 quote 端点）也不问：那边不认 as_extra，
+                    没有订阅层时**照样要问**：加量包不再需要底下垫一个套餐
+                    （服务端已取消该前置），而没有订阅层的人恰恰包括被赠送额度
+                    的用户 —— 赠送的额度是 extra 角色，他们手上有量可用却一个
+                    档位都没有。不问的话，这条路径在 UI 上根本走不到。
+
+                    老网关（探测到没有 quote 端点）仍然不问：那边不认 as_extra，
                     选了加量包只会买到一份并行叠加的普通套餐。 */}
-                {hasActiveSubscriptionTier && quoteSupported !== false && (
+                {quoteSupported !== false && (
                   <div className="mb-3 grid grid-cols-2 gap-2">
                     {(
                       [
                         {
                           key: "subscription" as const,
-                          title: "更换 / 续费套餐",
-                          desc: "升档、续费立即生效，降档到期后生效",
+                          // 没有档位时说「更换 / 续费」是假的 —— 那一单会是
+                          // activate_now，用户没有东西可换也没有东西可续。
+                          // 不能叫「购买套餐」：打开这个面板的入口按钮就是
+                          // 这四个字，两处同名会让人以为点错了地方。
+                          title: hasActiveSubscriptionTier
+                            ? "更换 / 续费套餐"
+                            : "订阅套餐",
+                          desc: hasActiveSubscriptionTier
+                            ? "升档、续费立即生效，降档到期后生效"
+                            : "按月付费，立即生效",
                         },
                         {
                           key: "extra" as const,
                           title: "购买加量包",
-                          desc: "立即生效，额度叠加，不影响当前套餐",
+                          desc: hasActiveSubscriptionTier
+                            ? "立即生效，额度叠加，不影响当前套餐"
+                            : "立即生效，额度叠加，无需先买套餐",
                         },
                       ] as const
                     ).map((opt) => (

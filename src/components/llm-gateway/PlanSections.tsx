@@ -27,13 +27,6 @@ export interface PlanSectionsProps {
   onSwitchPlan?: () => void;
   /** 进入加量包购买流程。 */
   onBuyExtra?: () => void;
-  /**
-   * 能否购买加量包。服务端规定必须有生效的**订阅层**才能买（只有加量包、
-   * 订阅已过期时会被拒），所以这里在入口就置灰。
-   * 置灰而不是隐藏 —— 用户手上还有加量包在跑却找不到再买一个的地方，
-   * 会以为是 bug。
-   */
-  canBuyExtra: boolean;
 }
 
 // 一份额度怎么描述给用户。**永远不显示 5h/周的具体金额** —— 那两个数字对
@@ -63,7 +56,6 @@ export function PlanSections({
   subscription,
   onSwitchPlan,
   onBuyExtra,
-  canBuyExtra,
 }: PlanSectionsProps) {
   const plans = subscription.plans ?? [];
   const subscriptions = plans.filter((p) => planRole(p) === "subscription");
@@ -168,11 +160,7 @@ export function PlanSections({
             {onBuyExtra && (
               <button
                 type="button"
-                disabled={!canBuyExtra}
-                title={
-                  canBuyExtra ? undefined : "需要有生效的套餐才能购买加量包"
-                }
-                className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-muted-foreground"
+                className="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition hover:text-foreground"
                 onClick={onBuyExtra}
               >
                 <PackagePlus className="h-3 w-3" />
@@ -209,11 +197,6 @@ export function PlanSections({
           </div>
           {/* 订阅过期后已买的加量包继续供额度到它自己的到期日，只是期间买不了
               新的。这是有意的产品行为，所以这里说明原因而不是把入口藏掉。 */}
-          {!canBuyExtra && (
-            <div className="mt-1 px-0.5 text-[10px] leading-relaxed text-muted-foreground">
-              需要有生效的套餐才能购买加量包；已买的加量包不受影响，会用到各自的到期日
-            </div>
-          )}
         </section>
       )}
     </div>

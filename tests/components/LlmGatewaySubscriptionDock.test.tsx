@@ -505,7 +505,7 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     expect(createOrder.mock.calls[0][4]).toBe(false);
   });
 
-  it("没有生效套餐时不问意图，直接进档位列表", async () => {
+  it("没有生效套餐时照样问意图，且文案说的是「购买」而不是「更换」", async () => {
     seedLoggedOutOfPlan();
     vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue({
       subscription: { active: false },
@@ -533,9 +533,14 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     renderDock();
     await userEvent.click(await screen.findByText("购买套餐"));
 
-    // 首购用户买不了加量包，多问一道选择题只会让人困惑。
+    // 加量包不再需要底下垫一个套餐，所以首购用户也有真选择 —— 被赠送额度的
+    // 用户尤其如此：赠送的是 extra 角色，他们有量可用却一个档位都没有，不问
+    // 的话这条路径在 UI 上根本走不到。
     expect(await screen.findByText("选择套餐 · 微信支付")).toBeTruthy();
-    expect(screen.queryByText("购买加量包")).toBeNull();
+    expect(screen.getByText("购买加量包")).toBeTruthy();
+    // 没有档位时说「更换 / 续费」是假的：那一单会是 activate_now。
+    expect(screen.getByText("订阅套餐")).toBeTruthy();
+    expect(screen.queryByText("更换 / 续费套餐")).toBeNull();
     await userEvent.click(await screen.findByText("$100"));
     mockQuote();
     await userEvent.click(await screen.findByText(/^下一步/));
@@ -1201,9 +1206,11 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
     ).toBeTruthy();
   });
 
-  it("订阅已过期但仍有加量包：加量包正常显示，购买入口置灰并给出原因", async () => {
-    // 服务端规定加量包必须有生效的**订阅层**才能买；只有加量包时必须拒绝，
-    // 否则加量包能给自己续命，那道门槛就形同虚设。
+  it("订阅已过期但仍有加量包：加量包正常显示，且还能再买一个", async () => {
+    // 曾经要求必须有生效的订阅层才能买加量包，入口在这里置灰。那个前置已经
+    // 取消：定价上加量包从来不比整档划算（1 单位 = $20，与 starter 同价同额度，
+    // 且不吃周期折扣），门槛没有保护任何东西；而它真正挡住的是**被赠送额度的
+    // 用户** —— 赠送的是 extra 角色，他们手上有量却没有订阅层。
     seedPlans([
       {
         grant_id: "g_x1",
@@ -1220,10 +1227,9 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
     // 已买的加量包继续供额度到它自己的到期日 —— 不隐藏、不标失效。
     expect(await screen.findByText("额外额度")).toBeTruthy();
     expect(screen.getByText("2× Starter 用量")).toBeTruthy();
-    // 置灰而不是隐藏：手上还有加量包在跑却找不到再买一个的地方，会以为是 bug。
-    expect(
-      screen.getByText(/需要有生效的套餐才能购买加量包/),
-    ).toBeInTheDocument();
+    // 入口可用，且不再挂着那句解释为什么不能买的小字。
+    expect(screen.getByText("再买一个")).toBeEnabled();
+    expect(screen.queryByText(/需要有生效的套餐才能购买加量包/)).toBeNull();
   });
 
   it("老服务端（无 role）：所有套餐落在「我的套餐」块，不崩不空白", async () => {

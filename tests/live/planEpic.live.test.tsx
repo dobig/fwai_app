@@ -83,7 +83,7 @@ async function adminPost(
 
 // 每个用例都重新 render 一次：组件读的是快照，服务端状态变了得重新喂进去。
 function renderAccountScreen(s: GatewaySubscriptionStatus) {
-  const view = render(<PlanSections subscription={s} canBuyExtra />);
+  const view = render(<PlanSections subscription={s} />);
   return view;
 }
 
