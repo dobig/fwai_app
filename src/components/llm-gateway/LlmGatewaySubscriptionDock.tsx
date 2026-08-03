@@ -1860,11 +1860,13 @@ requires_openai_auth = true`,
               <div className="flex flex-col items-center gap-3 py-1 text-center">
                 <h4 className="text-[15px] font-semibold">微信扫码支付</h4>
                 <div className="text-xs text-muted-foreground">
+                  {/* priceUSD 只在 asExtra 时才会被填（见 setPending），所以
+                      第一个分支已经覆盖了它的全部取值。自选金额档删掉之后，
+                      原来那个 `自选 $X` 分支永远走不到了，留着只会让人以为
+                      客户端还有一条自报价格的下单路径。 */}
                   {pending.asExtra
                     ? `加量包 ${Math.round((pending.priceUSD ?? 0) / EXTRA_UNIT_USD)} 单位`
-                    : pending.priceUSD !== undefined
-                      ? `自选 $${pending.priceUSD}`
-                      : `${planLabel(pending.planId)} 套餐`}{" "}
+                    : `${planLabel(pending.planId)} 套餐`}{" "}
                   · {findPeriod(pending.period).label} ·{" "}
                   {formatMicrosUSD(pending.amountMicros)}
                 </div>
@@ -2027,9 +2029,14 @@ requires_openai_auth = true`,
                           className="w-16 rounded-md border border-border bg-background px-2 py-1 text-right text-sm font-semibold outline-none focus:border-primary"
                         />
                       </label>
+                      {/* 额度用相对描述，不给具体金额 —— 理由同档位卡片
+                          （见 planDescription）。1 单位恒等于 $20 = 1× Starter，
+                          所以 N 单位就是 N×，倍数是精确的。上面那行标签里的
+                          $20 是**价格**不是额度，保留：用户得知道花多少钱。 */}
                       <div className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                        额度按单位线性叠加：5 小时 ${monthlyUSD || "—"} · 每周 $
-                        {monthlyUSD ? monthlyUSD * 5 : "—"}
+                        {units
+                          ? `${units} 单位 = ${units}× Starter 的用量，叠加在当前套餐之上`
+                          : "额度按单位线性叠加在当前套餐之上"}
                       </div>
                       {units === null && (
                         <div className="mt-1 text-[11px] font-medium text-red-500">

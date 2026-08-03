@@ -593,6 +593,55 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     expect(asExtra).toBe(true);
   });
 
+  // 加量包页是「不显示额度金额」这条规则最后一个漏网的渲染点：档位卡片、
+  // 周期页、账户页都改完之后，它还在印 `5 小时 $40 · 每周 $200`。没有断言
+  // 钉住的话，下次有人想「这里给个具体数更清楚」就又回去了。
+  it("加量包页只说倍数，不印 5h/周的美元额度", async () => {
+    seedStackedPlans();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    const createOrder = vi.spyOn(gateway, "createPlanOrder").mockResolvedValue({
+      order_id: "pay_3",
+      code_url: "weixin://wxpay/bizpayurl?pr=extra",
+      plan_id: "extra",
+      period: "1m",
+      duration_days: 30,
+      months: 1,
+      amount_credits: 40_000_000,
+      amount_cents: 28800,
+      exchange_rate: 7.2,
+      currency: "CNY",
+    } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
+
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("购买加量包"));
+    const units = await screen.findByRole("spinbutton");
+    await userEvent.clear(units);
+    await userEvent.type(units, "2");
+
+    expect(await screen.findByText(/2 单位 = 2× Starter 的用量/)).toBeTruthy();
+    // `单位数（1 单位 = $20/月）` 那行是**价格**，必须留着；被禁的是把价格
+    // 换算成 5h / 每周的额度金额。所以只查这两个窗口名旁边的美元数。
+    expect(document.body.textContent).not.toMatch(/5 小时 \$/);
+    expect(document.body.textContent).not.toMatch(/每周 \$/);
+
+    mockQuote({
+      action: "extra",
+      amount_due_micros: 40_000_000,
+      target_tier: "extra",
+    });
+    await userEvent.click(await screen.findByText(/^下一步/));
+    await userEvent.click(await screen.findByText(/^微信支付/));
+    await waitFor(() => expect(createOrder).toHaveBeenCalled());
+
+    // 扫码页按单位数报数，不是按自报金额。自选档删掉之后 `自选 $X` 那个
+    // 分支已经不可达（priceUSD 只在 asExtra 时才有值），这里钉住它别复活。
+    expect(await screen.findByText(/加量包 2 单位/)).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/自选 \$/);
+  });
+
   it("单位数非法时不让下单", async () => {
     seedStackedPlans();
     vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
