@@ -1132,9 +1132,9 @@ requires_openai_auth = true`,
   // 选完档位和周期后拉报价，进结账页。
   //
   // **拉不到报价就不放行付款**：没有报价意味着客户端不知道点下去会发生什么
-  // ——可能立即换档，也可能排队到下个月，而后者不可撤销。唯一的例外是老服务
-  // 端（没有 quote 端点，404），那种情况下服务端本来也不会做换档判定，直接
-  // 沿用旧流程下单。
+  // ——可能立即换档，也可能排队到下个月，而后者要到下个周期才生效。唯一的例外
+  // 是老服务端（没有 quote 端点，404），那种情况下服务端本来也不会做换档判定，
+  // 直接沿用旧流程下单。
   async function goToCheckout(
     planId: string,
     periodKey: string,
@@ -1181,7 +1181,7 @@ requires_openai_auth = true`,
     }
   }
 
-  /** 结账页点确认。排队不可撤销，先弹二次确认。 */
+  /** 结账页点确认。排队要到下个周期才生效且不退现金，先弹二次确认。 */
   function handleCheckoutConfirm() {
     if (!checkout) return;
     if (checkout.quote.action === "queue") {
@@ -2338,9 +2338,9 @@ requires_openai_auth = true`,
         )}
       </div>
 
-      {/* 排队生效的换档（降档或同档续费）服务端不提供取消端点，也不退款。
+      {/* 排队生效的换档（降档或同档续费）服务端不提供取消端点，也不退现金。
           页面上那行小字挡不住误操作，这里再拦一道，把三件事说清楚：什么时候
-          生效、不可撤销、期间当前套餐照常可用。 */}
+          生效、钱不退现金但改主意时会折成抵扣、期间当前套餐照常可用。 */}
       <ConfirmDialog
         isOpen={confirmQueue}
         title="确认排队切换套餐？"
@@ -2350,7 +2350,7 @@ requires_openai_auth = true`,
                 formatPlanDate(subscription?.valid_until)
                   ? `（${formatPlanDate(subscription?.valid_until)}）`
                   : ""
-              }自动切换到 ${planLabel(checkout.quote.target_tier)}。\n\n此操作不可撤销、不退款。\n\n切换前当前套餐照常可用，额度不受影响。`
+              }自动切换到 ${planLabel(checkout.quote.target_tier)}。\n\n此操作不退款。之后如果改主意再换别的套餐，这笔费用会全额折算抵扣。\n\n切换前当前套餐照常可用，额度不受影响。`
             : ""
         }
         confirmText="确认切换"

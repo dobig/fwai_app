@@ -707,9 +707,10 @@ describe("LlmGatewaySubscriptionDock 换档结账页", () => {
   });
 
   it("queue 的切换日期取服务端的 new_valid_from，不是当前档到期日", async () => {
-    // 服务端排队排到的是订阅层里**最远**的到期日（含已经排了的档），不是当前
-    // 生效档的到期日。用户已经排了一个降档时两者差一整个周期，照当前档到期日
-    // 写文案会显示一个比实际早一个月的切换日期 —— 联调时对着真 gateway 抓到的。
+    // 生效日一律以服务端算的为准，客户端不自己推。历史上两者真的会差一整个
+    // 周期（那时排队会排到订阅层最远的到期日），现在排队单改成被替换，两者
+    // 通常一致 —— 但「通常一致」不是「可以自己算」：周期、加量包、免费档都可能
+    // 让服务端选一个客户端猜不到的日子。这里用一个不一致的报价钉住这条规矩。
     await openCheckout({
       action: "queue",
       amount_due_micros: 20_000_000,
@@ -746,6 +747,42 @@ describe("LlmGatewaySubscriptionDock 换档结账页", () => {
     ).toBeTruthy();
   });
 
+  it("queue 抵扣非零时把抵扣额写进主文案", async () => {
+    // 用户先排了一个 $20 降档，又改主意排 $100。服务端把那 $20 全额折成抵扣，
+    // 实付只剩 $80。主文案不提这件事的话，用户会以为自己第二次又付了全款 ——
+    // 「余额抵扣」那一行写的是 -$20，光看它分不清抵扣的是余额还是上一单。
+    await openCheckout({
+      action: "queue",
+      credit_applied_micros: 20_000_000,
+      amount_due_micros: 80_000_000,
+      new_valid_from: "2099-01-01T00:00:00Z",
+      new_valid_until: "2099-02-01T00:00:00Z",
+      current_tier: "business",
+      target_tier: "pro",
+    });
+
+    expect(
+      await screen.findByText(/自动切换到 \$100，已排队套餐的费用折算抵扣 \$20/),
+    ).toBeTruthy();
+  });
+
+  it("queue 抵扣为零时不提抵扣", async () => {
+    // 绝大多数降档是这条路径。写「抵扣 $0」只会让用户以为自己亏了。
+    await openCheckout({
+      action: "queue",
+      credit_applied_micros: 0,
+      amount_due_micros: 20_000_000,
+      new_valid_from: "2099-01-01T00:00:00Z",
+      current_tier: "pro",
+      target_tier: "starter",
+    });
+
+    expect(await screen.findByText(/自动切换到 \$20$/)).toBeTruthy();
+    // 主文案里不能出现抵扣那一句。（下面那条琥珀色警告里有「折算抵扣」四个字，
+    // 那是在说「以后改主意钱不会白付」，跟这一单的抵扣额是两回事。）
+    expect(screen.queryByText(/已排队套餐的费用折算抵扣/)).toBeNull();
+  });
+
   it("queue 弹二次确认，取消则不下单", async () => {
     const createOrder = vi.spyOn(gateway, "createPlanOrder");
     await openCheckout({
@@ -759,10 +796,14 @@ describe("LlmGatewaySubscriptionDock 换档结账页", () => {
     });
 
     expect(await screen.findByText(/自动切换到 \$20/)).toBeTruthy();
-    expect(screen.getByText(/此操作不可撤销、不退款/)).toBeTruthy();
+    // 「不退款」仍然成立（换不回现金），「不可撤销」不成立了：再买别的档时
+    // 这笔钱会全额折成抵扣。文案说错哪一边都会劝退一批用户。
+    expect(screen.getByText(/此操作不退款/)).toBeTruthy();
+    expect(screen.getByText(/全额折算抵扣新套餐/)).toBeTruthy();
+    expect(screen.queryByText(/不可撤销/)).toBeNull();
 
     await userEvent.click(screen.getByText(/^微信支付/));
-    // 降档不退款也不可取消，一行小字挡不住误操作。
+    // 钱是真要付出去的，一行小字挡不住误操作。
     expect(await screen.findByText("确认排队切换套餐？")).toBeTruthy();
     expect(
       screen.getAllByText(/切换前当前套餐照常可用/).length,
@@ -799,8 +840,8 @@ describe("LlmGatewaySubscriptionDock 换档结账页", () => {
   it("activate_now / extra 各有自己的文案", async () => {
     await openCheckout({ action: "activate_now", target_tier: "business" });
     expect(await screen.findByText(/立即生效：\$200/)).toBeTruthy();
-    // 立即生效不该出现不可撤销的警告——那只属于排队。
-    expect(screen.queryByText(/此操作不可撤销/)).toBeNull();
+    // 立即生效不该出现那条不退款的警告——它只属于排队。
+    expect(screen.queryByText(/此操作不退款/)).toBeNull();
   });
 
   it("报价失败不放行付款", async () => {
@@ -1349,7 +1390,7 @@ describe("LlmGatewaySubscriptionDock 新端连老网关", () => {
 });
 
 // 四种 action 的结账页文案。选错分支意味着用户对「点下去会发生什么」的预期
-// 是错的——尤其 queue 那条不可撤销。
+// 是错的——尤其 queue 那条：钱要等下个周期才买到东西。
 describe("LlmGatewaySubscriptionDock 四种 action 的文案", () => {
   async function checkoutWith(patch: Partial<gateway.GatewayPlanQuote>) {
     seedActivePlan();
@@ -1390,8 +1431,8 @@ describe("LlmGatewaySubscriptionDock 四种 action 的文案", () => {
     expect(
       await screen.findByText(/加量包立即生效，与当前套餐额度叠加/),
     ).toBeTruthy();
-    // 加量包不动订阅层，不该出现「不可撤销」那条警告。
-    expect(screen.queryByText(/此操作不可撤销/)).toBeNull();
+    // 加量包不动订阅层，不该出现排队那条不退款的警告。
+    expect(screen.queryByText(/此操作不退款/)).toBeNull();
   });
 });
 

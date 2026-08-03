@@ -28,18 +28,28 @@ function actionHeadline(
   switch (quote.action) {
     case "upgrade_now":
       // 只说金额，不说「剩余 X 天」—— 天数得从抵扣额反推，和服务端的取整
-      // 规则对不上时反而制造客诉。
-      return `立即升级到 ${planLabel(quote.target_tier)}，旧套餐剩余时长已折算抵扣 ${formatMicrosUSD(quote.credit_applied_micros)}`;
-    case "renew":
-      // 不提抵扣 —— 续费没有任何东西被替换掉，旧的时长一天都不作废，
-      // 说「抵扣 $0」只会让用户以为亏了。用户要确认的是新的到期日。
-      return `续费 ${planLabel(quote.target_tier)}，有效期延长至 ${formatPlanDate(quote.new_valid_until)}`;
+      // 规则对不上时反而制造客诉。说「剩余价值」而不是「剩余时长」：这笔抵扣
+      // 里还可能含着一个已付费但没开始的排队档，那部分和时长无关。
+      return `立即升级到 ${planLabel(quote.target_tier)}，旧套餐剩余价值已折算抵扣 ${formatMicrosUSD(quote.credit_applied_micros)}`;
+    case "renew": {
+      // 续费本身不作废任何时长，抵扣通常是 0，说「抵扣 $0」只会让用户以为亏了。
+      // 但用户排了一个降档又回头续费时不是 0：那张排队单会被全额折进来。
+      const head = `续费 ${planLabel(quote.target_tier)}，有效期延长至 ${formatPlanDate(quote.new_valid_until)}`;
+      return quote.credit_applied_micros > 0
+        ? `${head}，已排队套餐的费用折算抵扣 ${formatMicrosUSD(quote.credit_applied_micros)}`
+        : head;
+    }
     case "queue": {
-      // 优先用服务端算好的生效日。currentValidUntil 只是老服务端（不发
-      // new_valid_from）的兜底：它取的是**当前生效档**的到期日，而服务端排到的是
-      // 订阅层里最远的到期日，用户已经排了一个降档时两者差一整个周期。
+      // 优先用服务端算好的生效日。currentValidUntil 是老服务端（不发
+      // new_valid_from）的兜底，它取的是**当前生效档**的到期日 —— 服务端现在排
+      // 的正是这个日子（排队单会被替换而不是串在后面），两者一致。
       const when = formatPlanDate(quote.new_valid_from ?? currentValidUntil);
-      return `当前套餐到期后${when ? `（${when}）` : ""}自动切换到 ${planLabel(quote.target_tier)}`;
+      const head = `当前套餐到期后${when ? `（${when}）` : ""}自动切换到 ${planLabel(quote.target_tier)}`;
+      // 抵扣在降档里通常是 0，但用户改主意时不是：上一个排队单已付的钱会全额
+      // 折进来。不说这一句，用户看到「实付 $0」会以为下错了单。
+      return quote.credit_applied_micros > 0
+        ? `${head}，已排队套餐的费用折算抵扣 ${formatMicrosUSD(quote.credit_applied_micros)}`
+        : head;
     }
     case "activate_now":
       return `立即生效：${planLabel(quote.target_tier)}`;
@@ -102,12 +112,16 @@ export function PlanCheckout({
         </div>
       </div>
 
-      {/* 降档/续费排队不退款、不可取消（服务端没有取消端点）。这里先说一次，
-          点下去还会再弹一次确认 —— 一行小字挡不住误操作。 */}
+      {/* 排队单没有取消端点，也不退现金 —— 但**不是锁死**：再买任何一档时，
+          这笔钱会全额折成抵扣。原来这里写的是「不可撤销」，那句话会让想改主意的
+          用户不敢下单，而事实上他随时能改。仍然保留警告色和二次确认：钱是真要
+          付出去的，只是它以后只能花在购买上，换不回现金。 */}
       {quote.action === "queue" && (
         <div className="mt-2 flex items-start gap-1.5 rounded-lg bg-amber-500/10 px-2.5 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-none" />
-          <span>此操作不可撤销、不退款。切换前当前套餐照常可用。</span>
+          <span>
+            此操作不退款。切换前当前套餐照常可用；之后如果改主意，这笔费用会全额折算抵扣新套餐。
+          </span>
         </div>
       )}
 

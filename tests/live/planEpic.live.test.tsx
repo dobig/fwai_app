@@ -122,7 +122,8 @@ describe(`plan epic 联调 (${BASE})`, () => {
     const q = await fetchPlanQuote("pro", "3m");
     // 这是用户报的那个 bug 的核心：服务端曾经把同档当降档排队。
     expect(q.action).toBe("renew");
-    // 续费没有任何东西被替换，所以一分钱抵扣都不该有。
+    // 这个账号队列是空的，续费没有任何东西被替换，所以一分钱抵扣都不该有。
+    // （队列非空时续费会吸收它，那时抵扣不为 0 —— 见 #199。）
     expect(q.credit_applied_micros).toBe(0);
 
     // 客户端这一侧：actionHeadline 的 switch 没有 default，漏 case 是编译错误，
