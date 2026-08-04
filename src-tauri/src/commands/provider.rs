@@ -255,6 +255,27 @@ pub fn start_forwarding(
     .map_err(|e| e.to_string())
 }
 
+/// token 轮换：只把新凭据覆盖到 live，其余字节不动。转发没开则是 no-op。
+///
+/// 刷新走这条窄路径而不是 `update_provider`：后者在转发期间是整文件写，而前端
+/// 造的网关条目只有凭据字段，整份写出去会把用户的配置削光。
+#[tauri::command]
+pub fn refresh_forwarding_credentials(
+    state: State<'_, AppState>,
+    app: String,
+    token: String,
+    #[allow(non_snake_case)] baseUrl: String,
+) -> Result<(), String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    crate::services::provider::forwarding::refresh_credentials(
+        state.inner(),
+        &app_type,
+        &token,
+        &baseUrl,
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// 结束转发：只把 endpoint + api key 还原成转发前的值（原本没有就删掉），
 /// 转发期间用户对 live 配置做的其它修改全部保留。
 #[tauri::command]

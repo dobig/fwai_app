@@ -80,6 +80,23 @@ export const providersApi = {
     return await invoke("stop_forwarding", { app: appId });
   },
 
+  /// token 轮换：只把新凭据覆盖到 live，其余字节不动。转发没开则是 no-op。
+  ///
+  /// 刷新必须走这条窄路径而不是 update：转发期间 update 是整文件写，而
+  /// buildGatewayProvider 造的是只有凭据的最小配置，整份写出去会把用户的
+  /// live 配置削光。
+  async refreshForwardingCredentials(
+    appId: AppId,
+    token: string,
+    baseUrl: string,
+  ): Promise<void> {
+    return await invoke("refresh_forwarding_credentials", {
+      app: appId,
+      token,
+      baseUrl,
+    });
+  },
+
   async isForwarding(appId: AppId): Promise<boolean> {
     return await invoke("is_forwarding", { app: appId });
   },

@@ -547,19 +547,30 @@ requires_openai_auth = true`,
     }
   }
 
-  // token 刷新后把新 token 写进条目。update 只在该条目是当前供应商时才落盘；
-  // 转发开着的话后端会把这次落盘降级成「只覆盖 endpoint + key」（见 Rust 侧
-  // forwarding::intercept_live_write），所以刷新 token 不会顺手把用户在转发
-  // 期间改的配置盖掉。
+  // token 刷新后把新 token 写进条目。
+  //
+  // 转发开着时必须走 refreshForwardingCredentials 这条窄路径：转发期间 update
+  // 是整文件写（用户在编辑页的改动要能落盘），而这里传的
+  // buildGatewayProvider 是只有凭据的最小配置，整份写出去会把用户的 live 削光。
+  // 窄路径只覆盖 endpoint + key，其余字节不动。
   //
   // 同样只处理当前 app：按「最多一个 app 在转发且必然是当前这个」的不变量，
   // 也只有它可能把网关条目设成当前，也就只有它需要落新 token。
   async function syncGatewayProviderEntry(app: ForwardableApp): Promise<void> {
     try {
       const providers = await providersApi.getAll(app);
-      if (providers[GATEWAY_PROVIDER_ID]) {
-        await providersApi.update(buildGatewayProvider(app), app);
+      if (!providers[GATEWAY_PROVIDER_ID]) return;
+
+      if (await providersApi.isForwarding(app)) {
+        const token = gatewayOAuthAccessToken();
+        const base = getGatewayBaseURL().replace(/\/+$/, "");
+        if (token) {
+          await providersApi.refreshForwardingCredentials(app, token, base);
+        }
+        return;
       }
+
+      await providersApi.update(buildGatewayProvider(app), app);
     } catch {
       // best-effort
     }

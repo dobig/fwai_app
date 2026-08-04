@@ -29,7 +29,7 @@ pub(crate) use live::sanitize_claude_settings_for_live;
 pub(crate) use live::{
     build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
     provider_exists_in_live_config, strip_common_config_from_live_settings,
-    sync_current_provider_for_app_to_live, write_live_with_common_config,
+    sync_current_provider_for_app_to_live, write_live_with_common_config, LiveWriteIntent,
 };
 
 // Internal re-exports
@@ -549,7 +549,12 @@ impl ProviderService {
             state
                 .db
                 .set_current_provider(app_type.as_str(), &provider.id)?;
-            write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+            write_live_with_common_config(
+                state.db.as_ref(),
+                &app_type,
+                &provider,
+                LiveWriteIntent::BackgroundSync,
+            )?;
         }
 
         Ok(true)
@@ -589,7 +594,14 @@ impl ProviderService {
         let is_current = effective_current.as_deref() == Some(provider.id.as_str());
 
         if is_current {
-            write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+            // 用户在编辑页点的保存：转发期间也要整文件写，否则新增/删除的字段
+            // 永远到不了磁盘（凭据仍会被钉成网关的值）。
+            write_live_with_common_config(
+                state.db.as_ref(),
+                &app_type,
+                &provider,
+                LiveWriteIntent::UserSave,
+            )?;
         }
 
         Ok(true)
@@ -870,7 +882,12 @@ impl ProviderService {
         }
 
         // Sync to live (write_gemini_live handles security flag internally for Gemini)
-        write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
+        write_live_with_common_config(
+            state.db.as_ref(),
+            &app_type,
+            provider,
+            LiveWriteIntent::BackgroundSync,
+        )?;
 
         Ok(result)
     }
