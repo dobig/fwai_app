@@ -32,6 +32,8 @@ use crate::error::AppError;
 use crate::provider::Provider;
 use crate::store::AppState;
 
+use super::live::LiveWriteIntent;
+
 const CLAUDE_TOKEN_KEY: &str = "ANTHROPIC_AUTH_TOKEN";
 const CLAUDE_BASE_URL_KEY: &str = "ANTHROPIC_BASE_URL";
 const CODEX_TOKEN_KEY: &str = "OPENAI_API_KEY";
@@ -58,6 +60,16 @@ pub struct ForwardingBackup {
     /// Claude: `env.ANTHROPIC_BASE_URL`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// 网关自己的 token。转发期间的任何 live 写入都以它为准，与用户在编辑页里
+    /// 把凭据改成了什么无关——否则用户保存一次就能把自己踢出转发。
+    ///
+    /// 旧备份没有这两个字段，为 `None` 时回退到从 provider 条目现读（见
+    /// `gateway_credentials`），行为与加这两个字段之前一致。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_token: Option<String>,
+    /// 网关自己的 base_url。Codex 上是不带 `/v1` 的形式，`apply_codex` 会自己拼。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_base_url: Option<String>,
     /// Codex: 转发前生效的 `model_provider` 键。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider: Option<String>,
@@ -251,6 +263,13 @@ fn apply_codex(token: &str, base_url: &str) -> Result<(), AppError> {
     crate::config::write_json_file(&auth_path, &auth)?;
 
     let mut doc = read_codex_doc()?.unwrap_or_default();
+    point_codex_doc_at_gateway(&mut doc, base_url)?;
+    write_codex_doc(&doc)
+}
+
+/// 把一份 config.toml 的 `model_provider` 指到网关那张表，并保证那张表描述的是
+/// 网关地址。只动这两处，其余（`model`、注释、用户自己的 provider 表）不碰。
+fn point_codex_doc_at_gateway(doc: &mut DocumentMut, base_url: &str) -> Result<(), AppError> {
     doc["model_provider"] = toml_edit::value(CODEX_GATEWAY_KEY);
     if doc.get("model_providers").is_none() {
         doc["model_providers"] = toml_edit::table();
@@ -268,8 +287,7 @@ fn apply_codex(token: &str, base_url: &str) -> Result<(), AppError> {
     gateway["base_url"] = toml_edit::value(format!("{}/v1", base_url.trim_end_matches('/')));
     gateway["wire_api"] = toml_edit::value("responses");
     gateway["requires_openai_auth"] = toml_edit::value(true);
-
-    write_codex_doc(&doc)
+    Ok(())
 }
 
 fn restore_codex(backup: &ForwardingBackup) -> Result<(), AppError> {
@@ -379,26 +397,128 @@ fn credentials_from_provider(app_type: &AppType, provider: &Provider) -> Option<
     }
 }
 
+/// 这次 live 写入该钉上去的网关凭据。
+///
+/// 优先取备份里记下的网关值：它是 `start_forwarding` / 刷新时写进去的，与用户
+/// 在编辑页里把 endpoint、key 改成了什么无关。旧备份没有这两个字段，回退到从
+/// provider 条目现读，行为与加字段之前一致。
+fn gateway_credentials(
+    app_type: &AppType,
+    backup: &ForwardingBackup,
+    provider: &Provider,
+) -> Option<(String, String)> {
+    if let (Some(token), Some(base_url)) = (&backup.gateway_token, &backup.gateway_base_url) {
+        return Some((token.clone(), base_url.clone()));
+    }
+    credentials_from_provider(app_type, provider)
+}
+
+/// 拦截器给调用方的指示。
+pub(crate) enum LiveWriteDecision {
+    /// 转发没开、或写的不是转发那个条目。调用方按原有逻辑整文件写。
+    Proceed,
+    /// 已经按字段级覆盖完了，调用方**不要**再写。
+    Handled,
+    /// 照常整文件写，但先把这份配置里的凭据钉成网关的值。
+    ProceedWithPinnedCredentials { token: String, base_url: String },
+}
+
 /// 挂在 `write_live_with_common_config` 上的拦截器。
 ///
-/// 返回 `Ok(true)` 表示这次写入已经按字段级处理完了，调用方**不要**再做整份快照
-/// 写入。转发没开、或者要写的不是转发那个条目时返回 `Ok(false)`，走原有逻辑。
+/// 转发期间「钉住 endpoint + key，放行其余」是这里的核心契约，但放行到什么程度
+/// 取决于是谁发起的写入：
+///
+/// - `UserSave`（编辑页保存）：整文件写，只把两个凭据键钉成网关的值。编辑页的
+///   初值本来就是从 live 读的，所以整份写回 = 「live + 用户改动」，新增和删除
+///   字段都能生效。用户把凭据改成别的值则静默钉回去。
+/// - `BackgroundSync`（切换、启动同步、改通用配置片段）：只覆盖凭据字段。这些
+///   写入的内容来自数据库快照，整份写会把用户绕过 app 手改的 live 内容抹掉。
 pub(crate) fn intercept_live_write(
     db: &Database,
     app_type: &AppType,
     provider: &Provider,
-) -> Result<bool, AppError> {
+    intent: LiveWriteIntent,
+) -> Result<LiveWriteDecision, AppError> {
     let Some(backup) = load_backup(db, app_type)? else {
-        return Ok(false);
+        return Ok(LiveWriteDecision::Proceed);
     };
     if backup.provider_id.as_deref() != Some(provider.id.as_str()) {
-        return Ok(false);
+        return Ok(LiveWriteDecision::Proceed);
     }
-    let Some((token, base_url)) = credentials_from_provider(app_type, provider) else {
-        return Ok(false);
+    let Some((token, base_url)) = gateway_credentials(app_type, &backup, provider) else {
+        return Ok(LiveWriteDecision::Proceed);
     };
-    apply_live(app_type, &token, &base_url)?;
-    Ok(true)
+    match intent {
+        LiveWriteIntent::UserSave => {
+            Ok(LiveWriteDecision::ProceedWithPinnedCredentials { token, base_url })
+        }
+        LiveWriteIntent::BackgroundSync => {
+            apply_live(app_type, &token, &base_url)?;
+            Ok(LiveWriteDecision::Handled)
+        }
+    }
+}
+
+/// 把网关凭据钉进一份即将整文件写出去的配置。
+///
+/// Claude 是 `env` 下的两个键；Codex 是 auth.json 的 key 加上 config.toml 里
+/// `model_provider` 的指向与网关那张表。Gemini 不支持转发，走不到这里。
+pub(crate) fn pin_gateway_credentials(
+    app_type: &AppType,
+    settings: &mut Value,
+    token: &str,
+    base_url: &str,
+) -> Result<(), AppError> {
+    match app_type {
+        AppType::Claude => {
+            if !settings.is_object() {
+                *settings = json!({});
+            }
+            let obj = settings.as_object_mut().expect("settings is an object");
+            let env = obj.entry("env").or_insert_with(|| json!({}));
+            if !env.is_object() {
+                *env = json!({});
+            }
+            let env_obj = env.as_object_mut().expect("env is an object");
+            env_obj.insert(
+                CLAUDE_TOKEN_KEY.to_string(),
+                Value::String(token.to_string()),
+            );
+            env_obj.insert(
+                CLAUDE_BASE_URL_KEY.to_string(),
+                Value::String(base_url.to_string()),
+            );
+            Ok(())
+        }
+        AppType::Codex => {
+            if !settings.is_object() {
+                *settings = json!({});
+            }
+            let obj = settings.as_object_mut().expect("settings is an object");
+
+            let auth = obj.entry("auth").or_insert_with(|| json!({}));
+            if !auth.is_object() {
+                *auth = json!({});
+            }
+            auth.as_object_mut().expect("auth is an object").insert(
+                CODEX_TOKEN_KEY.to_string(),
+                Value::String(token.to_string()),
+            );
+
+            let config_text = obj.get("config").and_then(Value::as_str).unwrap_or("");
+            let mut doc = if config_text.trim().is_empty() {
+                DocumentMut::new()
+            } else {
+                config_text.parse::<DocumentMut>().map_err(|e| {
+                    AppError::Message(format!("解析待写入的 Codex config.toml 失败: {e}"))
+                })?
+            };
+            point_codex_doc_at_gateway(&mut doc, base_url)?;
+            obj.insert("config".to_string(), Value::String(doc.to_string()));
+            Ok(())
+        }
+        AppType::Gemini => Ok(()),
+    }
 }
 
 /// 丢弃备份而不还原 live。
@@ -430,18 +550,25 @@ pub fn start_forwarding(
         return Ok(());
     }
 
-    if load_backup(state.db.as_ref(), app_type)?.is_none() {
-        let previous_provider_id =
-            crate::settings::get_effective_current_provider(&state.db, app_type)?
-                .filter(|id| id != &provider.id);
-        let mut backup = ForwardingBackup {
-            provider_id: Some(provider.id.clone()),
-            previous_provider_id,
-            ..Default::default()
-        };
-        capture_live(app_type, &mut backup)?;
-        store_backup(state.db.as_ref(), app_type, &backup)?;
-    }
+    // 转发前的旧凭据只在首次采集；网关凭据每次都要刷新——token 轮换会重走这条路。
+    let mut backup = match load_backup(state.db.as_ref(), app_type)? {
+        Some(backup) => backup,
+        None => {
+            let previous_provider_id =
+                crate::settings::get_effective_current_provider(&state.db, app_type)?
+                    .filter(|id| id != &provider.id);
+            let mut backup = ForwardingBackup {
+                provider_id: Some(provider.id.clone()),
+                previous_provider_id,
+                ..Default::default()
+            };
+            capture_live(app_type, &mut backup)?;
+            backup
+        }
+    };
+    backup.gateway_token = Some(token.to_string());
+    backup.gateway_base_url = Some(base_url.to_string());
+    store_backup(state.db.as_ref(), app_type, &backup)?;
 
     // 条目要存在且被标记为当前，供应商列表才会显示「已启用」。备份此时已经写好，
     // 所以这两步之后任何 live 写入都会被 intercept_live_write 降级成字段级。
@@ -450,6 +577,29 @@ pub fn start_forwarding(
     state
         .db
         .set_current_provider(app_type.as_str(), &provider.id)?;
+
+    apply_live(app_type, token, base_url)
+}
+
+/// token 轮换：只把新凭据覆盖到 live，别的一个字节都不碰。
+///
+/// 刷新不能走 `ProviderService::update`。前端造的网关条目是「只有凭据的最小
+/// 配置」，而 update 在转发期间是整文件写（`LiveWriteIntent::UserSave`），拿那份
+/// 最小配置整份写出去等于把用户的 live 削成只剩两个键。
+///
+/// 转发没开就什么都不做：没有覆盖层可言，凭据该由正常的供应商流程去写。
+pub fn refresh_credentials(
+    state: &AppState,
+    app_type: &AppType,
+    token: &str,
+    base_url: &str,
+) -> Result<(), AppError> {
+    let Some(mut backup) = load_backup(state.db.as_ref(), app_type)? else {
+        return Ok(());
+    };
+    backup.gateway_token = Some(token.to_string());
+    backup.gateway_base_url = Some(base_url.to_string());
+    store_backup(state.db.as_ref(), app_type, &backup)?;
 
     apply_live(app_type, token, base_url)
 }
@@ -550,6 +700,19 @@ mod tests {
         mutate(&mut live);
         crate::config::write_json_file(&crate::config::get_claude_settings_path(), &live)
             .expect("user edit");
+    }
+
+    /// Codex 版的网关条目：auth.json 的 key + config.toml 里指向网关那张表。
+    fn codex_gateway_provider(token: &str, base_url: &str) -> Provider {
+        let mut provider = gateway_provider(token, base_url);
+        provider.settings_config = json!({
+            "auth": { CODEX_TOKEN_KEY: token },
+            "config": format!(
+                "model_provider = \"llm_gateway\"\n\n[model_providers.llm_gateway]\nbase_url = \"{}/v1\"\n",
+                base_url.trim_end_matches('/')
+            ),
+        });
+        provider
     }
 
     fn read_codex_text() -> String {
@@ -748,11 +911,11 @@ mod tests {
         });
     }
 
-    /// 转发期间任何一条 live 写入路径（token 刷新的 update、列表里点一下的
-    /// switch）都必须降级成字段级，否则「只覆盖两个字段」会被绕过去。
+    /// 后台同步（切换、启动同步、改通用配置片段）在转发期间必须降级成字段级，
+    /// 否则数据库里的快照会把用户绕过 app 手改的 live 内容整份盖掉。
     #[test]
     #[serial]
-    fn intercept_downgrades_live_writes_to_field_level() {
+    fn intercept_downgrades_background_sync_to_field_level() {
         with_test_home(|state| {
             write_live(json!({
                 "env": {
@@ -771,22 +934,87 @@ mod tests {
                 "https://api.fwai.space",
             )
             .expect("start forwarding");
+            // 用户绕过 app 直接手改 live。
             edit_live(|live| live["model"] = json!("fable"));
 
-            let refreshed = gateway_provider("gw-token-2", "https://api.fwai.space");
-            let handled = intercept_live_write(state.db.as_ref(), &AppType::Claude, &refreshed)
-                .expect("intercept live write");
+            let decision = intercept_live_write(
+                state.db.as_ref(),
+                &AppType::Claude,
+                &provider,
+                LiveWriteIntent::BackgroundSync,
+            )
+            .expect("intercept live write");
 
-            assert!(handled, "转发期间写网关条目应当被拦下来");
+            assert!(
+                matches!(decision, LiveWriteDecision::Handled),
+                "后台同步在转发期间应当被拦下来做字段级覆盖"
+            );
             let live = read_live();
             assert_eq!(
                 live.pointer("/env/ANTHROPIC_AUTH_TOKEN"),
-                Some(&json!("gw-token-2"))
+                Some(&json!("gw-token"))
             );
             assert_eq!(
                 live.pointer("/model"),
                 Some(&json!("fable")),
-                "拦截后的写入不该动用户字段"
+                "拦截后的写入不该动用户手改的字段"
+            );
+        });
+    }
+
+    /// 用户在编辑页点保存：放行整文件写，但凭据钉成网关的值。
+    /// 这样新增/删除的字段才能真正落盘。
+    #[test]
+    #[serial]
+    fn intercept_lets_user_save_through_with_pinned_credentials() {
+        with_test_home(|state| {
+            write_live(json!({ "env": { CLAUDE_TOKEN_KEY: "sk-original" } }));
+            let provider = gateway_provider("gw-token", "https://api.fwai.space");
+            start_forwarding(
+                state,
+                &AppType::Claude,
+                &provider,
+                "gw-token",
+                "https://api.fwai.space",
+            )
+            .expect("start forwarding");
+
+            // 用户在编辑页里把 endpoint 改成了自己的值，还加了个新字段。
+            let mut edited = gateway_provider("sk-user-typed", "https://evil.example");
+            edited.settings_config["env"]["ANTHROPIC_BASE_URL2"] = json!("https://extra.example");
+
+            let decision = intercept_live_write(
+                state.db.as_ref(),
+                &AppType::Claude,
+                &edited,
+                LiveWriteIntent::UserSave,
+            )
+            .expect("intercept live write");
+
+            let LiveWriteDecision::ProceedWithPinnedCredentials { token, base_url } = decision
+            else {
+                panic!("用户保存应当放行整文件写");
+            };
+            assert_eq!(token, "gw-token", "凭据应当来自备份，而不是用户改的值");
+            assert_eq!(base_url, "https://api.fwai.space");
+
+            // 钉进去之后：用户新增的字段保留，凭据是网关的。
+            let mut settings = edited.settings_config.clone();
+            pin_gateway_credentials(&AppType::Claude, &mut settings, &token, &base_url)
+                .expect("pin credentials");
+            assert_eq!(
+                settings.pointer("/env/ANTHROPIC_BASE_URL2"),
+                Some(&json!("https://extra.example")),
+                "用户新增的字段必须活下来"
+            );
+            assert_eq!(
+                settings.pointer("/env/ANTHROPIC_BASE_URL"),
+                Some(&json!("https://api.fwai.space")),
+                "用户改掉的 endpoint 必须被钉回网关的值"
+            );
+            assert_eq!(
+                settings.pointer("/env/ANTHROPIC_AUTH_TOKEN"),
+                Some(&json!("gw-token"))
             );
         });
     }
@@ -809,10 +1037,15 @@ mod tests {
 
             let mut other = gateway_provider("sk-other", "https://api.anthropic.com");
             other.id = "some-other-provider".to_string();
-            let handled = intercept_live_write(state.db.as_ref(), &AppType::Claude, &other)
-                .expect("intercept");
-
-            assert!(!handled, "别的供应商不该走字段级覆盖");
+            for intent in [LiveWriteIntent::UserSave, LiveWriteIntent::BackgroundSync] {
+                let decision =
+                    intercept_live_write(state.db.as_ref(), &AppType::Claude, &other, intent)
+                        .expect("intercept");
+                assert!(
+                    matches!(decision, LiveWriteDecision::Proceed),
+                    "别的供应商不该被拦截"
+                );
+            }
         });
     }
 
@@ -1028,6 +1261,339 @@ wire_api = "responses"
                 crate::config::read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())
                     .expect("read codex auth");
             assert_eq!(auth.get(CODEX_TOKEN_KEY), Some(&json!("sk-mine")));
+        });
+    }
+
+    // --- 端到端：走 ProviderService::update，也就是编辑页保存那条真实路径 ---
+
+    /// 本次 bug 的直接复现：转发开启时在编辑页新增一个字段并保存，必须落盘。
+    #[test]
+    #[serial]
+    fn user_save_during_forwarding_persists_new_fields() {
+        with_test_home(|state| {
+            write_live(json!({ "env": { CLAUDE_TOKEN_KEY: "sk-original" } }));
+            let provider = gateway_provider("gw-token", "https://api.fwai.space");
+            start_forwarding(
+                state,
+                &AppType::Claude,
+                &provider,
+                "gw-token",
+                "https://api.fwai.space",
+            )
+            .expect("start forwarding");
+
+            // 编辑页的初值来自 live，用户在其上加了一个新键。
+            let mut edited = gateway_provider("gw-token", "https://api.fwai.space");
+            edited.settings_config["env"]["ANTHROPIC_BASE_URL2"] = json!("https://api.fwai.space");
+
+            crate::services::ProviderService::update(
+                state,
+                AppType::Claude,
+                Some("llm-gateway-local"),
+                edited,
+            )
+            .expect("update provider");
+
+            let live = read_live();
+            assert_eq!(
+                live.pointer("/env/ANTHROPIC_BASE_URL2"),
+                Some(&json!("https://api.fwai.space")),
+                "编辑页新增的字段必须落盘"
+            );
+            assert_eq!(
+                live.pointer("/env/ANTHROPIC_AUTH_TOKEN"),
+                Some(&json!("gw-token")),
+                "凭据仍应是网关的"
+            );
+            assert_eq!(
+                live.pointer("/env/ANTHROPIC_BASE_URL"),
+                Some(&json!("https://api.fwai.space"))
+            );
+        });
+    }
+
+    /// 整文件写才有的能力：编辑页删掉一个字段，live 里也要消失。
+    #[test]
+    #[serial]
+    fn user_save_during_forwarding_can_delete_fields() {
+        with_test_home(|state| {
+            write_live(json!({ "env": { CLAUDE_TOKEN_KEY: "sk-original" } }));
+            let mut provider = gateway_provider("gw-token", "https://api.fwai.space");
+            provider.settings_config["model"] = json!("opus");
+            start_forwarding(
+                state,
+                &AppType::Claude,
+                &provider,
+                "gw-token",
+                "https://api.fwai.space",
+            )
+            .expect("start forwarding");
+
+            // 用户在编辑页把 model 删了。
+            let edited = gateway_provider("gw-token", "https://api.fwai.space");
+            crate::services::ProviderService::update(
+                state,
+                AppType::Claude,
+                Some("llm-gateway-local"),
+                edited,
+            )
+            .expect("update provider");
+
+            assert!(
+                read_live().pointer("/model").is_none(),
+                "编辑页删掉的字段应当从 live 消失"
+            );
+        });
+    }
+
+    /// 用户改掉凭据本身：其余改动照常落盘，但凭据被静默钉回网关的值。
+    #[test]
+    #[serial]
+    fn user_cannot_kick_themselves_out_of_forwarding() {
+        with_test_home(|state| {
+            write_live(json!({ "env": { CLAUDE_TOKEN_KEY: "sk-original" } }));
+            let provider = gateway_provider("gw-token", "https://api.fwai.space");
+            start_forwarding(
+                state,
+                &AppType::Claude,
+                &provider,
+                "gw-token",
+                "https://api.fwai.space",
+            )
+            .expect("start forwarding");
+
+            // 用户把 endpoint 和 key 都改成自己的，同时加了个无关字段。
+            let mut edited = gateway_provider("sk-user-typed", "https://evil.example");
+            edited.settings_config["model"] = json!("fable");
+            crate::services::ProviderService::update(
+                state,
+                AppType::Claude,
+                Some("llm-gateway-local"),
+                edited,
+            )
+            .expect("update provider");
+
+            let live = read_live();
+            assert_eq!(
+                live.pointer("/env/ANTHROPIC_BASE_URL"),
+                Some(&json!("https://api.fwai.space")),
+                "endpoint 必须钉回网关"
+            );
+            assert_eq!(
+                live.pointer("/env/ANTHROPIC_AUTH_TOKEN"),
+                Some(&json!("gw-token")),
+                "key 必须钉回网关"
+            );
+            assert_eq!(
+                live.pointer("/model"),
+                Some(&json!("fable")),
+                "无关字段照常落盘"
+            );
+        });
+    }
+
+    /// 后台同步（改通用配置片段那条路）不能把用户绕过 app 手改的 live 抹掉。
+    #[test]
+    #[serial]
+    fn background_sync_during_forwarding_keeps_manual_live_edits() {
+        with_test_home(|state| {
+            write_live(json!({ "env": { CLAUDE_TOKEN_KEY: "sk-original" } }));
+            let provider = gateway_provider("gw-token", "https://api.fwai.space");
+            start_forwarding(
+                state,
+                &AppType::Claude,
+                &provider,
+                "gw-token",
+                "https://api.fwai.space",
+            )
+            .expect("start forwarding");
+
+            // 用户直接编辑 ~/.claude/settings.json，没经过 app。
+            edit_live(|live| live["mcpServers"] = json!({ "fs": { "command": "srv" } }));
+
+            crate::services::ProviderService::sync_current_provider_for_app(state, AppType::Claude)
+                .expect("background sync");
+
+            assert_eq!(
+                read_live().pointer("/mcpServers/fs/command"),
+                Some(&json!("srv")),
+                "后台同步不该抹掉用户手改的 live 内容"
+            );
+        });
+    }
+
+    /// token 刷新的窄路径：只换凭据，其余字节不动。
+    #[test]
+    #[serial]
+    fn refresh_credentials_only_touches_credentials() {
+        with_test_home(|state| {
+            write_live(json!({ "env": { CLAUDE_TOKEN_KEY: "sk-original" } }));
+            let provider = gateway_provider("gw-token", "https://api.fwai.space");
+            start_forwarding(
+                state,
+                &AppType::Claude,
+                &provider,
+                "gw-token",
+                "https://api.fwai.space",
+            )
+            .expect("start forwarding");
+            edit_live(|live| live["model"] = json!("fable"));
+
+            refresh_credentials(
+                state,
+                &AppType::Claude,
+                "gw-token-2",
+                "https://api.fwai.space",
+            )
+            .expect("refresh credentials");
+
+            let live = read_live();
+            assert_eq!(
+                live.pointer("/env/ANTHROPIC_AUTH_TOKEN"),
+                Some(&json!("gw-token-2")),
+                "新 token 要写进去"
+            );
+            assert_eq!(
+                live.pointer("/model"),
+                Some(&json!("fable")),
+                "刷新不该动用户的字段"
+            );
+
+            // 刷新后的 token 也要成为后续写入钉住的值。
+            let backup = load_backup(state.db.as_ref(), &AppType::Claude)
+                .expect("load backup")
+                .expect("backup exists");
+            assert_eq!(backup.gateway_token.as_deref(), Some("gw-token-2"));
+            assert_eq!(
+                backup.token.as_deref(),
+                Some("sk-original"),
+                "转发前的旧凭据不能被刷新污染"
+            );
+        });
+    }
+
+    /// 转发没开时刷新是 no-op，不该凭空造出配置。
+    #[test]
+    #[serial]
+    fn refresh_credentials_without_forwarding_is_a_noop() {
+        with_test_home(|state| {
+            write_live(json!({ "env": { CLAUDE_TOKEN_KEY: "sk-original" } }));
+            refresh_credentials(
+                state,
+                &AppType::Claude,
+                "gw-token",
+                "https://api.fwai.space",
+            )
+            .expect("refresh without forwarding");
+            assert_eq!(
+                read_live().pointer("/env/ANTHROPIC_AUTH_TOKEN"),
+                Some(&json!("sk-original"))
+            );
+        });
+    }
+
+    /// 旧备份没有 gateway_* 字段时回退到从条目现读，行为与加字段之前一致。
+    #[test]
+    #[serial]
+    fn legacy_backup_without_gateway_fields_falls_back_to_provider() {
+        with_test_home(|state| {
+            write_live(json!({ "env": { CLAUDE_TOKEN_KEY: "sk-original" } }));
+            let provider = gateway_provider("gw-token", "https://api.fwai.space");
+            start_forwarding(
+                state,
+                &AppType::Claude,
+                &provider,
+                "gw-token",
+                "https://api.fwai.space",
+            )
+            .expect("start forwarding");
+
+            // 把备份改回旧格式（没有 gateway_token / gateway_base_url）。
+            let mut backup = load_backup(state.db.as_ref(), &AppType::Claude)
+                .expect("load")
+                .expect("exists");
+            backup.gateway_token = None;
+            backup.gateway_base_url = None;
+            store_backup(state.db.as_ref(), &AppType::Claude, &backup)
+                .expect("store legacy backup");
+
+            let decision = intercept_live_write(
+                state.db.as_ref(),
+                &AppType::Claude,
+                &provider,
+                LiveWriteIntent::UserSave,
+            )
+            .expect("intercept");
+            let LiveWriteDecision::ProceedWithPinnedCredentials { token, .. } = decision else {
+                panic!("应当放行整文件写");
+            };
+            assert_eq!(token, "gw-token", "旧备份应回退到从条目读凭据");
+        });
+    }
+
+    /// Codex：转发期间编辑页保存，新增字段落盘且网关表被钉住。
+    #[test]
+    #[serial]
+    fn codex_user_save_during_forwarding_pins_gateway_table() {
+        with_test_home(|state| {
+            let auth_path = crate::codex_config::get_codex_auth_path();
+            if let Some(parent) = auth_path.parent() {
+                std::fs::create_dir_all(parent).expect("create codex dir");
+            }
+            crate::config::write_json_file(&auth_path, &json!({ CODEX_TOKEN_KEY: "sk-mine" }))
+                .expect("seed auth");
+            crate::config::write_text_file(
+                &crate::codex_config::get_codex_config_path(),
+                "model_provider = \"my_provider\"\n\n[model_providers.my_provider]\nname = \"mine\"\nbase_url = \"https://mine.example/v1\"\n",
+            )
+            .expect("seed config");
+
+            let provider = codex_gateway_provider("gw-token", "https://api.fwai.space");
+            start_forwarding(
+                state,
+                &AppType::Codex,
+                &provider,
+                "gw-token",
+                "https://api.fwai.space",
+            )
+            .expect("start codex forwarding");
+
+            // 用户在编辑页把 model 改了，还把 model_provider 指回自己那张表。
+            let mut edited = codex_gateway_provider("sk-user-typed", "https://evil.example");
+            edited.settings_config["config"] = json!(
+                "model = \"gpt-5.4-codex\"\nmodel_provider = \"my_provider\"\n\n[model_providers.my_provider]\nname = \"mine\"\nbase_url = \"https://mine.example/v1\"\n"
+            );
+            crate::services::ProviderService::update(
+                state,
+                AppType::Codex,
+                Some("llm-gateway-local"),
+                edited,
+            )
+            .expect("update codex provider");
+
+            let after = read_codex_text();
+            assert!(
+                after.contains("model = \"gpt-5.4-codex\""),
+                "用户改的 model 必须落盘，实际: {after}"
+            );
+            assert!(
+                after.contains(r#"model_provider = "llm_gateway""#),
+                "model_provider 必须钉回网关，实际: {after}"
+            );
+            assert!(
+                after.contains("[model_providers.llm_gateway]"),
+                "网关表必须在，实际: {after}"
+            );
+            assert!(
+                after.contains("https://api.fwai.space/v1"),
+                "网关 base_url 必须是我们的，实际: {after}"
+            );
+            let auth = crate::config::read_json_file::<Value>(&auth_path).expect("read auth");
+            assert_eq!(
+                auth.get(CODEX_TOKEN_KEY),
+                Some(&json!("gw-token")),
+                "Codex key 必须钉回网关"
+            );
         });
     }
 }

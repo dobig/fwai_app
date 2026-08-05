@@ -471,6 +471,7 @@ pub fn run() {
             commands::remove_managed_provider,
             commands::start_forwarding,
             commands::stop_forwarding,
+            commands::refresh_forwarding_credentials,
             commands::is_forwarding,
             commands::remove_provider_from_live_config,
             commands::switch_provider,

@@ -22,6 +22,18 @@ use super::gemini_auth::{
 };
 use super::normalize_claude_models_in_value;
 
+/// 这次 live 写入是谁发起的。转发开启时两者行为不同，见
+/// `forwarding::intercept_live_write`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveWriteIntent {
+    /// 用户在编辑页点了保存。转发期间也要整文件写，否则新增/删除的字段永远
+    /// 到不了磁盘——编辑页的初值本来就是从 live 读的，整份写回既忠实又支持删字段。
+    UserSave,
+    /// 切换、启动同步、改通用配置片段等后台写入。转发期间降级成只覆盖凭据字段，
+    /// 免得拿数据库里的快照把用户绕过 app 手改的 live 内容抹掉。
+    BackgroundSync,
+}
+
 pub(crate) fn sanitize_claude_settings_for_live(settings: &Value) -> Value {
     let mut v = settings.clone();
     if let Some(obj) = v.as_object_mut() {
@@ -497,17 +509,31 @@ pub(crate) fn write_live_with_common_config(
     db: &Database,
     app_type: &AppType,
     provider: &Provider,
+    intent: LiveWriteIntent,
 ) -> Result<(), AppError> {
-    // 转发开着的时候，写网关条目一律降级成「只覆盖 endpoint + key」。
-    // 这里是所有 live 写入的必经之路（update / switch / sync 都落到这），
-    // 挡在这一层才能保证没有旁路会把用户转发期间改的配置整文件盖掉。
-    if super::forwarding::intercept_live_write(db, app_type, provider)? {
-        return Ok(());
-    }
+    // 这里是所有 live 写入的必经之路（update / switch / sync 都落到这），挡在这
+    // 一层才能保证没有旁路绕过转发期间「endpoint + key 必须是网关的」这条契约。
+    use super::forwarding::LiveWriteDecision;
+    let pinned = match super::forwarding::intercept_live_write(db, app_type, provider, intent)? {
+        LiveWriteDecision::Handled => return Ok(()),
+        LiveWriteDecision::Proceed => None,
+        LiveWriteDecision::ProceedWithPinnedCredentials { token, base_url } => {
+            Some((token, base_url))
+        }
+    };
 
     let mut effective_provider = provider.clone();
     effective_provider.settings_config =
         build_effective_settings_with_common_config(db, app_type, provider)?;
+
+    if let Some((token, base_url)) = pinned {
+        super::forwarding::pin_gateway_credentials(
+            app_type,
+            &mut effective_provider.settings_config,
+            &token,
+            &base_url,
+        )?;
+    }
 
     write_live_snapshot(app_type, &effective_provider)
 }
@@ -735,7 +761,12 @@ fn sync_all_providers_to_live(state: &AppState, app_type: &AppType) -> Result<()
             continue;
         }
 
-        if let Err(e) = write_live_with_common_config(state.db.as_ref(), app_type, provider) {
+        if let Err(e) = write_live_with_common_config(
+            state.db.as_ref(),
+            app_type,
+            provider,
+            LiveWriteIntent::BackgroundSync,
+        ) {
             log::warn!(
                 "Failed to sync {:?} provider '{}' to live: {e}",
                 app_type,
@@ -765,7 +796,12 @@ pub(crate) fn sync_current_provider_for_app_to_live(
 
         let providers = state.db.get_all_providers(app_type.as_str())?;
         if let Some(provider) = providers.get(&current_id) {
-            write_live_with_common_config(state.db.as_ref(), app_type, provider)?;
+            write_live_with_common_config(
+                state.db.as_ref(),
+                app_type,
+                provider,
+                LiveWriteIntent::BackgroundSync,
+            )?;
         }
     }
 
@@ -795,7 +831,12 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
 
             let providers = state.db.get_all_providers(app_type.as_str())?;
             if let Some(provider) = providers.get(&current_id) {
-                write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
+                write_live_with_common_config(
+                    state.db.as_ref(),
+                    &app_type,
+                    provider,
+                    LiveWriteIntent::BackgroundSync,
+                )?;
             }
             // Note: get_effective_current_provider already validates existence,
             // so providers.get() should always succeed here

@@ -767,7 +767,9 @@ describe("LlmGatewaySubscriptionDock 换档结账页", () => {
     });
 
     expect(
-      await screen.findByText(/自动切换到 \$100，已排队套餐的费用折算抵扣 \$20/),
+      await screen.findByText(
+        /自动切换到 \$100，已排队套餐的费用折算抵扣 \$20/,
+      ),
     ).toBeTruthy();
   });
 
@@ -1542,5 +1544,63 @@ describe("LlmGatewaySubscriptionDock 版本过旧", () => {
     const buy = await screen.findByText("购买套餐");
     expect(buy.closest("button")!.disabled).toBe(false);
     expect(screen.queryByText(/当前版本过旧/)).toBeNull();
+  });
+});
+
+// 转发期间 token 轮换必须走「只改凭据」的窄路径。走 update 的话，
+// buildGatewayProvider 造的是只有凭据的最小配置，而后端在转发期间对 update
+// 是整文件写，会把用户 live 里的其它配置削光。
+describe("LlmGatewaySubscriptionDock token 刷新", () => {
+  beforeEach(() => {
+    vi.spyOn(providersApi, "refreshForwardingCredentials").mockResolvedValue(
+      undefined as never,
+    );
+    vi.mocked(providersApi.getAll).mockResolvedValue({
+      "llm-gateway-local": {
+        id: "llm-gateway-local",
+        name: "LLM Gateway",
+        settingsConfig: {},
+      },
+    } as never);
+  });
+
+  it("转发开着时走窄路径，不整份改写供应商条目", async () => {
+    seedActivePlan();
+    vi.mocked(providersApi.isForwarding).mockResolvedValue(true);
+    vi.spyOn(gateway, "refreshGatewayToken").mockResolvedValue({
+      token_type: "Bearer",
+      access_token: "new-access-token",
+      refresh_token: "refresh-token",
+      expires_in: 3600,
+    });
+
+    renderDock("claude");
+    await userEvent.click(await screen.findByText("刷新 Auth Token"));
+
+    await waitFor(() =>
+      expect(providersApi.refreshForwardingCredentials).toHaveBeenCalledWith(
+        "claude",
+        expect.any(String),
+        expect.any(String),
+      ),
+    );
+    expect(providersApi.update).not.toHaveBeenCalled();
+  });
+
+  it("转发没开时仍走普通 update", async () => {
+    seedActivePlan();
+    vi.mocked(providersApi.isForwarding).mockResolvedValue(false);
+    vi.spyOn(gateway, "refreshGatewayToken").mockResolvedValue({
+      token_type: "Bearer",
+      access_token: "new-access-token",
+      refresh_token: "refresh-token",
+      expires_in: 3600,
+    });
+
+    renderDock("claude");
+    await userEvent.click(await screen.findByText("刷新 Auth Token"));
+
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalled());
+    expect(providersApi.refreshForwardingCredentials).not.toHaveBeenCalled();
   });
 });
