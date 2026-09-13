@@ -35,6 +35,24 @@ const BASE = process.env.VITE_GATEWAY_URL ?? "http://localhost:8080";
 // 正好是「同档续费」要复现的前置条件。
 const USER = { username: "user1", password: "user123456" };
 
+// 单步登录，并断言服务端没要第二因子。联调环境故意不开两步登录（测试没有邮箱
+// 可收），所以这里拿到 challenge 就该直接失败，而不是把 undefined 的 token
+// 一路带下去，让后面每个用例都报一个看不懂的 401。
+async function loginAsSession(input: { username: string; password: string }) {
+  const outcome = await loginGateway({
+    ...input,
+    deviceName: "live-test",
+    platform: "local",
+  });
+  if (outcome.kind !== "session") {
+    throw new Error(
+      "gateway 要求邮箱验证码登录；联调环境请不要设置 " +
+        "GATEWAY_LOGIN_EMAIL_CODE_MIN_VERSION / GATEWAY_REQUIRE_LOGIN_EMAIL_CODE",
+    );
+  }
+  return outcome;
+}
+
 async function sub(): Promise<GatewaySubscriptionStatus> {
   return (await fetchGatewaySubscription()).subscription;
 }
@@ -99,18 +117,12 @@ function extrasSection(): HTMLElement {
 describe(`plan epic 联调 (${BASE})`, () => {
   beforeAll(async () => {
     setGatewayBaseURL(BASE);
-    const admin = await loginGateway({
+    const admin = await loginAsSession({
       username: "admin",
       password: "admin123456",
-      deviceName: "live-test",
-      platform: "local",
     });
     adminToken = admin.access_token;
-    await loginGateway({
-      ...USER,
-      deviceName: "live-test",
-      platform: "local",
-    });
+    await loginAsSession(USER);
   });
 
   // --- #196 同档续费 -------------------------------------------------------
@@ -180,7 +192,7 @@ describe(`plan epic 联调 (${BASE})`, () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${(await loginGateway({ ...USER, deviceName: "live-test", platform: "local" })).access_token}`,
+        Authorization: `Bearer ${(await loginAsSession(USER)).access_token}`,
       },
       body: JSON.stringify({ period: "1m", price_usd: 37 }),
     });
