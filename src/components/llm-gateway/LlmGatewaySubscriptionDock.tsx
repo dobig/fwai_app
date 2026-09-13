@@ -40,6 +40,7 @@ import {
   getPaymentOrder,
   loadGatewayLogin,
   loginGateway,
+  verifyGatewayLogin,
   refreshGatewayToken,
   resetPassword,
   revokeGatewayToken,
@@ -52,6 +53,7 @@ import {
   sendEmailCode,
   setGatewayBaseURL,
   verifyEmail,
+  type GatewayLoginChallenge,
   type GatewayLoginResult,
   type GatewayPlanQuote,
   type GatewaySubscriptionStatus,
@@ -89,7 +91,8 @@ type Screen =
   | "purchase"
   | "redeem"
   | "verify-email"
-  | "forgot-password";
+  | "forgot-password"
+  | "login-code";
 type AuthMode = "login" | "register";
 
 // Mirrors the gateway's own 60s resend cooldown. The server is authoritative —
@@ -107,6 +110,10 @@ const EMAIL_ERROR_MESSAGES: Record<string, string> = {
   email_already_verified: "邮箱已验证",
   weak_password: "密码至少 8 位",
   invalid_request: "请填写完整信息",
+  // 两步登录：challenge 本身失效（过期/已用掉/服务端重启）。和验证码错了不是
+  // 一回事——这两种都得重新登录，不能只让人再输一遍码。
+  invalid_challenge: "登录已失效，请重新登录",
+  challenge_expired: "登录已超时，请重新登录",
 };
 
 // The gateway's error code for a failed request, or "" when the failure was not
@@ -351,6 +358,19 @@ export function LlmGatewaySubscriptionDock() {
   const [resetCode, setResetCode] = useState("");
   const [resetPasswordInput, setResetPasswordInput] = useState("");
   const [resetRequested, setResetRequested] = useState(false);
+  // 两步登录：密码那条腿通过后拿到的 challenge，以及第二条腿要输的验证码。
+  // challenge 只存在内存里 —— 它是一次登录中途的状态，不是凭据，写进
+  // localStorage 只会让一个过期的 challenge 在下次开应用时诈尸。
+  const [loginChallenge, setLoginChallenge] =
+    useState<GatewayLoginChallenge | null>(null);
+  const [loginCode, setLoginCode] = useState("");
+  // 换屏时把滚动位置归零。ScreenView 的入场动画（translate-x-4 → 0）会让浏览器
+  // 为了「把动画中的元素滚进视野」自己滚一小段，残留下来就是新屏一进来顶部就
+  // 少了一截 —— 验证登录屏上被切掉的正是「返回登录」，而那是这屏唯一的退路。
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (bodyRef.current) bodyRef.current.scrollTop = 0;
+  }, [screen]);
   const onActivatedRef = useRef<() => Promise<void>>(async () => {});
 
   // 转发只作用于当前选中的那个 CLI：Claude 走网关时，Codex 的配置一个字节都
@@ -756,6 +776,74 @@ requires_openai_auth = true`,
     toast.success(`网关地址已保存：${saved}`);
   }
 
+  // 登录成功后的公共尾巴。三条路会走到这里：单步登录、两步登录的第二条腿、
+  // 注册。抽出来是因为「把 token 写进供应商条目」这一步一旦漏掉，Claude Code
+  // 那边就会拿着空凭据一直 401 —— 新增一条登录路径时最容易漏的正是它。
+  async function finishLogin(
+    result: GatewayLoginResult,
+    justRegistered: boolean,
+  ) {
+    setLogin(result);
+    setLoginChallenge(null);
+    setLoginCode("");
+    setPassword("");
+    // 新注册的邮箱还没验证：直接带去验证屏，而不是让人在账号屏自己发现
+    // 那个「未验证」徽标——验证码这时候正好该发。
+    setScreen(
+      justRegistered && result.user.email_verified === false
+        ? "verify-email"
+        : "account",
+    );
+    // 规则 1 + 凭据就绪：确保条目在列表里，并把最新 token 写进条目数据。
+    if (target) {
+      await ensureGatewayProviderListed(target);
+      await syncGatewayProviderEntry(target);
+    }
+    toast.success(justRegistered ? "注册成功，请验证邮箱" : "登录成功");
+  }
+
+  // 两步登录的第二条腿。只发 challenge_id + 验证码：设备是服务端在密码那一步
+  // 记下来的，这里要是能自报设备，从邮箱里捞到验证码的人就能把 session 换到
+  // 自己机器上 —— 别为了「顺手带上」而加字段。
+  async function handleVerifyLoginCode() {
+    if (busy || !loginChallenge) return;
+    if (!/^\d{6}$/.test(loginCode.trim())) {
+      toast.error("请输入 6 位验证码");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await verifyGatewayLogin({
+        challengeId: loginChallenge.challengeId,
+        code: loginCode,
+      });
+      await finishLogin(result, false);
+    } catch (error) {
+      const code = gatewayErrorCode(error);
+      // challenge 没了（过期/已用掉）：再输几次验证码也没用，退回登录屏重来。
+      // 验证码本身错了则留在原地 —— 服务端不会因为一次手误就作废 challenge。
+      if (code === "invalid_challenge" || code === "challenge_expired") {
+        setLoginChallenge(null);
+        setLoginCode("");
+        setScreen("auth");
+        toast.error(emailErrorMessage(error, "登录已失效，请重新登录"));
+        return;
+      }
+      toast.error(emailErrorMessage(error, "验证失败，请稍后重试"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 重新走一遍密码那条腿，让服务端重发验证码。没有单独的「重发登录码」端点，
+  // 也不该有：那会变成一个不需要密码就能触发的发信入口。代价是要重新输密码，
+  // 所以这里把人送回登录屏，而不是画一个点了没反应的重发按钮。
+  function backToLoginFromCode() {
+    setLoginChallenge(null);
+    setLoginCode("");
+    setScreen("auth");
+  }
+
   async function handleSubmitAuth() {
     if (!validate()) {
       toast.error("请填写必填项");
@@ -769,29 +857,34 @@ requires_openai_auth = true`,
         deviceName: navigator.platform || "local-device",
         platform: navigator.userAgent || "browser",
       };
-      const result =
-        authMode === "register"
-          ? await registerGateway({
-              ...common,
-              email: email.trim(),
-              inviteCode: inviteCode.trim(),
-            })
-          : await loginGateway(common);
-      setLogin(result);
-      // 新注册的邮箱还没验证：直接带去验证屏，而不是让人在账号屏自己发现
-      // 那个「未验证」徽标——验证码这时候正好该发。
-      const justRegistered = authMode === "register";
-      setScreen(
-        justRegistered && result.user.email_verified === false
-          ? "verify-email"
-          : "account",
-      );
-      // 规则 1 + 凭据就绪：确保条目在列表里，并把最新 token 写进条目数据。
-      if (target) {
-        await ensureGatewayProviderListed(target);
-        await syncGatewayProviderEntry(target);
+      if (authMode === "login") {
+        const outcome = await loginGateway(common);
+        // 服务端要第二因子：密码是对的，验证码已经发去账号邮箱了。这不是失败，
+        // 不能进 catch 那条路去清凭据、弹「账号或密码错误」。
+        if (outcome.kind === "challenge") {
+          setLoginChallenge(outcome);
+          setLoginCode("");
+          setPassword("");
+          // sent=false 是服务端的重发冷却压住了新邮件，上一封仍然有效。本地也
+          // 跟着倒计时，否则「重新发送」立刻可点、点了必然再被拒。
+          setCodeCooldown(outcome.sent ? 0 : SEND_CODE_COOLDOWN_SECONDS);
+          setScreen("login-code");
+          toast.info(
+            outcome.sent
+              ? "已向邮箱发送验证码"
+              : "刚发过验证码，请查收上一封邮件",
+          );
+          return;
+        }
+        await finishLogin(outcome, false);
+        return;
       }
-      toast.success(justRegistered ? "注册成功，请验证邮箱" : "登录成功");
+      const result = await registerGateway({
+        ...common,
+        email: email.trim(),
+        inviteCode: inviteCode.trim(),
+      });
+      await finishLogin(result, true);
     } catch (error) {
       clearGatewayLogin();
       setLogin(null);
@@ -1340,7 +1433,9 @@ requires_openai_auth = true`,
             ? "验证邮箱"
             : screen === "forgot-password"
               ? "找回密码"
-              : "我的账号";
+              : screen === "login-code"
+                ? "验证登录"
+                : "我的账号";
   const headSub =
     screen === "auth"
       ? "登录后即可在 Claude Code 中使用"
@@ -1352,9 +1447,11 @@ requires_openai_auth = true`,
             ? "验证后即可购买套餐"
             : screen === "forgot-password"
               ? "用注册邮箱收取验证码重设密码"
-              : forwarding
-                ? `转发中 · ${activeAppName} 正在走 llm_gateway`
-                : "已登录 · 开启转发后即可使用";
+              : screen === "login-code"
+                ? "输入邮箱收到的验证码完成登录"
+                : forwarding
+                  ? `转发中 · ${activeAppName} 正在走 llm_gateway`
+                  : "已登录 · 开启转发后即可使用";
 
   const inputCls =
     "w-full rounded-lg border bg-muted/40 px-3 py-2 text-sm outline-none transition focus:border-primary focus:bg-background focus:ring-2 focus:ring-primary/20";
@@ -1409,7 +1506,7 @@ requires_openai_auth = true`,
 
       {/* min-h-0 lets this flex child shrink below its content so overflow-y
           actually scrolls instead of being clipped by the container */}
-      <div className="min-h-0 flex-1 overflow-y-auto p-4">
+      <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto p-4">
         {screen === "auth" && (
           <ScreenView key="auth">
             {/* tabs */}
@@ -2201,6 +2298,61 @@ requires_openai_auth = true`,
                 </div>
               </>
             )}
+          </ScreenView>
+        )}
+
+        {screen === "login-code" && loginChallenge && (
+          <ScreenView key="login-code">
+            <button
+              className="mb-3 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground"
+              onClick={backToLoginFromCode}
+            >
+              <ArrowLeft className="h-4 w-4" />
+              返回登录
+            </button>
+
+            <div className="mb-3.5 flex items-start gap-2.5 rounded-xl border border-border bg-muted/40 p-3">
+              <MailCheck className="mt-0.5 h-4 w-4 flex-none text-muted-foreground" />
+              <div className="min-w-0 text-[11px] leading-relaxed text-muted-foreground">
+                密码已验证。验证码已发送到{" "}
+                <b className="break-all text-foreground">
+                  {loginChallenge.emailHint}
+                </b>
+                。没收到请查看垃圾邮件。
+              </div>
+            </div>
+
+            <label className="mb-1 block text-xs text-muted-foreground">
+              验证码
+            </label>
+            <input
+              className={`${inputCls} text-center text-lg font-semibold tracking-[0.4em]`}
+              inputMode="numeric"
+              maxLength={6}
+              placeholder="000000"
+              value={loginCode}
+              // 只留数字：粘贴带空格的验证码也能直接用。
+              onChange={(e) =>
+                setLoginCode(e.target.value.replace(/\D/g, "").slice(0, 6))
+              }
+              onKeyDown={(e) => e.key === "Enter" && handleVerifyLoginCode()}
+            />
+
+            <button
+              className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-2.5 font-semibold text-primary-foreground transition hover:brightness-105 disabled:opacity-60"
+              disabled={busy || loginCode.length !== 6}
+              onClick={handleVerifyLoginCode}
+            >
+              {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+              完成登录
+            </button>
+
+            {/* 没有「重发」按钮：重发就是重走密码那条腿，得重新输密码。画一个
+                点了要求输密码的按钮只会让人以为坏了，不如直说。 */}
+            <div className="mt-3 text-center text-[11px] leading-relaxed text-muted-foreground">
+              验证码 {Math.round(loginChallenge.expiresIn / 60)} 分钟内有效。
+              没收到？返回登录重新输入密码即可再发一次。
+            </div>
           </ScreenView>
         )}
 

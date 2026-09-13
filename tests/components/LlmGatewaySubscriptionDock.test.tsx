@@ -1604,3 +1604,188 @@ describe("LlmGatewaySubscriptionDock token 刷新", () => {
     expect(providersApi.refreshForwardingCredentials).not.toHaveBeenCalled();
   });
 });
+
+
+// 两步登录。四件客户端最容易做错的事，每件一个 case：
+//  1. 409 不是登录失败 —— 当成失败就会清凭据、弹「账号或密码错误」，用户被
+//     一个其实正确的密码挡在门外，而且永远看不到验证码输入框。
+//  2. 第二条腿不许自报设备 —— 服务端从 challenge 取设备，客户端多送一个
+//     device_name 就是把「从邮箱捞到码的人不能换到自己机器」这条拆了。
+//  3. challenge 失效和验证码打错必须分开 —— 前者要重新登录，后者留在原地。
+//  4. 服务端没要第二因子时，登录流程一步都不能变。
+describe("LlmGatewaySubscriptionDock 两步登录", () => {
+  const CHALLENGE: gateway.GatewayLoginChallenge = {
+    kind: "challenge",
+    challengeId: "lch_abcdef123456",
+    emailHint: "t*****@example.com",
+    expiresIn: 600,
+    sent: true,
+  };
+
+  function sessionResult(): gateway.GatewayLoginResult {
+    return {
+      token_type: "Bearer",
+      access_token: "access-token",
+      refresh_token: "refresh-token",
+      expires_in: 3600,
+      user: {
+        id: "user_1",
+        username: "tester",
+        email: "tester@example.com",
+        role: "user",
+        email_verified: true,
+      },
+      account: { id: "acct_1" },
+      subscription: { active: true, tier: "starter" },
+    };
+  }
+
+  /** 登出状态开着 dock，填好账号密码点登录。 */
+  async function submitLogin() {
+    localStorage.setItem(DOCK_OPEN_KEY, "1");
+    renderDock();
+    await userEvent.type(
+      await screen.findByPlaceholderText("用户名"),
+      "tester",
+    );
+    await userEvent.type(screen.getByPlaceholderText("密码"), "pw12345678");
+    // 「登录」有两个：上面的 tab 和底部的提交按钮。要的是后者。
+    const buttons = screen.getAllByRole("button", { name: "登录" });
+    await userEvent.click(buttons[buttons.length - 1]);
+  }
+
+  it("密码对但要验证码时进验证屏，不当成登录失败", async () => {
+    vi.spyOn(gateway, "loginGateway").mockResolvedValue(CHALLENGE);
+
+    await submitLogin();
+
+    // 打码后的邮箱要显示出来：多个邮箱的人得知道开哪个收件箱。
+    expect(await screen.findByText("验证登录")).toBeInTheDocument();
+    expect(screen.getByText("t*****@example.com")).toBeInTheDocument();
+    // 密码是对的，绝不能弹「账号或密码错误」。
+    expect(toasts.error).not.toHaveBeenCalled();
+  });
+
+  it("第二条腿只发 challenge_id 和验证码，不带设备信息", async () => {
+    vi.spyOn(gateway, "loginGateway").mockResolvedValue(CHALLENGE);
+    const verify = vi
+      .spyOn(gateway, "verifyGatewayLogin")
+      .mockResolvedValue(sessionResult());
+
+    await submitLogin();
+    await userEvent.type(
+      await screen.findByPlaceholderText("000000"),
+      "123456",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "完成登录" }));
+
+    await waitFor(() => expect(verify).toHaveBeenCalled());
+    // 精确相等而不是 objectContaining：多带一个 device_name 就是把
+    // 「邮箱里捞到码的人换不到自己机器」这条防护拆了，必须测得出来。
+    expect(verify).toHaveBeenCalledWith({
+      challengeId: "lch_abcdef123456",
+      code: "123456",
+    });
+  });
+
+  it("验证成功后和单步登录走同一条尾巴：写供应商条目、进账号屏", async () => {
+    vi.spyOn(gateway, "loginGateway").mockResolvedValue(CHALLENGE);
+    vi.spyOn(gateway, "verifyGatewayLogin").mockResolvedValue(sessionResult());
+
+    await submitLogin();
+    await userEvent.type(
+      await screen.findByPlaceholderText("000000"),
+      "123456",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "完成登录" }));
+
+    // 漏了这一步的话条目里是空凭据，Claude Code 那边会一直 401。
+    await waitFor(() => expect(toasts.success).toHaveBeenCalledWith("登录成功"));
+    expect(providersApi.add).toHaveBeenCalled();
+  });
+
+  it("验证码打错时留在验证屏，不用重头登录", async () => {
+    vi.spyOn(gateway, "loginGateway").mockResolvedValue(CHALLENGE);
+    vi.spyOn(gateway, "verifyGatewayLogin").mockRejectedValue(
+      new GatewayApiError(400, "invalid_code"),
+    );
+
+    await submitLogin();
+    await userEvent.type(
+      await screen.findByPlaceholderText("000000"),
+      "111111",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "完成登录" }));
+
+    await waitFor(() =>
+      expect(toasts.error).toHaveBeenCalledWith("验证码不正确"),
+    );
+    // 服务端不会因为一次手误作废 challenge，客户端也不该把人踢回登录屏。
+    expect(screen.getByText("验证登录")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["invalid_challenge", 400, "登录已失效，请重新登录"],
+    ["challenge_expired", 410, "登录已超时，请重新登录"],
+  ])("challenge %s 时退回登录屏重来", async (code, status, message) => {
+    vi.spyOn(gateway, "loginGateway").mockResolvedValue(CHALLENGE);
+    vi.spyOn(gateway, "verifyGatewayLogin").mockRejectedValue(
+      new GatewayApiError(status, code),
+    );
+
+    await submitLogin();
+    await userEvent.type(
+      await screen.findByPlaceholderText("000000"),
+      "123456",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "完成登录" }));
+
+    // challenge 没了，再输几次码也没用——必须回去重走密码那条腿。
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith(message));
+    expect(await screen.findByText("登录 llm_gateway")).toBeInTheDocument();
+  });
+
+  it("sent=false 时说「已经发过一封」而不是报错", async () => {
+    vi.spyOn(gateway, "loginGateway").mockResolvedValue({
+      ...CHALLENGE,
+      sent: false,
+    });
+
+    await submitLogin();
+
+    // 冷却压住的是**新**邮件，上一封的码仍然有效——这是提示，不是失败。
+    await waitFor(() =>
+      expect(toasts.info).toHaveBeenCalledWith("刚发过验证码，请查收上一封邮件"),
+    );
+    expect(toasts.error).not.toHaveBeenCalled();
+    expect(await screen.findByText("验证登录")).toBeInTheDocument();
+  });
+
+  it("服务端没要第二因子时，登录一步到位", async () => {
+    vi.spyOn(gateway, "loginGateway").mockResolvedValue({
+      kind: "session",
+      ...sessionResult(),
+    });
+    const verify = vi.spyOn(gateway, "verifyGatewayLogin");
+
+    await submitLogin();
+
+    await waitFor(() => expect(toasts.success).toHaveBeenCalledWith("登录成功"));
+    // 没开这个功能的服务端下，客户端不该多打一个请求、也不该闪一下验证屏。
+    expect(verify).not.toHaveBeenCalled();
+    expect(screen.queryByText("验证登录")).not.toBeInTheDocument();
+  });
+
+  it("密码真错了还是报「账号或密码错误」", async () => {
+    vi.spyOn(gateway, "loginGateway").mockRejectedValue(
+      new GatewayApiError(401, ""),
+    );
+
+    await submitLogin();
+
+    await waitFor(() =>
+      expect(toasts.error).toHaveBeenCalledWith("账号或密码错误"),
+    );
+    expect(screen.queryByText("验证登录")).not.toBeInTheDocument();
+  });
+});

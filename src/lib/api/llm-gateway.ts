@@ -146,8 +146,17 @@ export function loadGatewayLogin(): GatewayLoginResult | null {
 export class GatewayApiError extends Error {
   readonly status: number;
   readonly code: string;
+  // The parsed error body, when there was one. Most failures say everything in
+  // `code`, but some carry payload the caller needs: a 409 from login brings the
+  // challenge that the second leg is built from. Empty object for a non-JSON
+  // body, so call sites can read a field without a null check first.
+  readonly body: Record<string, unknown>;
 
-  constructor(status: number, code: string) {
+  constructor(
+    status: number,
+    code: string,
+    body: Record<string, unknown> = {},
+  ) {
     super(
       code
         ? `llm_gateway request failed: ${status} (${code})`
@@ -156,6 +165,7 @@ export class GatewayApiError extends Error {
     this.name = "GatewayApiError";
     this.status = status;
     this.code = code;
+    this.body = body;
   }
 }
 
@@ -184,17 +194,18 @@ async function gatewayRequest<T>(
     // instead of swallowing it behind a bare status — callers branch on it and
     // show it in a toast.
     let detail = "";
+    let body: Record<string, unknown> = {};
     try {
-      const body = (await response.clone().json()) as unknown;
-      if (body && typeof body === "object") {
-        const rec = body as Record<string, unknown>;
-        const val = rec.error ?? rec.message;
+      const parsed = (await response.clone().json()) as unknown;
+      if (parsed && typeof parsed === "object") {
+        body = parsed as Record<string, unknown>;
+        const val = body.error ?? body.message;
         if (val != null) detail = String(val);
       }
     } catch {
       // Non-JSON error body; fall back to the status code alone.
     }
-    throw new GatewayApiError(response.status, detail);
+    throw new GatewayApiError(response.status, detail, body);
   }
   // 204 and other empty successes have no body to parse; password reset answers
   // 204, and an unconditional json() would turn a success into a thrown error.
@@ -204,22 +215,111 @@ async function gatewayRequest<T>(
   return (await response.json()) as T;
 }
 
+// A login that needs a second factor: the password was CORRECT, and the gateway
+// mailed a code to the address on the account. Whether this happens is entirely
+// the server's call (it depends on server config and our reported version), so
+// there is nothing to predict client-side — the 409 is the only signal.
+export interface GatewayLoginChallenge {
+  kind: "challenge";
+  challengeId: string;
+  // The destination, masked by the server (e.g. "t*****@example.com"), so a user
+  // with several addresses knows which inbox to open.
+  emailHint: string;
+  // The code's lifetime in seconds, for a countdown.
+  expiresIn: number;
+  // False when the server's resend cooldown suppressed a NEW mail. The previous
+  // code is still live, so this is informational — never an error.
+  sent: boolean;
+}
+
+// Either a finished login or a challenge to complete. Callers must branch on
+// `kind`: treating a challenge as a failure is the mistake this type exists to
+// make impossible.
+export type GatewayLoginOutcome =
+  | ({ kind: "session" } & GatewayLoginResult)
+  | GatewayLoginChallenge;
+
+// The gateway's 409 body for a login awaiting its mailed code.
+interface LoginChallengeBody {
+  challenge_id?: unknown;
+  email_hint?: unknown;
+  expires_in?: unknown;
+  sent?: unknown;
+}
+
 export async function loginGateway(input: {
   username: string;
   password: string;
   deviceName: string;
   platform: string;
+}): Promise<GatewayLoginOutcome> {
+  try {
+    const login = await gatewayRequest<GatewayLoginResult>("/v1/auth/login", {
+      method: "POST",
+      body: JSON.stringify({
+        username: input.username,
+        password: input.password,
+        device_name: input.deviceName,
+        platform: input.platform,
+        app_version: "cc-switch-custom/llm-gateway-local",
+      }),
+    });
+    saveGatewayLogin(login);
+    return { kind: "session", ...login };
+  } catch (error) {
+    // 409 + email_code_required is a correct password awaiting its code, not a
+    // failed login. Both conditions are required: a future 409 for some other
+    // reason must keep falling through to the caller's error path rather than
+    // stranding the user on a code prompt no code will ever satisfy.
+    if (
+      error instanceof GatewayApiError &&
+      error.status === 409 &&
+      error.code === "email_code_required"
+    ) {
+      const body = error.body as LoginChallengeBody;
+      const challengeId = String(body.challenge_id ?? "");
+      // A 409 we cannot act on is worse than an error: the code prompt would
+      // have nothing to submit against. Rethrow so the caller shows a failure.
+      if (challengeId) {
+        return {
+          kind: "challenge",
+          challengeId,
+          emailHint: String(body.email_hint ?? ""),
+          expiresIn:
+            typeof body.expires_in === "number" ? body.expires_in : 600,
+          sent: body.sent !== false,
+        };
+      }
+    }
+    throw error;
+  }
+}
+
+// verifyGatewayLogin completes a two-step login. Public — the session is what it
+// is asking for — and authenticated instead by the code mailed to the account's
+// own address.
+//
+// It deliberately sends ONLY the challenge id and the code. The device was
+// captured server-side when the password was checked; if this call could name
+// its own device, a code lifted from the victim's inbox would mint a session for
+// the attacker's machine. Adding device fields here would silently undo that.
+//
+// Returns the same shape a single-step login does, so the caller's post-login
+// path is identical.
+export async function verifyGatewayLogin(input: {
+  challengeId: string;
+  code: string;
 }): Promise<GatewayLoginResult> {
-  const login = await gatewayRequest<GatewayLoginResult>("/v1/auth/login", {
-    method: "POST",
-    body: JSON.stringify({
-      username: input.username,
-      password: input.password,
-      device_name: input.deviceName,
-      platform: input.platform,
-      app_version: "cc-switch-custom/llm-gateway-local",
-    }),
-  });
+  const login = await gatewayRequest<GatewayLoginResult>(
+    "/v1/auth/login/verify",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        challenge_id: input.challengeId,
+        code: input.code.trim(),
+      }),
+    },
+  );
   saveGatewayLogin(login);
   return login;
 }

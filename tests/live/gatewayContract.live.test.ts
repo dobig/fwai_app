@@ -51,12 +51,21 @@ describe(`live gateway contract (${BASE})`, () => {
   beforeAll(async () => {
     setGatewayBaseURL(BASE);
     // local 这个种子用户没有订阅，整条序列因此可复现。
-    await loginGateway({
+    const outcome = await loginGateway({
       username: "local",
       password: "local123456",
       deviceName: "live-test",
       platform: "local",
     });
+    // 联调环境故意不开两步登录（测试没有邮箱可收）。真开了的话这里拿到的是
+    // challenge、根本没有 session，后面每个用例都会报一个看不懂的 401 —— 在
+    // 源头说清楚。
+    if (outcome.kind !== "session") {
+      throw new Error(
+        "gateway 要求邮箱验证码登录；联调环境请不要设置 " +
+          "GATEWAY_LOGIN_EMAIL_CODE_MIN_VERSION / GATEWAY_REQUIRE_LOGIN_EMAIL_CODE",
+      );
+    }
   });
 
   it("反序列化 quote，字段名和类型都对得上", async () => {
