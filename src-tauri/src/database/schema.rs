@@ -1205,6 +1205,62 @@ impl Database {
     /// 注意: model_id 使用短横线格式（如 claude-haiku-4-5），与 API 返回的模型名称标准化后一致
     fn seed_model_pricing(conn: &Connection) -> Result<(), AppError> {
         let pricing_data = [
+            // Claude Fable 5.1 / Mythos 5.1（2026-09-01 发布；同 Fable 5 价，
+            // 但缓存读为 0.025x = $0.25，非 Fable 5 的 $1）
+            (
+                "claude-fable-5-1",
+                "Claude Fable 5.1",
+                "10",
+                "50",
+                "0.25",
+                "12.50",
+            ),
+            (
+                "claude-mythos-5-1",
+                "Claude Mythos 5.1",
+                "10",
+                "50",
+                "0.25",
+                "12.50",
+            ),
+            // Claude Fable 5（Opus 之上的新档）
+            (
+                "claude-fable-5",
+                "Claude Fable 5",
+                "10",
+                "50",
+                "1.00",
+                "12.50",
+            ),
+            (
+                "claude-mythos-5",
+                "Claude Mythos 5",
+                "10",
+                "50",
+                "1.00",
+                "12.50",
+            ),
+            // Claude Opus 5（与 Opus 4.8 同价位；fast mode $10/$50 不入表）
+            ("claude-opus-5", "Claude Opus 5", "5", "25", "0.50", "6.25"),
+            // Claude 4.8 系列
+            (
+                "claude-opus-4-8",
+                "Claude Opus 4.8",
+                "5",
+                "25",
+                "0.50",
+                "6.25",
+            ),
+            // Claude Sonnet 5（官方定价页 2026-09 确认：$2/$10 介绍价转为正式价，
+            // 原定 09-01 涨至 $3/$15 取消）
+            (
+                "claude-sonnet-5",
+                "Claude Sonnet 5",
+                "2",
+                "10",
+                "0.20",
+                "2.50",
+            ),
             // Claude 4.7 系列
             (
                 "claude-opus-4-7",
@@ -1214,7 +1270,23 @@ impl Database {
                 "0.50",
                 "6.25",
             ),
-            // Claude 4.6 系列
+            // Claude 4.6 系列（裸 id 行覆盖无日期后缀的日志变体，与 dated 行同价）
+            (
+                "claude-opus-4-6",
+                "Claude Opus 4.6",
+                "5",
+                "25",
+                "0.50",
+                "6.25",
+            ),
+            (
+                "claude-sonnet-4-6",
+                "Claude Sonnet 4.6",
+                "3",
+                "15",
+                "0.30",
+                "3.75",
+            ),
             (
                 "claude-opus-4-6-20260206",
                 "Claude Opus 4.6",
@@ -1298,6 +1370,33 @@ impl Database {
                 "0.30",
                 "3.75",
             ),
+            // GPT-6 系列（Astra，2026-09-04 发布，1.05M 窗口）
+            // 官方价页 + 模型页 + models.dev 三源一致：10/50，cache read 1，cache write 1.25× 输入 = 12.50。
+            // >272K 长上下文档（20/75/2/25）本表无法表达，与 gpt-5.5 同样忽略。
+            ("gpt-6-astra", "GPT-6 Astra", "10", "50", "1", "12.5"),
+            // GPT-5.6 系列（Sol / Terra / Luna，2026-06 发布）
+            // 5.6 家族起 cache write 收 1.25× 输入价（此前 GPT 模型写缓存免费，勿回填旧系列）
+            // 2026-09-06：Sol 为促销价 4/20/0.40/5（OpenAI 价页原文"至少持续到 2026-11-21"），
+            // 挂牌价 5/30/0.50/6.25。
+            ("gpt-5.6-sol", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
+            // 2026-07-30 OpenAI 降价：luna -80%、terra -20%，sol 不变（Fast mode 2× 价不入表）
+            ("gpt-5.6-terra", "GPT-5.6 Terra", "2", "12", "0.20", "2.50"),
+            (
+                "gpt-5.6-luna",
+                "GPT-5.6 Luna",
+                "0.20",
+                "1.20",
+                "0.02",
+                "0.25",
+            ),
+            // 裸名 gpt-5.6 是 sol 的官方别名；effort 后缀对齐 gpt-5.5 系列的记账形态。
+            // 这些行必须与 sol 同步改价。
+            ("gpt-5.6", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
+            ("gpt-5.6-low", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
+            ("gpt-5.6-medium", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
+            ("gpt-5.6-high", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
+            ("gpt-5.6-xhigh", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
+            ("gpt-5.6-minimal", "GPT-5.6 Sol", "4", "20", "0.40", "5"),
             // GPT-5.5 系列
             ("gpt-5.5", "GPT-5.5", "5", "30", "0.50", "0"),
             ("gpt-5.5-low", "GPT-5.5", "5", "30", "0.50", "0"),
@@ -1350,6 +1449,14 @@ impl Database {
             ),
             // GPT-5.3 Codex 系列
             ("gpt-5.3-codex", "GPT-5.3 Codex", "1.75", "14", "0.175", "0"),
+            (
+                "gpt-5.3-codex-spark",
+                "GPT-5.3 Codex Spark",
+                "1.75",
+                "14",
+                "0.175",
+                "0",
+            ),
             (
                 "gpt-5.3-codex-low",
                 "GPT-5.3 Codex",
