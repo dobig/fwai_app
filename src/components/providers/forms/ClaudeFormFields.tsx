@@ -89,6 +89,9 @@ interface ClaudeFormFieldsProps {
   defaultSonnetModelName: string;
   defaultOpusModel: string;
   defaultOpusModelName: string;
+  defaultFableModel: string;
+  defaultFableModelName: string;
+  subagentModel: string;
   onModelChange: (field: ClaudeModelEnvField, value: string) => void;
 
   // Speed Test Endpoints
@@ -138,6 +141,9 @@ export function ClaudeFormFields({
   defaultSonnetModelName,
   defaultOpusModel,
   defaultOpusModelName,
+  defaultFableModel,
+  defaultFableModelName,
+  subagentModel,
   onModelChange,
   speedTestEndpoints,
   apiFormat,
@@ -153,6 +159,8 @@ export function ClaudeFormFields({
     defaultHaikuModel ||
     defaultSonnetModel ||
     defaultOpusModel ||
+    defaultFableModel ||
+    subagentModel ||
     apiFormat !== "anthropic" ||
     apiKeyField !== "ANTHROPIC_AUTH_TOKEN"
   );
@@ -234,12 +242,13 @@ export function ClaudeFormFields({
   };
 
   type ModelRoleRow = {
-    role: "sonnet" | "opus" | "haiku";
+    role: "sonnet" | "opus" | "fable" | "haiku" | "subagent";
     label: string;
     model: string;
-    displayName: string;
+    // Subagent 只有请求模型，没有 /model 菜单显示名，所以这两项可缺。
+    displayName?: string;
     modelField: ClaudeModelEnvField;
-    displayNameField: ClaudeModelEnvField;
+    displayNameField?: ClaudeModelEnvField;
     inputId: string;
     supportsOneM: boolean;
   };
@@ -266,6 +275,16 @@ export function ClaudeFormFields({
       supportsOneM: true,
     },
     {
+      role: "fable",
+      label: t("providerForm.modelRoleFable", { defaultValue: "Fable" }),
+      model: defaultFableModel,
+      displayName: defaultFableModelName,
+      modelField: "ANTHROPIC_DEFAULT_FABLE_MODEL",
+      displayNameField: "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+      inputId: "claudeDefaultFableModel",
+      supportsOneM: true,
+    },
+    {
       role: "haiku",
       label: t("providerForm.modelRoleHaiku", { defaultValue: "Haiku" }),
       model: defaultHaikuModel,
@@ -275,6 +294,16 @@ export function ClaudeFormFields({
       inputId: "claudeDefaultHaikuModel",
       supportsOneM: false,
     },
+    {
+      role: "subagent",
+      label: t("providerForm.modelRoleSubagent", {
+        defaultValue: "Subagent",
+      }),
+      model: subagentModel,
+      modelField: "CLAUDE_CODE_SUBAGENT_MODEL",
+      inputId: "claudeCodeSubagentModel",
+      supportsOneM: true,
+    },
   ];
 
   const handleRoleModelChange = (row: ModelRoleRow, value: string) => {
@@ -283,10 +312,10 @@ export function ClaudeFormFields({
       ? value
       : stripClaudeOneMMarker(value);
     const nextModelBase = stripClaudeOneMMarker(normalizedValue).trim();
-    const displayName = row.displayName.trim();
+    const displayName = row.displayName?.trim() ?? "";
     const shouldSyncDisplayName = !displayName || displayName === oldModelBase;
     onModelChange(row.modelField, normalizedValue);
-    if (shouldSyncDisplayName) {
+    if (row.displayNameField && shouldSyncDisplayName) {
       onModelChange(row.displayNameField, nextModelBase);
     }
   };
@@ -508,17 +537,21 @@ export function ClaudeFormFields({
                         claudeModel ||
                         defaultSonnetModel ||
                         defaultOpusModel ||
-                        defaultHaikuModel;
+                        defaultFableModel ||
+                        defaultHaikuModel ||
+                        subagentModel;
                       if (value) {
                         for (const row of modelRoleRows) {
                           const roleValue = row.supportsOneM
                             ? value
                             : stripClaudeOneMMarker(value);
                           onModelChange(row.modelField, roleValue);
-                          onModelChange(
-                            row.displayNameField,
-                            stripClaudeOneMMarker(roleValue),
-                          );
+                          if (row.displayNameField) {
+                            onModelChange(
+                              row.displayNameField,
+                              stripClaudeOneMMarker(roleValue),
+                            );
+                          }
                         }
                         toast.success(
                           t("providerForm.quickSetSuccess", {
@@ -531,7 +564,9 @@ export function ClaudeFormFields({
                       !claudeModel &&
                       !defaultHaikuModel &&
                       !defaultSonnetModel &&
-                      !defaultOpusModel
+                      !defaultOpusModel &&
+                      !defaultFableModel &&
+                      !subagentModel
                     }
                     className="h-7 gap-1"
                   >
@@ -599,19 +634,30 @@ export function ClaudeFormFields({
                     <div className="flex h-9 items-center rounded-md border border-input bg-muted px-3 text-sm font-medium text-muted-foreground">
                       {row.label}
                     </div>
-                    <Input
-                      value={row.displayName}
-                      onChange={(event) =>
-                        onModelChange(row.displayNameField, event.target.value)
-                      }
-                      placeholder={
-                        modelBase ||
-                        t("providerForm.modelDisplayNamePlaceholder", {
-                          defaultValue: "例如 DeepSeek V4 Pro",
-                        })
-                      }
-                      autoComplete="off"
-                    />
+                    {row.displayNameField ? (
+                      <Input
+                        value={row.displayName ?? ""}
+                        onChange={(event) =>
+                          onModelChange(
+                            row.displayNameField!,
+                            event.target.value,
+                          )
+                        }
+                        placeholder={
+                          modelBase ||
+                          t("providerForm.modelDisplayNamePlaceholder", {
+                            defaultValue: "例如 DeepSeek V4 Pro",
+                          })
+                        }
+                        autoComplete="off"
+                      />
+                    ) : (
+                      <div className="flex h-9 items-center rounded-md border border-input bg-muted px-3 text-sm text-muted-foreground">
+                        {t("providerForm.modelNoDisplayName", {
+                          defaultValue: "不显示在 /model 菜单",
+                        })}
+                      </div>
+                    )}
                     {renderModelInput(
                       row.inputId,
                       modelBase,
@@ -658,7 +704,7 @@ export function ClaudeFormFields({
               <p className="text-xs text-muted-foreground">
                 {t("providerForm.fallbackModelHint", {
                   defaultValue:
-                    "仅在 Claude Code 请求没有明确落到 Sonnet、Opus 或 Haiku 角色时使用；通常可以留空。",
+                    "用于未明确落到 Sonnet、Opus、Fable、Haiku 角色的请求。使用第三方/中转端点时建议填写：否则这些请求（含 Haiku 后台子任务）会以原始 Claude 模型名透传给上游，可能因上游无此模型而报错。官方端点可留空。",
                 })}
               </p>
             </div>
