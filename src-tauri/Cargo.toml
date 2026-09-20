@@ -1,6 +1,6 @@
 [package]
 name = "fwai_app"
-version = "1.6.2"
+version = "1.6.3"
 description = "fwai_app — provider switcher for Claude Code / Codex / Gemini CLI with LLM Gateway integration"
 authors = ["Jason Young"]
 license = "MIT"
