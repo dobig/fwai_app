@@ -1205,19 +1205,12 @@ impl Database {
     /// 注意: model_id 使用短横线格式（如 claude-haiku-4-5），与 API 返回的模型名称标准化后一致
     fn seed_model_pricing(conn: &Connection) -> Result<(), AppError> {
         let pricing_data = [
-            // Claude Fable 5.1 / Mythos 5.1（2026-09-01 发布；同 Fable 5 价，
-            // 但缓存读为 0.025x = $0.25，非 Fable 5 的 $1）
+            // Claude Fable 5.1（2026-09-01 发布；同 Fable 5 价，
+            // 但缓存读为 0.025x = $0.25，非 Fable 5 的 $1）。
+            // 同底模的 Mythos 5 / 5.1 只对 Glasswing 名单开放，我们用不了，不入表。
             (
                 "claude-fable-5-1",
                 "Claude Fable 5.1",
-                "10",
-                "50",
-                "0.25",
-                "12.50",
-            ),
-            (
-                "claude-mythos-5-1",
-                "Claude Mythos 5.1",
                 "10",
                 "50",
                 "0.25",
@@ -1227,14 +1220,6 @@ impl Database {
             (
                 "claude-fable-5",
                 "Claude Fable 5",
-                "10",
-                "50",
-                "1.00",
-                "12.50",
-            ),
-            (
-                "claude-mythos-5",
-                "Claude Mythos 5",
                 "10",
                 "50",
                 "1.00",
