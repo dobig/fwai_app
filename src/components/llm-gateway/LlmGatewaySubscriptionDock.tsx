@@ -533,7 +533,7 @@ export function LlmGatewaySubscriptionDock() {
       settingsConfig: {
         auth: { OPENAI_API_KEY: token },
         config: `model_provider = "llm_gateway"
-model = "gpt-5.4"
+model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 disable_response_storage = true
 

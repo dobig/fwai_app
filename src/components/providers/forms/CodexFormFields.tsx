@@ -174,7 +174,7 @@ export function CodexFormFields({
             value={modelName}
             onChange={(v) => onModelNameChange!(v)}
             placeholder={t("codexConfig.modelNamePlaceholder", {
-              defaultValue: "例如: gpt-5.4",
+              defaultValue: "例如: gpt-5.6-sol",
             })}
             fetchedModels={fetchedModels}
             isLoading={isFetchingModels}

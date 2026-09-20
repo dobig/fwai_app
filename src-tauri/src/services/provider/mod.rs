@@ -407,6 +407,49 @@ base_url = "http://localhost:8080"
         );
     }
 
+    /// Fable 档和子代理模型是供应商专属的映射，和 haiku/sonnet/opus 一样
+    /// 不能进共享的通用配置片段，否则会把一家的模型名带到别家去。
+    #[test]
+    fn extract_claude_common_config_strips_fable_and_subagent_model_keys() {
+        let settings = json!({
+            "env": {
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-mapped[1M]",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Opus Mapped",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-fable-5-1[1M]",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "Fable 5.1",
+                "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5",
+                "ANTHROPIC_MODEL": "default-mapped",
+                "ENABLE_TOOL_SEARCH": "true"
+            },
+            "theme": "dark"
+        });
+
+        let snippet = ProviderService::extract_claude_common_config(&settings)
+            .expect("extract should succeed");
+        let value: Value = serde_json::from_str(&snippet).expect("snippet is valid JSON");
+        let env = value.get("env");
+
+        for stripped in [
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+            "ANTHROPIC_MODEL",
+        ] {
+            assert!(
+                env.and_then(|e| e.get(stripped)).is_none(),
+                "provider-specific model key {stripped} must not enter common config"
+            );
+        }
+        assert_eq!(
+            env.and_then(|e| e.get("ENABLE_TOOL_SEARCH"))
+                .and_then(|v| v.as_str()),
+            Some("true")
+        );
+        assert_eq!(value.get("theme").and_then(|v| v.as_str()), Some("dark"));
+    }
+
     #[test]
     #[serial]
     fn remove_managed_codex_provider_clears_gateway_live_config() {
@@ -1049,6 +1092,11 @@ impl ProviderService {
             "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
             "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            // Fable 是第四档模型映射，与 haiku/sonnet/opus 同属供应商专属；
+            // 子代理模型同理。进了通用配置片段会污染其它供应商。
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
             // Endpoint
             "ANTHROPIC_BASE_URL",
         ];
