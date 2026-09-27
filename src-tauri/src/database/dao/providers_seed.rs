@@ -1,7 +1,8 @@
-//! 官方供应商种子数据
+//! 旧版本自动写入的官方供应商种子数据
 //!
-//! 启动时调用 `Database::init_default_official_providers` 把这些条目
-//! 写入 `providers` 表，让所有用户都能看到一个"一键切回官方"的入口。
+//! 现已不再 seed，保留定义只用于识别旧数据：启动时
+//! `Database::remove_untouched_official_seeds` 会清理用户没改过的旧 seed，
+//! `has_non_official_seed_provider` 用它判断手动导入时是否只剩 seed。
 //!
 //! 字段与前端预设保持一致，参见：
 //! - `src/config/claudeProviderPresets.ts`（"Claude Official"）
@@ -10,14 +11,11 @@
 
 use crate::app_config::AppType;
 
-/// 单条官方供应商种子定义。
+/// 单条官方供应商种子定义（旧版本写入的原值）。
 pub(crate) struct OfficialProviderSeed {
     pub id: &'static str,
     pub app_type: AppType,
     pub name: &'static str,
-    pub website_url: &'static str,
-    pub icon: &'static str,
-    pub icon_color: &'static str,
     /// settings_config 的 JSON 字符串，每个 app 结构不同。
     pub settings_config_json: &'static str,
 }
@@ -30,9 +28,6 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
         id: "claude-official",
         app_type: AppType::Claude,
         name: "Claude Official",
-        website_url: "https://www.anthropic.com/claude-code",
-        icon: "anthropic",
-        icon_color: "#D4915D",
         // 空 env 让用户走 Claude CLI 默认认证流程
         settings_config_json: r#"{"env":{}}"#,
     },
@@ -40,9 +35,6 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
         id: "codex-official",
         app_type: AppType::Codex,
         name: "OpenAI Official",
-        website_url: "https://chatgpt.com/codex",
-        icon: "openai",
-        icon_color: "#00A67E",
         // 空 auth + 空 config 让用户走 ChatGPT Plus/Pro OAuth
         settings_config_json: r#"{"auth":{},"config":""}"#,
     },
@@ -50,9 +42,6 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
         id: "gemini-official",
         app_type: AppType::Gemini,
         name: "Google Official",
-        website_url: "https://ai.google.dev/",
-        icon: "gemini",
-        icon_color: "#4285F4",
         // 空 env + 空 config 让用户走 Google OAuth
         settings_config_json: r#"{"env":{},"config":{}}"#,
     },

@@ -921,10 +921,9 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
         return Ok(false);
     }
 
-    // 允许 "只有官方 seed 预设" 的情况下继续导入 live：
-    // - 启动编排顺序是先 import 后 seed，新用户启动时 providers 为空，导入照常
+    // 允许 "只有旧版本官方 seed 预设" 的情况下继续导入 live：
     // - 老用户已有非 seed provider，跳过导入（正确）
-    // - 用户手动点 ProviderEmptyState 的导入按钮时，与官方 seed 共存而不被阻塞
+    // - 用户手动点 ProviderEmptyState 的导入按钮时，与残留的官方 seed 共存而不被阻塞
     if state.db.has_non_official_seed_provider(app_type.as_str())? {
         return Ok(false);
     }
@@ -1011,7 +1010,7 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
 /// Decide whether startup should auto-import the current live config as `default`.
 ///
 /// This is intentionally stricter than the manual import path:
-/// if the app already has any provider row at all (including official seeds),
+/// if the app already has any provider row at all (including legacy official seeds),
 /// startup must skip auto-import to avoid recreating `default` on each launch.
 pub fn should_import_default_config_on_startup(
     state: &AppState,

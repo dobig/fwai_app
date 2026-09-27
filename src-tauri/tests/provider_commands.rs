@@ -46,7 +46,7 @@ fn codex_startup_import_fresh_install_imports_once_and_syncs_current_setting() {
     assert_eq!(
         providers.len(),
         1,
-        "fresh install import should create exactly one Codex provider before seeding"
+        "fresh install import should create exactly one Codex provider"
     );
     assert!(
         providers.contains_key("default"),
@@ -71,21 +71,6 @@ fn codex_startup_import_fresh_install_imports_once_and_syncs_current_setting() {
         "live import should also sync device-local currentProviderCodex"
     );
 
-    state
-        .db
-        .init_default_official_providers()
-        .expect("seed official providers");
-    let providers_after_seed = state
-        .db
-        .get_all_providers(AppType::Codex.as_str())
-        .expect("get codex providers after seed");
-    assert_eq!(
-        providers_after_seed.len(),
-        2,
-        "official seeding should add codex-official alongside imported default"
-    );
-    assert!(providers_after_seed.contains_key("codex-official"));
-
     assert!(
         !ProviderService::should_import_default_config_on_startup(&state, &AppType::Codex)
             .expect("re-check startup import eligibility"),
@@ -93,8 +78,19 @@ fn codex_startup_import_fresh_install_imports_once_and_syncs_current_setting() {
     );
 }
 
+fn legacy_codex_official_seed() -> Provider {
+    let mut provider = Provider::with_id(
+        "codex-official".to_string(),
+        "OpenAI Official".to_string(),
+        json!({"auth": {}, "config": ""}),
+        Some("https://chatgpt.com/codex".to_string()),
+    );
+    provider.category = Some("official".to_string());
+    provider
+}
+
 #[test]
-fn codex_startup_import_skips_when_only_official_seed_exists() {
+fn startup_cleanup_removes_untouched_official_seed_then_imports_live() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let _home = ensure_test_home();
@@ -107,39 +103,85 @@ fn codex_startup_import_skips_when_only_official_seed_exists() {
     let state = create_test_state().expect("create test state");
     state
         .db
-        .init_default_official_providers()
-        .expect("seed official providers");
+        .save_provider(AppType::Codex.as_str(), &legacy_codex_official_seed())
+        .expect("insert legacy codex-official");
 
-    let providers_before = state
+    let removed = state
         .db
-        .get_all_providers(AppType::Codex.as_str())
-        .expect("get codex providers before restart check");
-    assert_eq!(
-        providers_before.len(),
-        1,
-        "fixture should start with only codex-official present"
-    );
-    assert!(providers_before.contains_key("codex-official"));
+        .remove_untouched_official_seeds()
+        .expect("clean up official seeds");
+    assert_eq!(removed, 1, "untouched codex-official should be removed");
 
     assert!(
-        !ProviderService::should_import_default_config_on_startup(&state, &AppType::Codex)
+        ProviderService::should_import_default_config_on_startup(&state, &AppType::Codex)
             .expect("check startup import eligibility"),
-        "startup should skip import when codex-official already exists"
+        "after cleanup Codex has no providers, so startup should import live"
     );
+    import_default_config_test_hook(&state, AppType::Codex).expect("import codex default");
 
-    let providers_after = state
+    let providers = state
         .db
         .get_all_providers(AppType::Codex.as_str())
-        .expect("get codex providers after restart check");
+        .expect("get codex providers");
+    assert_eq!(providers.len(), 1);
+    assert!(providers.contains_key("default"));
+
     assert_eq!(
-        providers_after.len(),
-        providers_before.len(),
-        "skipping startup import should not grow the Codex provider set"
+        state
+            .db
+            .remove_untouched_official_seeds()
+            .expect("second cleanup"),
+        0,
+        "cleanup runs only once per database"
     );
-    assert!(
-        !providers_after.contains_key("default"),
-        "restart path should not create a new default provider"
+}
+
+#[test]
+fn startup_cleanup_keeps_official_seed_in_use_or_edited() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let state = create_test_state().expect("create test state");
+
+    // Codex：seed 是当前供应商 → 保留
+    state
+        .db
+        .save_provider(AppType::Codex.as_str(), &legacy_codex_official_seed())
+        .expect("insert legacy codex-official");
+    state
+        .db
+        .set_current_provider(AppType::Codex.as_str(), "codex-official")
+        .expect("set codex-official current");
+
+    // Claude：seed 被用户改过 → 保留
+    let mut claude = Provider::with_id(
+        "claude-official".to_string(),
+        "Claude Official".to_string(),
+        json!({"env": {"ANTHROPIC_MODEL": "claude-opus-5-5"}}),
+        None,
     );
+    claude.category = Some("official".to_string());
+    state
+        .db
+        .save_provider(AppType::Claude.as_str(), &claude)
+        .expect("insert edited claude-official");
+
+    let removed = state
+        .db
+        .remove_untouched_official_seeds()
+        .expect("clean up official seeds");
+    assert_eq!(removed, 0);
+    assert!(state
+        .db
+        .get_provider_by_id("codex-official", AppType::Codex.as_str())
+        .expect("read codex-official")
+        .is_some());
+    assert!(state
+        .db
+        .get_provider_by_id("claude-official", AppType::Claude.as_str())
+        .expect("read claude-official")
+        .is_some());
 }
 
 #[test]
