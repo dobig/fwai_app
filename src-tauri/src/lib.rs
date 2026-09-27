@@ -267,11 +267,12 @@ pub fn run() {
             // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
             // ============================================================
 
-            // 1.5. 自动导入 live 配置 + seed 官方预设供应商（Claude / Codex / Gemini）
+            // 1.5. 自动导入 live 配置（Claude / Codex / Gemini）
             //
-            // 先 import 后 seed 是有意为之：先把用户手动配置的 settings.json / auth.json / .env
-            // 落成 "default" provider 设为 current，再追加官方预设（is_current=false）。
-            // 这样用户切到官方预设时，回填机制会保护原 live 配置不丢失。
+            // 把用户手动配置的 settings.json / auth.json / .env 落成 "default" provider 设为 current。
+            // 不再 seed "XX Official" 预设。旧版本写入的、用户没动过的 seed 先清理掉再判断导入，
+            // 这样只剩 seed 的老用户这次启动也能把 live 配置导入进来。
+            // `fresh_install_at_startup` 在清理前取值，老用户不会因清理而被当成新装弹欢迎框。
             //
             // 捕获首次运行快照：所有全新装用户都会看到欢迎弹窗介绍 fwai_app 的工作方式。
             // 读失败时默认不弹，宁可漏弹也不要因为故障打扰用户。
@@ -279,6 +280,14 @@ pub fn run() {
                 .first_run_notice_confirmed
                 .unwrap_or(false);
             let fresh_install_at_startup = app_state.db.is_providers_empty().unwrap_or(false);
+
+            match app_state.db.remove_untouched_official_seeds() {
+                Ok(count) if count > 0 => {
+                    log::info!("✓ Removed {count} unused official seed provider(s)");
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("✗ Failed to clean up official seed providers: {e}"),
+            }
 
             for app_type in crate::app_config::AppType::all().filter(|t| !t.is_additive_mode()) {
                 if !crate::services::provider::should_import_default_config_on_startup(
@@ -307,14 +316,6 @@ pub fn run() {
                         log::debug!("○ No live config to import for {}: {e}", app_type.as_str())
                     }
                 }
-            }
-
-            match app_state.db.init_default_official_providers() {
-                Ok(count) if count > 0 => {
-                    log::info!("✓ Seeded {count} official provider(s)");
-                }
-                Ok(_) => {}
-                Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
             }
 
             // 老用户 / 已确认的路径由 `fresh_install_at_startup` 自行拦截，这里不做写入。

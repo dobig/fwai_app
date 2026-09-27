@@ -573,136 +573,54 @@ impl Database {
         Ok(false)
     }
 
-    /// 计算指定 app 下一个可用的 sort_index（追加到末尾）。
-    fn next_sort_index_for_app(&self, app_type: &str) -> Result<usize, AppError> {
-        let conn = lock_conn!(self.conn);
-        let max: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(sort_index) FROM providers WHERE app_type = ?1",
-                params![app_type],
-                |row| row.get(0),
-            )
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        Ok(max.map(|v| (v + 1) as usize).unwrap_or(0))
-    }
-
-    /// 启动时调用：补齐缺失的官方预设供应商（Claude / Codex / Gemini）。
+    /// 启动时调用：一次性清理旧版本自动写入的官方预设供应商（Claude / Codex / Gemini）。
     ///
-    /// 使用 settings flag `official_providers_seeded` 保证每个数据库只执行一次：
-    /// - 全新用户：seed 三条官方预设
-    /// - 老用户升级：同样会触发一次（flag 不存在），追加到末尾，不影响已有排序
-    /// - 用户删除 seed 后：不再重建（flag 已为 true），尊重用户意图
+    /// 旧版本启动时会无条件 seed 三条 "XX Official"，对用户没有实际用处、还容易混淆，
+    /// 现已不再 seed。这里只删除"原样未动"的 seed：
+    /// - 正在使用（is_current）的不删，避免把用户当前供应商删掉
+    /// - settings_config 与 seed 原值不同（用户改过）的不删
     ///
-    /// 与 `Database::save_provider` 的 UPSERT 语义配合，即使被意外重复调用
-    /// 也不会覆盖用户当前激活的供应商（is_current 字段会被保留）。
-    pub fn init_default_official_providers(&self) -> Result<usize, AppError> {
+    /// 用 settings flag `official_seeds_cleaned` 保证每个数据库只执行一次。
+    pub fn remove_untouched_official_seeds(&self) -> Result<usize, AppError> {
         use crate::database::dao::providers_seed::OFFICIAL_SEEDS;
 
         if self
-            .get_bool_flag("official_providers_seeded")
+            .get_bool_flag("official_seeds_cleaned")
             .unwrap_or(false)
         {
             return Ok(0);
         }
 
-        let mut inserted = 0_usize;
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut removed = 0_usize;
 
         for seed in OFFICIAL_SEEDS {
             let app_type_str = seed.app_type.as_str();
 
-            // 若该 id 已存在（极端情况：用户曾手动用过同 id），跳过
-            if self.get_provider_by_id(seed.id, app_type_str)?.is_some() {
+            let Some(provider) = self.get_provider_by_id(seed.id, app_type_str)? else {
+                continue;
+            };
+            if self.get_current_provider(app_type_str)?.as_deref() == Some(seed.id) {
+                continue;
+            }
+            let seed_config: serde_json::Value = serde_json::from_str(seed.settings_config_json)
+                .map_err(|e| {
+                    AppError::Database(format!("Seed JSON parse failed for {}: {e}", seed.id))
+                })?;
+            if provider.settings_config != seed_config {
                 continue;
             }
 
-            let next_sort_index = self.next_sort_index_for_app(app_type_str)?;
-
-            let settings_config: serde_json::Value =
-                serde_json::from_str(seed.settings_config_json).map_err(|e| {
-                    AppError::Database(format!("Seed JSON parse failed for {}: {e}", seed.id))
-                })?;
-
-            let mut provider = Provider::with_id(
-                seed.id.to_string(),
-                seed.name.to_string(),
-                settings_config,
-                Some(seed.website_url.to_string()),
-            );
-            provider.category = Some("official".to_string());
-            provider.icon = Some(seed.icon.to_string());
-            provider.icon_color = Some(seed.icon_color.to_string());
-            provider.sort_index = Some(next_sort_index);
-            provider.created_at = Some(now_ms);
-
-            self.save_provider(app_type_str, &provider)?;
-            inserted += 1;
+            self.delete_provider(app_type_str, seed.id)?;
+            removed += 1;
             log::info!(
-                "✓ Seeded official provider: {} ({})",
+                "✓ Removed unused official seed provider: {} ({})",
                 seed.name,
                 app_type_str
             );
         }
 
-        // 即使 inserted=0（例如用户手动创建过同 id）也设置 flag 防止反复检查
-        self.set_setting("official_providers_seeded", "true")?;
+        self.set_setting("official_seeds_cleaned", "true")?;
 
-        Ok(inserted)
-    }
-
-    /// 按 id 兜底插入单条 official seed（仅当目标表中该 id 不存在时插入）。
-    ///
-    /// 与 `init_default_official_providers` 不同：
-    /// - 不触碰 `official_providers_seeded` 全局 flag，是 on-demand 修复
-    /// - 只处理一条 seed，由调用方决定 id + app_type
-    /// - 已存在则尊重用户自定义，不覆盖
-    ///
-    /// 返回 Ok(true) 表示插入了新行，Ok(false) 表示已存在被跳过。
-    pub fn ensure_official_seed_by_id(
-        &self,
-        seed_id: &str,
-        app_type: crate::app_config::AppType,
-    ) -> Result<bool, AppError> {
-        use crate::database::dao::providers_seed::OFFICIAL_SEEDS;
-
-        let seed = OFFICIAL_SEEDS
-            .iter()
-            .find(|s| s.id == seed_id && s.app_type == app_type)
-            .ok_or_else(|| {
-                AppError::Database(format!(
-                    "unknown official seed: id={seed_id}, app_type={}",
-                    app_type.as_str()
-                ))
-            })?;
-
-        let app_type_str = seed.app_type.as_str();
-
-        if self.get_provider_by_id(seed_id, app_type_str)?.is_some() {
-            return Ok(false);
-        }
-
-        let settings_config: serde_json::Value = serde_json::from_str(seed.settings_config_json)
-            .map_err(|e| {
-                AppError::Database(format!("Seed JSON parse failed for {}: {e}", seed.id))
-            })?;
-
-        let next_sort_index = self.next_sort_index_for_app(app_type_str)?;
-        let now_ms = chrono::Utc::now().timestamp_millis();
-
-        let mut provider = Provider::with_id(
-            seed.id.to_string(),
-            seed.name.to_string(),
-            settings_config,
-            Some(seed.website_url.to_string()),
-        );
-        provider.category = Some("official".to_string());
-        provider.icon = Some(seed.icon.to_string());
-        provider.icon_color = Some(seed.icon_color.to_string());
-        provider.sort_index = Some(next_sort_index);
-        provider.created_at = Some(now_ms);
-
-        self.save_provider(app_type_str, &provider)?;
-
-        Ok(true)
+        Ok(removed)
     }
 }
