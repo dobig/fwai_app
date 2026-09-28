@@ -263,8 +263,13 @@ async fn fetch_github_latest_version(client: &reqwest::Client, repo: &str) -> Op
 
 /// 本应用自身的发布仓库
 const APP_REPO: &str = "dobig/fwai_app";
-/// 发布页地址（提示用户手动下载，本应用不做应用内自动安装）
-const RELEASES_URL: &str = "https://github.com/dobig/fwai_app/releases";
+/// 下载页地址（提示用户手动下载，本应用不做应用内自动安装）。
+///
+/// 指向官网而不是 GitHub Releases：国内用户打不开 github.com。官网的安装包
+/// 由服务器每 10 分钟从 GitHub 同步并校验，所以这里的"有新版本"提示最多比
+/// 官网早 10 分钟，用户点开时看到的仍是上一版。版本检查本身还走 GitHub API
+/// （api.github.com 在国内通常可达），连不上时按"已是最新"静默处理。
+const RELEASES_URL: &str = "https://fwai.space/#download";
 /// 检查更新的请求超时。get_tool_versions 用的是无超时的裸 client，
 /// 但这里的调用方要么是启动时的后台任务（会泄漏），要么是带 spinner 的按钮
 /// （spinner 会一直转），所以必须有超时。
