@@ -19,7 +19,7 @@ fn settings_path(home: &Path) -> PathBuf {
 }
 
 #[test]
-fn codex_startup_import_fresh_install_imports_once_and_syncs_current_setting() {
+fn codex_manual_import_creates_default_and_syncs_current_setting() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
@@ -31,12 +31,7 @@ fn codex_startup_import_fresh_install_imports_once_and_syncs_current_setting() {
 
     let state = create_test_state().expect("create test state");
 
-    assert!(
-        ProviderService::should_import_default_config_on_startup(&state, &AppType::Codex)
-            .expect("check startup import eligibility"),
-        "empty Codex provider set should import on startup"
-    );
-
+    // Startup no longer imports live config; this is the "导入当前配置" button.
     import_default_config_test_hook(&state, AppType::Codex).expect("import codex default");
 
     let providers = state
@@ -72,9 +67,8 @@ fn codex_startup_import_fresh_install_imports_once_and_syncs_current_setting() {
     );
 
     assert!(
-        !ProviderService::should_import_default_config_on_startup(&state, &AppType::Codex)
-            .expect("re-check startup import eligibility"),
-        "subsequent startup should skip once Codex already has providers"
+        !import_default_config_test_hook(&state, AppType::Codex).expect("second import is a no-op"),
+        "importing again once Codex has a provider must not create a second one"
     );
 }
 
@@ -90,7 +84,7 @@ fn legacy_codex_official_seed() -> Provider {
 }
 
 #[test]
-fn startup_cleanup_removes_untouched_official_seed_then_imports_live() {
+fn startup_cleanup_removes_untouched_official_seed() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let _home = ensure_test_home();
@@ -112,19 +106,16 @@ fn startup_cleanup_removes_untouched_official_seed_then_imports_live() {
         .expect("clean up official seeds");
     assert_eq!(removed, 1, "untouched codex-official should be removed");
 
-    assert!(
-        ProviderService::should_import_default_config_on_startup(&state, &AppType::Codex)
-            .expect("check startup import eligibility"),
-        "after cleanup Codex has no providers, so startup should import live"
-    );
-    import_default_config_test_hook(&state, AppType::Codex).expect("import codex default");
-
+    // Nothing is imported on startup any more: after the cleanup the list is
+    // simply empty until the user imports by hand.
     let providers = state
         .db
         .get_all_providers(AppType::Codex.as_str())
         .expect("get codex providers");
-    assert_eq!(providers.len(), 1);
-    assert!(providers.contains_key("default"));
+    assert!(
+        providers.is_empty(),
+        "startup must not recreate a default provider"
+    );
 
     assert_eq!(
         state

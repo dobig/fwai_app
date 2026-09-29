@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -1994,63 +1994,26 @@ describe("LlmGatewaySubscriptionDock 模型份额与模型用量", () => {
   });
 });
 
-describe("LlmGatewaySubscriptionDock 设置", () => {
-  it("开启发送前隐藏密钥，以服务端返回的资料为准回写缓存", async () => {
+describe("LlmGatewaySubscriptionDock 与应用设置页同步", () => {
+  it("在设置页改了资料后，面板读到的是新值，且面板里不再有脱敏入口", async () => {
     seedActivePlan();
-    const setRedaction = vi
-      .spyOn(gateway, "setSecretRedaction")
-      .mockResolvedValue({
+    renderDock();
+    await screen.findByText("登出");
+    // 入口已搬到应用设置页，面板里不该再出现。
+    expect(screen.queryByText("发送前隐藏密钥")).not.toBeInTheDocument();
+
+    act(() =>
+      gateway.updateGatewayUserProfile({
         id: "user_1",
         username: "tester",
         email: "tester@example.com",
         role: "user",
         email_verified: true,
         redact_secrets: true,
-      });
-    renderDock();
-
-    // 入口是账号页上单独一行，带当前状态。
-    const entry = await screen.findByRole("button", {
-      name: /发送前隐藏密钥.*未开启/,
-    });
-    await userEvent.click(entry);
-    expect(await screen.findByText("未开启")).toBeTruthy();
-    await userEvent.click(
-      screen.getByRole("switch", { name: "发送前隐藏密钥" }),
+      }),
     );
-
-    await waitFor(() => expect(setRedaction).toHaveBeenCalledWith(true));
-    expect(await screen.findByText("已开启")).toBeTruthy();
-    expect(toasts.success).toHaveBeenCalledWith("已开启发送前隐藏密钥");
+    // 面板随后写回缓存（比如刷新订阅）时不能把设置页刚开的开关覆盖回去。
     const cached = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
     expect(cached.user.redact_secrets).toBe(true);
-
-    // 回到账号页，入口那一行也跟着显示「已开启」。
-    await userEvent.click(screen.getByText("返回"));
-    expect(
-      await screen.findByRole("button", { name: /发送前隐藏密钥.*已开启/ }),
-    ).toBeTruthy();
-  });
-
-  it("服务端拒绝时开关不动，并提示失败", async () => {
-    seedActivePlan();
-    vi.spyOn(gateway, "setSecretRedaction").mockRejectedValue(
-      new GatewayApiError(500, "boom"),
-    );
-    renderDock();
-
-    await userEvent.click(
-      await screen.findByRole("button", { name: /发送前隐藏密钥/ }),
-    );
-    await userEvent.click(
-      await screen.findByRole("switch", { name: "发送前隐藏密钥" }),
-    );
-
-    await waitFor(() =>
-      expect(toasts.error).toHaveBeenCalledWith("设置失败，请稍后重试"),
-    );
-    expect(screen.getByText("未开启")).toBeTruthy();
-    const cached = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
-    expect(cached.user.redact_secrets).toBeFalsy();
   });
 });

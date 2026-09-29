@@ -44,7 +44,7 @@
   },
   "firstRunNotice": {
     "title": "欢迎使用 fwai_app",
-    "bodyDefault": "fwai_app 是 LLM Gateway 的桌面客户端，负责在 Claude Code / Codex / Gemini CLI 的供应商之间一键切换。你原有的 CLI 配置已自动保存为 “default” 供应商，随时可以切回，不会丢失。",
+    "bodyDefault": "fwai_app 是 LLM Gateway 的桌面客户端，负责在 Claude Code / Codex / Gemini CLI 的供应商之间一键切换。你原有的 CLI 配置不会被改动；需要的话，可以在供应商列表里点「导入当前配置」把它保存为一个供应商。",
     "bodyOfficial": "上手三步：\n1. 打开右下角 LLM Gateway 面板并登录\n2. 点“开启转发”\n3. 在供应商列表中启用 “LLM Gateway”\n只有第 3 步才会写入 CLI 配置；切换供应商时会先恢复原配置再写入新配置，可以放心来回切。",
     "confirm": "我知道了"
   },
