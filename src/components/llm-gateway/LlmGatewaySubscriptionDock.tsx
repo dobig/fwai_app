@@ -11,8 +11,9 @@ import {
   MailCheck,
   Plug,
   RefreshCw,
-  Settings,
   ShoppingBag,
+  KeyRound,
+  ChevronRight,
   ChartColumn,
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -49,6 +50,7 @@ import {
   saveGatewayLogin,
   saveGatewayUsageCache,
   loadGatewayUsageCache,
+  loadGatewayTokens,
   planRole,
   clearGatewayUsageCache,
   registerGateway,
@@ -100,6 +102,38 @@ type Screen =
   | "model-usage"
   | "settings";
 type AuthMode = "login" | "register";
+
+// 登出里每一步外部调用最多等这么久。够一次正常的本地文件写入或一次网络往返，
+// 又短到卡住时用户不会以为按钮坏了。
+const LOGOUT_STEP_TIMEOUT_MS = 4000;
+
+// 超时不抛错，只记日志：登出的每一步都是尽力而为，没有哪一步值得挡住登出本身。
+async function withTimeout(
+  work: Promise<unknown>,
+  ms: number,
+  label: string,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      console.warn(`[logout] ${label} 超过 ${ms}ms，跳过`);
+      resolve();
+    }, ms);
+  });
+  try {
+    await Promise.race([
+      work.then(
+        () => undefined,
+        (error) => {
+          console.error(`[logout] ${label} 失败`, error);
+        },
+      ),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // Mirrors the gateway's own 60s resend cooldown. The server is authoritative —
 // this only greys out the button so the common case is a countdown rather than
@@ -370,6 +404,9 @@ export function LlmGatewaySubscriptionDock() {
   const [loginChallenge, setLoginChallenge] =
     useState<GatewayLoginChallenge | null>(null);
   const [loginCode, setLoginCode] = useState("");
+  // 登出进行中：挡住连点。以前一次登出卡住时用户会连点好几下，每一下都去
+  // 作废同一个 token，服务端日志里就是一串 401。
+  const [loggingOut, setLoggingOut] = useState(false);
   // 换屏时把滚动位置归零。ScreenView 的入场动画（translate-x-4 → 0）会让浏览器
   // 为了「把动画中的元素滚进视野」自己滚一小段，残留下来就是新屏一进来顶部就
   // 少了一截 —— 验证登录屏上被切掉的正是「返回登录」，而那是这屏唯一的退路。
@@ -1069,28 +1106,58 @@ requires_openai_auth = true`,
     }
   }
 
+  // 登出以本地为准：先把本机的凭据和界面清掉，再去做那些要等外部的事。
+  //
+  // 以前是反过来的 —— 先还原转发、删供应商条目、再请求服务端作废 token，全部
+  // 做完才清本地。这几步每一步都可能卡住：revoke 是一个没有超时的 fetch，网络
+  // 不通时永远不返回；Tauri 那两个命令也可能等文件锁。任何一步挂住，后面的
+  // 「清本地、回登录页、提示已登出」就都不会执行，用户看到的就是点了没反应。
+  //
+  // 现在：
+  // - 本地状态立刻清掉，登录页和「已登出」马上出现；
+  // - 还原转发和删供应商条目仍然要做（token 作废后网关 endpoint 不能留在
+  //   CLI 配置里），但各自有超时，超时只记日志、不挡登出；
+  // - 服务端作废 token 在后台做，也有超时。失败了本地照样登出 —— 离线登出
+  //   本来就该成功。
   async function handleLogout() {
-    await stopForwardingEverywhere();
-    await removeGatewayProvider();
-    // Kill the session server-side too — with non-expiring tokens, a logout
-    // that only clears localStorage would leave live credentials behind.
-    // Best-effort: an offline logout must still succeed locally.
+    if (loggingOut) return;
+    setLoggingOut(true);
+    // 先拿住 refresh token：下面马上就要把本地凭据清掉。
+    const refreshToken = loadGatewayTokens()?.refresh_token;
     try {
-      await revokeGatewayToken();
-    } catch {
-      /* offline or already revoked */
+      await withTimeout(
+        stopForwardingEverywhere(),
+        LOGOUT_STEP_TIMEOUT_MS,
+        "还原转发",
+      );
+      await withTimeout(
+        removeGatewayProvider(),
+        LOGOUT_STEP_TIMEOUT_MS,
+        "移除网关供应商",
+      );
+    } finally {
+      clearGatewayLogin();
+      clearGatewayUsageCache();
+      setUsage(null);
+      setUsageFetchedAt(null);
+      setLogin(null);
+      setScreen("auth");
+      setAuthMode("login");
+      setPassword("");
+      setInviteCode("");
+      setErrors({});
+      setLoggingOut(false);
+      toast.success("已登出");
     }
-    clearGatewayLogin();
-    clearGatewayUsageCache();
-    setUsage(null);
-    setUsageFetchedAt(null);
-    setLogin(null);
-    setScreen("auth");
-    setAuthMode("login");
-    setPassword("");
-    setInviteCode("");
-    setErrors({});
-    toast.success("已登出");
+    // 服务端作废放在最后、不 await：它只影响服务端那一侧，本地已经登出了。
+    if (refreshToken) {
+      void revokeGatewayToken({
+        refreshToken,
+        timeoutMs: LOGOUT_STEP_TIMEOUT_MS,
+      }).catch(() => {
+        /* offline or already revoked — the local logout already happened */
+      });
+    }
   }
 
   async function handleRefreshToken() {
@@ -1835,6 +1902,28 @@ requires_openai_auth = true`,
               购买套餐
             </button>
 
+            {/* 脱敏入口。单独一行、带当前状态：这是用户自己要开的保护，藏在
+                底部一个小字「设置」里时几乎没人发现它存在。 */}
+            <button
+              className="mt-2 flex w-full items-center justify-between gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2.5 text-sm transition hover:border-border/80 hover:bg-muted"
+              onClick={() => setScreen("settings")}
+            >
+              <span className="flex items-center gap-2 font-medium">
+                <KeyRound className="h-4 w-4" />
+                发送前隐藏密钥
+              </span>
+              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                {login.user.redact_secrets ? (
+                  <span className="text-green-600 dark:text-green-400">
+                    已开启
+                  </span>
+                ) : (
+                  "未开启"
+                )}
+                <ChevronRight className="h-3.5 w-3.5" />
+              </span>
+            </button>
+
             {/* 兑换码入口。做成次要样式：绝大多数人没有码，它不该和购买抢
                 注意力，但有码的人得找得到。 */}
             <button
@@ -1873,17 +1962,11 @@ requires_openai_auth = true`,
               </div>
             </details>
 
-            <div className="mt-3.5 flex items-center justify-center gap-5">
+            <div className="mt-3.5 text-center">
               <button
-                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition hover:text-foreground"
-                onClick={() => setScreen("settings")}
-              >
-                <Settings className="h-3.5 w-3.5" />
-                设置
-              </button>
-              <button
-                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition hover:text-destructive"
-                onClick={handleLogout}
+                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition hover:text-destructive disabled:opacity-60"
+                disabled={loggingOut}
+                onClick={() => void handleLogout()}
               >
                 <LogOut className="h-3.5 w-3.5" />
                 登出
