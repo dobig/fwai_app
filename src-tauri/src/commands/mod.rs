@@ -9,7 +9,6 @@ mod provider;
 mod settings;
 mod sync_support;
 
-mod lightweight;
 pub use config::*;
 pub use env::*;
 pub use import_export::*;
@@ -18,5 +17,3 @@ pub use model_fetch::*;
 pub use plugin::*;
 pub use provider::*;
 pub use settings::*;
-
-pub use lightweight::*;

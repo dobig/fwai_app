@@ -44,7 +44,7 @@
   },
   "firstRunNotice": {
     "title": "fwai_app へようこそ",
-    "bodyDefault": "fwai_app は LLM Gateway のデスクトップクライアントです。Claude Code / Codex / Gemini CLI のプロバイダーをワンクリックで切り替えられます。既存の CLI 設定は「default」プロバイダーとして自動保存され、いつでも戻せます。",
+    "bodyDefault": "fwai_app は LLM Gateway のデスクトップクライアントです。Claude Code / Codex / Gemini CLI のプロバイダーをワンクリックで切り替えられます。既存の CLI 設定は変更されません。必要ならプロバイダー一覧の「現在の設定をインポート」でプロバイダーとして保存できます。",
     "bodyOfficial": "はじめかた：\n1. 右下の LLM Gateway パネルを開いてログイン\n2. 「転送を開始」をクリック\n3. プロバイダー一覧で「LLM Gateway」を有効化\nCLI 設定が書き込まれるのはステップ 3 のみです。プロバイダー切替時は、必ず元の設定を復元してから新しい設定を書き込みます。",
     "confirm": "了解"
   },

@@ -28,6 +28,7 @@ import { settingsApi } from "@/lib/api";
 import { LanguageSettings } from "@/components/settings/LanguageSettings";
 import { ThemeSettings } from "@/components/settings/ThemeSettings";
 import { WindowSettings } from "@/components/settings/WindowSettings";
+import { GatewayAccountSettings } from "./GatewayAccountSettings";
 import { AppVisibilitySettings } from "@/components/settings/AppVisibilitySettings";
 import { TerminalSettings } from "@/components/settings/TerminalSettings";
 import { DirectorySettings } from "@/components/settings/DirectorySettings";
@@ -202,6 +203,7 @@ export function SettingsPage({
                     transition={{ duration: 0.3 }}
                     className="space-y-6"
                   >
+                    <GatewayAccountSettings />
                     <LanguageSettings
                       value={settings.language}
                       onChange={(lang) => handleAutoSave({ language: lang })}
