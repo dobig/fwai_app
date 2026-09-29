@@ -183,13 +183,14 @@ export function SettingsPage({
           onValueChange={setActiveTab}
           className="flex flex-col h-full"
         >
-          <TabsList className="grid w-full grid-cols-3 mb-6 glass rounded-lg">
+          <TabsList className="grid w-full grid-cols-4 mb-6 glass rounded-lg">
             <TabsTrigger value="general">
               {t("settings.tabGeneral")}
             </TabsTrigger>
             <TabsTrigger value="advanced">
               {t("settings.tabAdvanced")}
             </TabsTrigger>
+            <TabsTrigger value="data">{t("settings.tabData")}</TabsTrigger>
             <TabsTrigger value="about">{t("common.about")}</TabsTrigger>
           </TabsList>
 
@@ -203,7 +204,6 @@ export function SettingsPage({
                     transition={{ duration: 0.3 }}
                     className="space-y-6"
                   >
-                    <GatewayAccountSettings />
                     <LanguageSettings
                       value={settings.language}
                       onChange={(lang) => handleAutoSave({ language: lang })}
@@ -227,7 +227,18 @@ export function SettingsPage({
                 ) : null}
               </TabsContent>
 
-              <TabsContent value="advanced" className="space-y-6 mt-0 pb-4">
+              <TabsContent value="advanced" className="space-y-6 mt-0">
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className="space-y-6"
+                >
+                  <GatewayAccountSettings />
+                </motion.div>
+              </TabsContent>
+
+              <TabsContent value="data" className="space-y-6 mt-0 pb-4">
                 {settings ? (
                   <motion.div
                     initial={{ opacity: 0, y: 10 }}
@@ -370,7 +381,7 @@ export function SettingsPage({
               </TabsContent>
             </div>
 
-            {activeTab === "advanced" && settings && (
+            {activeTab === "data" && settings && (
               <div
                 className="flex-shrink-0 pt-4 border-t border-border-default"
                 style={{ backgroundColor: "hsl(var(--background))" }}

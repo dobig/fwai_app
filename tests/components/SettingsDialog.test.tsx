@@ -233,6 +233,10 @@ vi.mock("@/components/settings/DirectorySettings", () => ({
   ),
 }));
 
+vi.mock("@/components/settings/GatewayAccountSettings", () => ({
+  GatewayAccountSettings: () => <div>gateway-account-settings</div>,
+}));
+
 vi.mock("@/components/settings/AboutSection", () => ({
   AboutSection: ({ isPortable }: any) => <div>about:{String(isPortable)}</div>,
 }));
@@ -327,6 +331,16 @@ describe("SettingsPage Component", () => {
 
     expect(screen.getByText("language:zh")).toBeInTheDocument();
     expect(screen.getByText("theme-settings")).toBeInTheDocument();
+    // 账号级设置不在「通用」，在「高级」；原来的目录/备份/日志在「数据」。
+    expect(
+      screen.queryByText("gateway-account-settings"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("settings.tabAdvanced"));
+    expect(screen.getByText("gateway-account-settings")).toBeInTheDocument();
+    expect(
+      screen.queryByText("settings.advanced.data.title"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("settings.tabGeneral"));
 
     fireEvent.click(screen.getByText("change-language"));
     expect(settingsMock.updateSettings).toHaveBeenCalledWith({
@@ -338,13 +352,11 @@ describe("SettingsPage Component", () => {
       minimizeToTrayOnClose: false,
     });
 
-    fireEvent.click(screen.getByText("settings.tabAdvanced"));
+    fireEvent.click(screen.getByText("settings.tabData"));
     fireEvent.click(screen.getByText("settings.advanced.data.title"));
 
     // 有文件时，点击导入按钮执行 importConfig
-    fireEvent.click(
-      screen.getByRole("button", { name: /settings\.import/ }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: /settings\.import/ }));
     expect(importExportMock.importConfig).toHaveBeenCalled();
 
     fireEvent.click(
@@ -380,7 +392,7 @@ describe("SettingsPage Component", () => {
     renderSettingsPage({ onOpenChange });
 
     // 保存按钮在 advanced tab 中
-    fireEvent.click(screen.getByText("settings.tabAdvanced"));
+    fireEvent.click(screen.getByText("settings.tabData"));
     fireEvent.click(screen.getByRole("button", { name: /common\.save/ }));
 
     await waitFor(() => {
@@ -439,7 +451,7 @@ describe("SettingsPage Component", () => {
   it("should trigger directory management callbacks inside advanced tab", () => {
     renderSettingsPage();
 
-    fireEvent.click(screen.getByText("settings.tabAdvanced"));
+    fireEvent.click(screen.getByText("settings.tabData"));
     fireEvent.click(screen.getByText("settings.advanced.configDir.title"));
 
     fireEvent.click(screen.getByText("browse-directory"));

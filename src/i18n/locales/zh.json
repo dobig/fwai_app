@@ -304,6 +304,7 @@
     "tabGeneral": "通用",
     "tabAuth": "认证",
     "tabAdvanced": "高级",
+    "tabData": "数据",
     "tabProxy": "路由",
     "authCenter": {
       "title": "OAuth 认证中心",
