@@ -11,7 +11,9 @@ import {
   MailCheck,
   Plug,
   RefreshCw,
+  Settings,
   ShoppingBag,
+  ChartColumn,
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { providersApi } from "@/lib/api";
@@ -65,6 +67,8 @@ import { useClientUpgradeSignal } from "@/lib/clientUpgrade";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PlanCheckout } from "./PlanCheckout";
 import { PlanSections } from "./PlanSections";
+import { ModelCapBar, ModelUsageScreen } from "./ModelUsageScreen";
+import { SettingsScreen } from "./SettingsScreen";
 import {
   TIERS,
   formatMicrosUSD,
@@ -92,7 +96,9 @@ type Screen =
   | "redeem"
   | "verify-email"
   | "forgot-password"
-  | "login-code";
+  | "login-code"
+  | "model-usage"
+  | "settings";
 type AuthMode = "login" | "register";
 
 // Mirrors the gateway's own 60s resend cooldown. The server is authoritative —
@@ -948,6 +954,16 @@ requires_openai_auth = true`,
 
   // 把本地缓存的 profile 标记为已验证。login 是 localStorage 里的缓存，
   // 不同步更新的话账号屏会一直显示「未验证」直到重新登录。
+  // 服务端返回的最新资料回写到缓存的登录信息里（设置屏的开关走这里）。
+  function applyProfile(user: GatewayUserProfile) {
+    setLogin((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, user: { ...prev.user, ...user } };
+      saveGatewayLogin(next);
+      return next;
+    });
+  }
+
   function markEmailVerified() {
     setLogin((prev) => {
       if (!prev) return prev;
@@ -1435,7 +1451,11 @@ requires_openai_auth = true`,
               ? "找回密码"
               : screen === "login-code"
                 ? "验证登录"
-                : "我的账号";
+                : screen === "model-usage"
+                  ? "模型用量"
+                  : screen === "settings"
+                    ? "设置"
+                    : "我的账号";
   const headSub =
     screen === "auth"
       ? "登录后即可在 Claude Code 中使用"
@@ -1449,9 +1469,13 @@ requires_openai_auth = true`,
               ? "用注册邮箱收取验证码重设密码"
               : screen === "login-code"
                 ? "输入邮箱收到的验证码完成登录"
-                : forwarding
-                  ? `转发中 · ${activeAppName} 正在走 llm_gateway`
-                  : "已登录 · 开启转发后即可使用";
+                : screen === "model-usage"
+                  ? "当前窗口里各模型花了多少"
+                  : screen === "settings"
+                    ? "跟着账号走，换台电脑登录也生效"
+                    : forwarding
+                      ? `转发中 · ${activeAppName} 正在走 llm_gateway`
+                      : "已登录 · 开启转发后即可使用";
 
   const inputCls =
     "w-full rounded-lg border bg-muted/40 px-3 py-2 text-sm outline-none transition focus:border-primary focus:bg-background focus:ring-2 focus:ring-primary/20";
@@ -1733,9 +1757,30 @@ requires_openai_auth = true`,
                 {usage.five_hour && (
                   <UsageBar label="5 小时" window={usage.five_hour} />
                 )}
+                {(usage.model_caps ?? []).map((cap) => (
+                  <ModelCapBar
+                    key={`5h-${cap.id}`}
+                    cap={cap}
+                    windowKey="five_hour"
+                  />
+                ))}
                 {usage.seven_day && (
                   <UsageBar label="7 天" window={usage.seven_day} />
                 )}
+                {(usage.model_caps ?? []).map((cap) => (
+                  <ModelCapBar
+                    key={`7d-${cap.id}`}
+                    cap={cap}
+                    windowKey="seven_day"
+                  />
+                ))}
+                <button
+                  className="flex w-full items-center justify-center gap-1.5 pt-0.5 text-[11px] text-muted-foreground transition hover:text-foreground"
+                  onClick={() => setScreen("model-usage")}
+                >
+                  <ChartColumn className="h-3.5 w-3.5" />
+                  按模型查看
+                </button>
               </div>
             )}
 
@@ -1828,7 +1873,14 @@ requires_openai_auth = true`,
               </div>
             </details>
 
-            <div className="mt-3.5 text-center">
+            <div className="mt-3.5 flex items-center justify-center gap-5">
+              <button
+                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition hover:text-foreground"
+                onClick={() => setScreen("settings")}
+              >
+                <Settings className="h-3.5 w-3.5" />
+                设置
+              </button>
               <button
                 className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition hover:text-destructive"
                 onClick={handleLogout}
@@ -1837,6 +1889,34 @@ requires_openai_auth = true`,
                 登出
               </button>
             </div>
+          </ScreenView>
+        )}
+
+        {screen === "model-usage" && login && (
+          <ScreenView key="model-usage">
+            <button
+              className="mb-3 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground"
+              onClick={() => setScreen("account")}
+            >
+              <ArrowLeft className="h-4 w-4" />
+              返回
+            </button>
+            <ModelUsageScreen
+              onUnauthorized={() => toast.error("登录已过期，请重新登录")}
+            />
+          </ScreenView>
+        )}
+
+        {screen === "settings" && login && (
+          <ScreenView key="settings">
+            <button
+              className="mb-3 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground"
+              onClick={() => setScreen("account")}
+            >
+              <ArrowLeft className="h-4 w-4" />
+              返回
+            </button>
+            <SettingsScreen user={login.user} onProfile={applyProfile} />
           </ScreenView>
         )}
 

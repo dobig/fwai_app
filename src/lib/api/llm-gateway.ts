@@ -21,6 +21,9 @@ export interface GatewayUserProfile {
   // False until the address is proven reachable via a mailed code. Unverified
   // users can sign in and browse; the gateway only stops them at purchase.
   email_verified: boolean;
+  // 发给上游前是否把提示里的密钥/凭据替换成占位符（服务端 #255）。老服务端
+  // 不返回这个字段，所以是可选：读的时候 undefined 当作「未开启」。
+  redact_secrets?: boolean;
 }
 
 export interface GatewayAccountProfile {
@@ -710,6 +713,55 @@ export interface GatewayUsageWindow {
 export interface GatewayUsage {
   five_hour: GatewayUsageWindow | null;
   seven_day: GatewayUsageWindow | null;
+  // 按模型族的份额上限（服务端 #256），例如 Fable 最多占总额度的 50%。
+  // 老服务端没有这个字段，读的时候一律 `?? []`。
+  model_caps?: GatewayModelCap[];
+}
+
+// 一个模型族在一个窗口里的份额用量。utilization 和上面的总额度同一个定义：
+// 到 100% 的那一刻就是这类模型开始被拒（429 model_share_exceeded）的那一刻。
+export interface GatewayModelCapWindow {
+  utilization: number;
+  resets_at?: string;
+  cap_micros: number;
+  charged_micros: number;
+}
+
+export interface GatewayModelCap {
+  id: string;
+  label: string;
+  // 模型 id 前缀，如 "claude-fable-"。这一族所有版本共享同一份额度。
+  match: string;
+  // 占总额度的比例，基点（5000 = 50%）。
+  share_bps: number;
+  five_hour: GatewayModelCapWindow | null;
+  seven_day: GatewayModelCapWindow | null;
+}
+
+// GET /v1/usage/models：当前 5 小时 / 周窗口里每个模型花了多少。
+export interface GatewayModelUsageEntry {
+  model: string;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_tokens: number;
+  reasoning_tokens: number;
+  charged_micros: number;
+}
+
+export interface GatewayModelUsageWindow {
+  utilization: number;
+  resets_at?: string;
+  started_at?: string;
+  cap_micros: number;
+  charged_micros: number;
+  models: GatewayModelUsageEntry[];
+}
+
+export interface GatewayModelUsage {
+  five_hour: GatewayModelUsageWindow | null;
+  seven_day: GatewayModelUsageWindow | null;
+  model_caps?: GatewayModelCap[];
 }
 
 const USAGE_CACHE_KEY = "llm-gateway-usage-cache";
@@ -754,4 +806,27 @@ export async function fetchGatewayUsage(): Promise<GatewayUsage> {
     { method: "GET" },
     true,
   );
+}
+
+// fetchGatewayModelUsage：按模型拆开的当前窗口用量，外加份额上限。模型用量页
+// 打开时拉一次；老服务端没有这个接口会 404，调用方按「暂无数据」处理。
+export async function fetchGatewayModelUsage(): Promise<GatewayModelUsage> {
+  return gatewayRequest<GatewayModelUsage>(
+    "/v1/usage/models",
+    { method: "GET" },
+    true,
+  );
+}
+
+// setSecretRedaction 开关「发送前隐藏密钥」。返回刷新后的个人资料，里面的
+// redact_secrets 就是服务端生效的值 —— 以它为准，不用本地的开关状态。
+export async function setSecretRedaction(
+  enabled: boolean,
+): Promise<GatewayUserProfile> {
+  const res = await gatewayRequest<{ user: GatewayUserProfile }>(
+    "/v1/account/secret-redaction",
+    { method: "PUT", body: JSON.stringify({ enabled }) },
+    true,
+  );
+  return res.user;
 }
