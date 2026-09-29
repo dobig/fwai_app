@@ -45,9 +45,10 @@ beforeEach(() => {
 });
 
 describe("GatewayAccountSettings", () => {
-  it("没登录网关时整块不显示", () => {
+  it("没登录网关时不显示开关，只提示去哪里登录", () => {
     render(<GatewayAccountSettings />);
-    expect(screen.queryByText("发送前隐藏密钥")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.getByText(/登录 llm_gateway 后可在这里设置/)).toBeTruthy();
   });
 
   it("开启后以服务端返回的资料为准回写缓存", async () => {
@@ -93,14 +94,14 @@ describe("GatewayAccountSettings", () => {
     ).toBe(false);
   });
 
-  it("在网关面板里登录、登出后跟着出现和消失", () => {
+  it("在网关面板里登录、登出后开关跟着出现和消失", () => {
     render(<GatewayAccountSettings />);
-    expect(screen.queryByText("发送前隐藏密钥")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
 
     act(() => seedLogin(true));
     expect(toggle()).toHaveAttribute("aria-checked", "true");
 
     act(() => gateway.clearGatewayLogin());
-    expect(screen.queryByText("发送前隐藏密钥")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
   });
 });
