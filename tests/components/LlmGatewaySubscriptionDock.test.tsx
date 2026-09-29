@@ -411,6 +411,89 @@ describe("LlmGatewaySubscriptionDock 登出", () => {
     );
     expect(providersApi.stopForwarding).toHaveBeenCalledWith("codex");
   });
+
+  it("网络不通时也立刻登出：作废 token 挂住不挡本地", async () => {
+    seedActivePlan();
+    // 永远不返回的 revoke —— 断网、代理卡死时 fetch 就是这样。
+    const revoke = vi
+      .spyOn(gateway, "revokeGatewayToken")
+      .mockReturnValue(new Promise(() => {}));
+
+    renderDock("claude");
+    await userEvent.click(await screen.findByText("登出"));
+
+    await waitFor(() => expect(toasts.success).toHaveBeenCalledWith("已登出"));
+    expect(localStorage.getItem(LOGIN_KEY)).toBeNull();
+    expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
+    expect(await screen.findByText("登录 llm_gateway")).toBeTruthy();
+    // 作废仍然发了，只是没等它；带上的是清本地之前拿住的那个 token。
+    expect(revoke).toHaveBeenCalledWith(
+      expect.objectContaining({ refreshToken: "refresh-token" }),
+    );
+  });
+
+  it("还原转发失败时照样登出", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "revokeGatewayToken").mockResolvedValue(undefined);
+    vi.mocked(providersApi.stopForwarding).mockRejectedValue(
+      new Error("config locked"),
+    );
+    vi.mocked(providersApi.removeManaged).mockRejectedValue(
+      new Error("config locked"),
+    );
+
+    renderDock("claude");
+    await userEvent.click(await screen.findByText("登出"));
+
+    await waitFor(() => expect(toasts.success).toHaveBeenCalledWith("已登出"));
+    expect(localStorage.getItem(LOGIN_KEY)).toBeNull();
+  });
+
+  it("本地配置步骤卡住时，超时后照样登出", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      seedActivePlan();
+      vi.spyOn(gateway, "revokeGatewayToken").mockResolvedValue(undefined);
+      vi.mocked(providersApi.stopForwarding).mockReturnValue(
+        new Promise(() => {}),
+      );
+
+      renderDock("claude");
+      await userEvent.click(await screen.findByText("登出"));
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await waitFor(() =>
+        expect(toasts.success).toHaveBeenCalledWith("已登出"),
+      );
+      expect(localStorage.getItem(LOGIN_KEY)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("连点登出只登出一次", async () => {
+    seedActivePlan();
+    const revoke = vi
+      .spyOn(gateway, "revokeGatewayToken")
+      .mockResolvedValue(undefined);
+    let release: () => void = () => {};
+    vi.mocked(providersApi.stopForwarding).mockReturnValue(
+      new Promise<never>((resolve) => {
+        release = () => resolve(undefined as never);
+      }),
+    );
+
+    renderDock("claude");
+    const button = await screen.findByText("登出");
+    await userEvent.click(button);
+    await userEvent.click(button);
+    await userEvent.click(button);
+    release();
+
+    await waitFor(() => expect(toasts.success).toHaveBeenCalledWith("已登出"));
+    expect(toasts.success).toHaveBeenCalledTimes(1);
+    expect(revoke).toHaveBeenCalledTimes(1);
+  });
 });
 
 // 套餐可以叠加，一个用户同时可能有好几个在跑，还可能有一个排队等生效。
@@ -1926,7 +2009,11 @@ describe("LlmGatewaySubscriptionDock 设置", () => {
       });
     renderDock();
 
-    await userEvent.click(await screen.findByText("设置"));
+    // 入口是账号页上单独一行，带当前状态。
+    const entry = await screen.findByRole("button", {
+      name: /发送前隐藏密钥.*未开启/,
+    });
+    await userEvent.click(entry);
     expect(await screen.findByText("未开启")).toBeTruthy();
     await userEvent.click(
       screen.getByRole("switch", { name: "发送前隐藏密钥" }),
@@ -1937,6 +2024,12 @@ describe("LlmGatewaySubscriptionDock 设置", () => {
     expect(toasts.success).toHaveBeenCalledWith("已开启发送前隐藏密钥");
     const cached = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
     expect(cached.user.redact_secrets).toBe(true);
+
+    // 回到账号页，入口那一行也跟着显示「已开启」。
+    await userEvent.click(screen.getByText("返回"));
+    expect(
+      await screen.findByRole("button", { name: /发送前隐藏密钥.*已开启/ }),
+    ).toBeTruthy();
   });
 
   it("服务端拒绝时开关不动，并提示失败", async () => {
@@ -1946,7 +2039,9 @@ describe("LlmGatewaySubscriptionDock 设置", () => {
     );
     renderDock();
 
-    await userEvent.click(await screen.findByText("设置"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /发送前隐藏密钥/ }),
+    );
     await userEvent.click(
       await screen.findByRole("switch", { name: "发送前隐藏密钥" }),
     );

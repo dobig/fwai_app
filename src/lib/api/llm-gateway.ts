@@ -355,20 +355,37 @@ export async function refreshGatewayToken(): Promise<GatewayTokens> {
   return merged;
 }
 
-// revokeGatewayToken invalidates the stored refresh token server-side
-// (POST /oauth/revoke). All access tokens bound to it die with it.
-export async function revokeGatewayToken(): Promise<void> {
-  const current = loadGatewayTokens();
-  if (!current?.refresh_token) return;
-  // Direct fetch: the endpoint answers 204 No Content, which gatewayRequest's
-  // unconditional response.json() would choke on.
-  const response = await fetch(`${getGatewayBaseURL()}/oauth/revoke`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: current.refresh_token }),
-  });
-  if (!response.ok) {
-    throw new Error(`llm_gateway revoke failed: ${response.status}`);
+// revokeGatewayToken invalidates a refresh token server-side (POST
+// /oauth/revoke). All access tokens bound to it die with it.
+//
+// Logout passes the token explicitly because it has already cleared local
+// storage by the time this runs, and bounds the call with a timeout: a fetch
+// with no deadline never settles on a dead network.
+export async function revokeGatewayToken(
+  options: { refreshToken?: string; timeoutMs?: number } = {},
+): Promise<void> {
+  const refreshToken =
+    options.refreshToken ?? loadGatewayTokens()?.refresh_token;
+  if (!refreshToken) return;
+  const controller = new AbortController();
+  const timer =
+    options.timeoutMs != null
+      ? setTimeout(() => controller.abort(), options.timeoutMs)
+      : undefined;
+  try {
+    // Direct fetch: the endpoint answers 204 No Content, which gatewayRequest's
+    // unconditional response.json() would choke on.
+    const response = await fetch(`${getGatewayBaseURL()}/oauth/revoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`llm_gateway revoke failed: ${response.status}`);
+    }
+  } finally {
+    clearTimeout(timer);
   }
 }
 
