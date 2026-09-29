@@ -1605,7 +1605,6 @@ describe("LlmGatewaySubscriptionDock token 刷新", () => {
   });
 });
 
-
 // 两步登录。四件客户端最容易做错的事，每件一个 case：
 //  1. 409 不是登录失败 —— 当成失败就会清凭据、弹「账号或密码错误」，用户被
 //     一个其实正确的密码挡在门外，而且永远看不到验证码输入框。
@@ -1700,7 +1699,9 @@ describe("LlmGatewaySubscriptionDock 两步登录", () => {
     await userEvent.click(screen.getByRole("button", { name: "完成登录" }));
 
     // 漏了这一步的话条目里是空凭据，Claude Code 那边会一直 401。
-    await waitFor(() => expect(toasts.success).toHaveBeenCalledWith("登录成功"));
+    await waitFor(() =>
+      expect(toasts.success).toHaveBeenCalledWith("登录成功"),
+    );
     expect(providersApi.add).toHaveBeenCalled();
   });
 
@@ -1755,7 +1756,9 @@ describe("LlmGatewaySubscriptionDock 两步登录", () => {
 
     // 冷却压住的是**新**邮件，上一封的码仍然有效——这是提示，不是失败。
     await waitFor(() =>
-      expect(toasts.info).toHaveBeenCalledWith("刚发过验证码，请查收上一封邮件"),
+      expect(toasts.info).toHaveBeenCalledWith(
+        "刚发过验证码，请查收上一封邮件",
+      ),
     );
     expect(toasts.error).not.toHaveBeenCalled();
     expect(await screen.findByText("验证登录")).toBeInTheDocument();
@@ -1770,7 +1773,9 @@ describe("LlmGatewaySubscriptionDock 两步登录", () => {
 
     await submitLogin();
 
-    await waitFor(() => expect(toasts.success).toHaveBeenCalledWith("登录成功"));
+    await waitFor(() =>
+      expect(toasts.success).toHaveBeenCalledWith("登录成功"),
+    );
     // 没开这个功能的服务端下，客户端不该多打一个请求、也不该闪一下验证屏。
     expect(verify).not.toHaveBeenCalled();
     expect(screen.queryByText("验证登录")).not.toBeInTheDocument();
@@ -1787,5 +1792,170 @@ describe("LlmGatewaySubscriptionDock 两步登录", () => {
       expect(toasts.error).toHaveBeenCalledWith("账号或密码错误"),
     );
     expect(screen.queryByText("验证登录")).not.toBeInTheDocument();
+  });
+});
+
+describe("LlmGatewaySubscriptionDock 模型份额与模型用量", () => {
+  const fableCap = (
+    fiveUtil: number,
+    weekUtil = 10,
+  ): gateway.GatewayModelCap => ({
+    id: "msc_fable",
+    label: "Fable",
+    match: "claude-fable-",
+    share_bps: 5000,
+    five_hour: {
+      utilization: fiveUtil,
+      resets_at: "2099-01-01T05:00:00Z",
+      cap_micros: 50_000_000,
+      charged_micros: fiveUtil * 500_000,
+    },
+    seven_day: {
+      utilization: weekUtil,
+      resets_at: "2099-01-07T00:00:00Z",
+      cap_micros: 250_000_000,
+      charged_micros: weekUtil * 2_500_000,
+    },
+  });
+
+  it("账号屏在总用量条下面列出份额上限，到顶时说明其它模型仍可用", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({
+      five_hour: { utilization: 55, resets_at: "2099-01-01T05:00:00Z" },
+      seven_day: { utilization: 11, resets_at: "2099-01-07T00:00:00Z" },
+      model_caps: [fableCap(100)],
+    });
+    renderDock();
+
+    expect(await screen.findAllByText("Fable")).toHaveLength(2);
+    expect(screen.getAllByText("· 最多占 50%")).toHaveLength(2);
+    expect(screen.getByText("Fable 份额已用完，其它模型仍可使用")).toBeTruthy();
+    expect(screen.getByText("按模型查看")).toBeTruthy();
+  });
+
+  it("老服务端不返回 model_caps 时照常显示，不多出任何份额条", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({
+      five_hour: { utilization: 20, resets_at: "2099-01-01T05:00:00Z" },
+      seven_day: { utilization: 4, resets_at: "2099-01-07T00:00:00Z" },
+    });
+    renderDock();
+
+    expect(await screen.findByText("5 小时")).toBeTruthy();
+    expect(screen.queryByText(/最多占/)).not.toBeInTheDocument();
+  });
+
+  it("模型用量屏按花费列出模型，隐藏 0 元的失败请求，并显示份额", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({
+      five_hour: { utilization: 30, resets_at: "2099-01-01T05:00:00Z" },
+      seven_day: null,
+      model_caps: [fableCap(40)],
+    });
+    const fetchModels = vi
+      .spyOn(gateway, "fetchGatewayModelUsage")
+      .mockResolvedValue({
+        five_hour: {
+          utilization: 30,
+          resets_at: "2099-01-01T05:00:00Z",
+          started_at: "2099-01-01T00:00:00Z",
+          cap_micros: 100_000_000,
+          charged_micros: 30_000_000,
+          models: [
+            {
+              model: "claude-fable-5-1",
+              requests: 2,
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_tokens: 0,
+              reasoning_tokens: 0,
+              charged_micros: 20_000_000,
+            },
+            {
+              model: "claude-opus-5",
+              requests: 3,
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_tokens: 0,
+              reasoning_tokens: 0,
+              charged_micros: 10_000_000,
+            },
+            {
+              model: "claude-opus-5-5",
+              requests: 1,
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_tokens: 0,
+              reasoning_tokens: 0,
+              charged_micros: 0,
+            },
+          ],
+        },
+        seven_day: null,
+        model_caps: [fableCap(40)],
+      });
+    renderDock();
+
+    await userEvent.click(await screen.findByText("按模型查看"));
+    await waitFor(() => expect(fetchModels).toHaveBeenCalled());
+
+    expect(await screen.findByText("claude-fable-5-1")).toBeTruthy();
+    expect(screen.getByText("claude-opus-5")).toBeTruthy();
+    // 失败请求记的 0 元行不该出现 —— 它什么也没花。
+    expect(screen.queryByText("claude-opus-5-5")).not.toBeInTheDocument();
+    expect(screen.getByText("已用 $30 / $100")).toBeTruthy();
+    expect(screen.getByText(/Fable 最多占总额度的 50%/)).toBeTruthy();
+
+    await userEvent.click(screen.getByText("返回"));
+    expect(await screen.findByText("按模型查看")).toBeTruthy();
+  });
+});
+
+describe("LlmGatewaySubscriptionDock 设置", () => {
+  it("开启发送前隐藏密钥，以服务端返回的资料为准回写缓存", async () => {
+    seedActivePlan();
+    const setRedaction = vi
+      .spyOn(gateway, "setSecretRedaction")
+      .mockResolvedValue({
+        id: "user_1",
+        username: "tester",
+        email: "tester@example.com",
+        role: "user",
+        email_verified: true,
+        redact_secrets: true,
+      });
+    renderDock();
+
+    await userEvent.click(await screen.findByText("设置"));
+    expect(await screen.findByText("未开启")).toBeTruthy();
+    await userEvent.click(
+      screen.getByRole("switch", { name: "发送前隐藏密钥" }),
+    );
+
+    await waitFor(() => expect(setRedaction).toHaveBeenCalledWith(true));
+    expect(await screen.findByText("已开启")).toBeTruthy();
+    expect(toasts.success).toHaveBeenCalledWith("已开启发送前隐藏密钥");
+    const cached = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
+    expect(cached.user.redact_secrets).toBe(true);
+  });
+
+  it("服务端拒绝时开关不动，并提示失败", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "setSecretRedaction").mockRejectedValue(
+      new GatewayApiError(500, "boom"),
+    );
+    renderDock();
+
+    await userEvent.click(await screen.findByText("设置"));
+    await userEvent.click(
+      await screen.findByRole("switch", { name: "发送前隐藏密钥" }),
+    );
+
+    await waitFor(() =>
+      expect(toasts.error).toHaveBeenCalledWith("设置失败，请稍后重试"),
+    );
+    expect(screen.getByText("未开启")).toBeTruthy();
+    const cached = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
+    expect(cached.user.redact_secrets).toBeFalsy();
   });
 });
