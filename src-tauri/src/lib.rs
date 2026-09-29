@@ -9,7 +9,6 @@ mod database;
 mod error;
 mod gemini_config;
 mod init_status;
-mod lightweight;
 #[cfg(target_os = "linux")]
 mod linux_fix;
 mod panic_hook;
@@ -267,11 +266,15 @@ pub fn run() {
             // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
             // ============================================================
 
-            // 1.5. 自动导入 live 配置（Claude / Codex / Gemini）
+            // 1.5. 启动时不导入 live 配置。
             //
-            // 把用户手动配置的 settings.json / auth.json / .env 落成 "default" provider 设为 current。
-            // 不再 seed "XX Official" 预设。旧版本写入的、用户没动过的 seed 先清理掉再判断导入，
-            // 这样只剩 seed 的老用户这次启动也能把 live 配置导入进来。
+            // 以前供应商列表为空时，会把 CLI 自己的 settings.json / auth.json / .env
+            // 落成一个 "default" 供应商并设为 current。问题是「列表为空」随时会再次
+            // 成立 —— 删掉 default、或者登出时移除了唯一的网关供应商 —— 于是每次启动
+            // 它都会重新冒出来，删不掉。现在只在用户点空列表上的「导入当前配置」时
+            // 才导入（import_default_config 命令，逻辑没变）。
+            //
+            // 旧版本写入的、用户没动过的 "XX Official" seed 仍然清理一次。
             // `fresh_install_at_startup` 在清理前取值，老用户不会因清理而被当成新装弹欢迎框。
             //
             // 捕获首次运行快照：所有全新装用户都会看到欢迎弹窗介绍 fwai_app 的工作方式。
@@ -287,35 +290,6 @@ pub fn run() {
                 }
                 Ok(_) => {}
                 Err(e) => log::warn!("✗ Failed to clean up official seed providers: {e}"),
-            }
-
-            for app_type in crate::app_config::AppType::all().filter(|t| !t.is_additive_mode()) {
-                if !crate::services::provider::should_import_default_config_on_startup(
-                    &app_state, &app_type,
-                )
-                .unwrap_or(false)
-                {
-                    log::debug!(
-                        "○ {} already has providers; live import skipped",
-                        app_type.as_str()
-                    );
-                    continue;
-                }
-
-                match crate::services::provider::import_default_config(&app_state, app_type.clone())
-                {
-                    Ok(true) => log::info!(
-                        "✓ Imported live config for {} as default provider",
-                        app_type.as_str()
-                    ),
-                    Ok(false) => log::debug!(
-                        "○ {} already has providers; live import skipped",
-                        app_type.as_str()
-                    ),
-                    Err(e) => {
-                        log::debug!("○ No live config to import for {}: {e}", app_type.as_str())
-                    }
-                }
             }
 
             // 老用户 / 已确认的路径由 `fresh_install_at_startup` 自行拦截，这里不做写入。
@@ -545,10 +519,6 @@ pub fn run() {
             commands::check_app_update,
             // Window theme control
             commands::set_window_theme,
-            // lightweight mode (for testing or low-resource environments)
-            commands::enter_lightweight_mode,
-            commands::exit_lightweight_mode,
-            commands::is_lightweight_mode,
         ]);
 
     let app = builder
@@ -600,10 +570,6 @@ pub fn run() {
                         let _ = window.show();
                         let _ = window.set_focus();
                         tray::apply_tray_policy(app_handle, true);
-                    } else if crate::lightweight::is_lightweight_mode() {
-                        if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle) {
-                            log::error!("退出轻量模式重建窗口失败: {e}");
-                        }
                     }
                 }
                 // 处理通过自定义 URL 协议触发的打开事件（例如 ccswitch://...）

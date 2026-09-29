@@ -12,8 +12,6 @@ import {
   Plug,
   RefreshCw,
   ShoppingBag,
-  KeyRound,
-  ChevronRight,
   ChartColumn,
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -30,6 +28,7 @@ import {
 import type { Provider } from "@/types";
 import {
   clearGatewayLogin,
+  GATEWAY_LOGIN_CHANGED_EVENT,
   createPlanOrder,
   fetchPlanQuote,
   isPlanQuoteUnsupported,
@@ -70,7 +69,6 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PlanCheckout } from "./PlanCheckout";
 import { PlanSections } from "./PlanSections";
 import { ModelCapBar, ModelUsageScreen } from "./ModelUsageScreen";
-import { SettingsScreen } from "./SettingsScreen";
 import {
   TIERS,
   formatMicrosUSD,
@@ -99,8 +97,7 @@ type Screen =
   | "verify-email"
   | "forgot-password"
   | "login-code"
-  | "model-usage"
-  | "settings";
+  | "model-usage";
 type AuthMode = "login" | "register";
 
 // 登出里每一步外部调用最多等这么久。够一次正常的本地文件写入或一次网络往返，
@@ -404,6 +401,14 @@ export function LlmGatewaySubscriptionDock() {
   const [loginChallenge, setLoginChallenge] =
     useState<GatewayLoginChallenge | null>(null);
   const [loginCode, setLoginCode] = useState("");
+  // 别处（应用设置页）改了登录信息时，面板跟着读一次，不然缓存里的资料会和
+  // 设置页显示的不一致。
+  useEffect(() => {
+    const sync = () => setLogin(loadGatewayLogin());
+    window.addEventListener(GATEWAY_LOGIN_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(GATEWAY_LOGIN_CHANGED_EVENT, sync);
+  }, []);
+
   // 登出进行中：挡住连点。以前一次登出卡住时用户会连点好几下，每一下都去
   // 作废同一个 token，服务端日志里就是一串 401。
   const [loggingOut, setLoggingOut] = useState(false);
@@ -991,16 +996,6 @@ requires_openai_auth = true`,
 
   // 把本地缓存的 profile 标记为已验证。login 是 localStorage 里的缓存，
   // 不同步更新的话账号屏会一直显示「未验证」直到重新登录。
-  // 服务端返回的最新资料回写到缓存的登录信息里（设置屏的开关走这里）。
-  function applyProfile(user: GatewayUserProfile) {
-    setLogin((prev) => {
-      if (!prev) return prev;
-      const next = { ...prev, user: { ...prev.user, ...user } };
-      saveGatewayLogin(next);
-      return next;
-    });
-  }
-
   function markEmailVerified() {
     setLogin((prev) => {
       if (!prev) return prev;
@@ -1520,9 +1515,7 @@ requires_openai_auth = true`,
                 ? "验证登录"
                 : screen === "model-usage"
                   ? "模型用量"
-                  : screen === "settings"
-                    ? "设置"
-                    : "我的账号";
+                  : "我的账号";
   const headSub =
     screen === "auth"
       ? "登录后即可在 Claude Code 中使用"
@@ -1538,11 +1531,9 @@ requires_openai_auth = true`,
                 ? "输入邮箱收到的验证码完成登录"
                 : screen === "model-usage"
                   ? "当前窗口里各模型花了多少"
-                  : screen === "settings"
-                    ? "跟着账号走，换台电脑登录也生效"
-                    : forwarding
-                      ? `转发中 · ${activeAppName} 正在走 llm_gateway`
-                      : "已登录 · 开启转发后即可使用";
+                  : forwarding
+                    ? `转发中 · ${activeAppName} 正在走 llm_gateway`
+                    : "已登录 · 开启转发后即可使用";
 
   const inputCls =
     "w-full rounded-lg border bg-muted/40 px-3 py-2 text-sm outline-none transition focus:border-primary focus:bg-background focus:ring-2 focus:ring-primary/20";
@@ -1902,28 +1893,6 @@ requires_openai_auth = true`,
               购买套餐
             </button>
 
-            {/* 脱敏入口。单独一行、带当前状态：这是用户自己要开的保护，藏在
-                底部一个小字「设置」里时几乎没人发现它存在。 */}
-            <button
-              className="mt-2 flex w-full items-center justify-between gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2.5 text-sm transition hover:border-border/80 hover:bg-muted"
-              onClick={() => setScreen("settings")}
-            >
-              <span className="flex items-center gap-2 font-medium">
-                <KeyRound className="h-4 w-4" />
-                发送前隐藏密钥
-              </span>
-              <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                {login.user.redact_secrets ? (
-                  <span className="text-green-600 dark:text-green-400">
-                    已开启
-                  </span>
-                ) : (
-                  "未开启"
-                )}
-                <ChevronRight className="h-3.5 w-3.5" />
-              </span>
-            </button>
-
             {/* 兑换码入口。做成次要样式：绝大多数人没有码，它不该和购买抢
                 注意力，但有码的人得找得到。 */}
             <button
@@ -1987,19 +1956,6 @@ requires_openai_auth = true`,
             <ModelUsageScreen
               onUnauthorized={() => toast.error("登录已过期，请重新登录")}
             />
-          </ScreenView>
-        )}
-
-        {screen === "settings" && login && (
-          <ScreenView key="settings">
-            <button
-              className="mb-3 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground"
-              onClick={() => setScreen("account")}
-            >
-              <ArrowLeft className="h-4 w-4" />
-              返回
-            </button>
-            <SettingsScreen user={login.user} onProfile={applyProfile} />
           </ScreenView>
         )}
 

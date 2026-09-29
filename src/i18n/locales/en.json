@@ -44,7 +44,7 @@
   },
   "firstRunNotice": {
     "title": "Welcome to fwai_app",
-    "bodyDefault": "fwai_app is the desktop client for LLM Gateway — one-click provider switching for Claude Code / Codex / Gemini CLI. Your existing CLI configuration has been saved as the “default” provider, so nothing is lost and you can switch back anytime.",
+    "bodyDefault": "fwai_app is the desktop client for LLM Gateway — one-click provider switching for Claude Code / Codex / Gemini CLI. Your existing CLI configuration is left untouched; if you want it as a provider, click “Import current config” in the provider list.",
     "bodyOfficial": "Three steps to get going:\n1. Open the LLM Gateway panel (bottom-right) and log in\n2. Click “Start forwarding”\n3. Enable “LLM Gateway” in the provider list\nOnly step 3 writes your CLI config; switching providers always restores the previous config before writing the new one.",
     "confirm": "Got it"
   },

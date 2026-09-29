@@ -108,14 +108,35 @@ export function saveGatewayTokens(tokens: GatewayTokens): void {
   localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify(tokens));
 }
 
+// 登录信息变了（登录、登出、资料更新）时在 window 上广播，让不在同一棵组件树里
+// 的读者（应用设置页里的账号开关、右下角的网关面板）跟着刷新。localStorage 的
+// "storage" 事件只在别的窗口触发，同一窗口里必须自己发。
+export const GATEWAY_LOGIN_CHANGED_EVENT = "llm-gateway-login-changed";
+
+function announceGatewayLoginChanged(): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(GATEWAY_LOGIN_CHANGED_EVENT));
+  }
+}
+
 export function saveGatewayLogin(login: GatewayLoginResult): void {
   saveGatewayTokens(login);
   localStorage.setItem(LOGIN_STORAGE_KEY, JSON.stringify(login));
+  announceGatewayLoginChanged();
 }
 
 export function clearGatewayLogin(): void {
   localStorage.removeItem(TOKEN_STORAGE_KEY);
   localStorage.removeItem(LOGIN_STORAGE_KEY);
+  announceGatewayLoginChanged();
+}
+
+// updateGatewayUserProfile 把服务端返回的最新资料合并进缓存的登录信息并广播。
+// 没登录时什么也不做。
+export function updateGatewayUserProfile(user: GatewayUserProfile): void {
+  const login = loadGatewayLogin();
+  if (!login) return;
+  saveGatewayLogin({ ...login, user: { ...login.user, ...user } });
 }
 
 export function loadGatewayTokens(): GatewayTokens | null {

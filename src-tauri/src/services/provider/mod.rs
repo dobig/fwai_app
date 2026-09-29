@@ -19,10 +19,7 @@ use crate::settings::CustomEndpoint;
 use crate::store::AppState;
 
 // Re-export sub-module functions for external access
-pub use live::{
-    import_default_config, read_live_settings, should_import_default_config_on_startup,
-    sync_current_to_live,
-};
+pub use live::{import_default_config, read_live_settings, sync_current_to_live};
 
 // Internal re-exports (pub(crate))
 pub(crate) use live::sanitize_claude_settings_for_live;
@@ -1261,13 +1258,6 @@ impl ProviderService {
     /// Returns `Ok(true)` if imported, `Ok(false)` if skipped.
     pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool, AppError> {
         import_default_config(state, app_type)
-    }
-
-    pub fn should_import_default_config_on_startup(
-        state: &AppState,
-        app_type: &AppType,
-    ) -> Result<bool, AppError> {
-        should_import_default_config_on_startup(state, app_type)
     }
 
     /// Read current live settings (re-export)
