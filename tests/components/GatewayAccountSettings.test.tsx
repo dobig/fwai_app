@@ -15,7 +15,7 @@ vi.mock("sonner", () => ({ toast: toasts }));
 
 const LOGIN_KEY = "llm-gateway-login";
 
-function seedLogin(redact = false) {
+function seedLogin(redact = false, compress = false) {
   const login: gateway.GatewayLoginResult = {
     token_type: "Bearer",
     access_token: "access-token",
@@ -28,6 +28,7 @@ function seedLogin(redact = false) {
       role: "user",
       email_verified: true,
       redact_secrets: redact,
+      tool_compression: compress,
     },
     account: { id: "acct_1" },
     subscription: { active: true, tier: "pro" },
@@ -36,6 +37,8 @@ function seedLogin(redact = false) {
 }
 
 const toggle = () => screen.getByRole("switch", { name: "发送前隐藏密钥" });
+const compressToggle = () =>
+  screen.getByRole("switch", { name: "压缩工具输出" });
 
 beforeEach(() => {
   localStorage.clear();
@@ -103,5 +106,43 @@ describe("GatewayAccountSettings", () => {
 
     act(() => gateway.clearGatewayLogin());
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  });
+
+  it("压缩工具输出默认关闭，开启后回写缓存，且不动隐藏密钥", async () => {
+    seedLogin(true, false);
+    const set = vi.spyOn(gateway, "setToolCompression").mockResolvedValue({
+      id: "user_1",
+      username: "tester",
+      email: "tester@example.com",
+      role: "user",
+      email_verified: true,
+      redact_secrets: true,
+      tool_compression: true,
+    });
+    const redact = vi.spyOn(gateway, "setSecretRedaction");
+    render(<GatewayAccountSettings />);
+
+    expect(compressToggle()).toHaveAttribute("aria-checked", "false");
+    await userEvent.click(compressToggle());
+
+    await waitFor(() => expect(set).toHaveBeenCalledWith(true));
+    await waitFor(() =>
+      expect(compressToggle()).toHaveAttribute("aria-checked", "true"),
+    );
+    expect(redact).not.toHaveBeenCalled();
+    expect(toggle()).toHaveAttribute("aria-checked", "true");
+    expect(toasts.success).toHaveBeenCalledWith("已开启压缩工具输出");
+    expect(
+      JSON.parse(localStorage.getItem(LOGIN_KEY)!).user.tool_compression,
+    ).toBe(true);
+  });
+
+  it("老服务端不返回 tool_compression 时当作未开启", () => {
+    seedLogin();
+    const cached = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
+    delete cached.user.tool_compression;
+    localStorage.setItem(LOGIN_KEY, JSON.stringify(cached));
+    render(<GatewayAccountSettings />);
+    expect(compressToggle()).toHaveAttribute("aria-checked", "false");
   });
 });
