@@ -1986,7 +1986,11 @@ describe("LlmGatewaySubscriptionDock 模型份额与模型用量", () => {
     expect(screen.getByText("claude-opus-5")).toBeTruthy();
     // 失败请求记的 0 元行不该出现 —— 它什么也没花。
     expect(screen.queryByText("claude-opus-5-5")).not.toBeInTheDocument();
-    expect(screen.getByText("已用 $30 / $100")).toBeTruthy();
+    // 只显示占总额度的百分比，不出现任何美元金额。
+    expect(screen.getByText("已用 30.0%")).toBeTruthy();
+    expect(screen.getByText("20.0%")).toBeTruthy();
+    expect(screen.getByText("10.0%")).toBeTruthy();
+    expect(screen.queryByText(/\$\d/)).not.toBeInTheDocument();
     expect(screen.getByText(/Fable 最多占总额度的 50%/)).toBeTruthy();
 
     await userEvent.click(screen.getByText("返回"));

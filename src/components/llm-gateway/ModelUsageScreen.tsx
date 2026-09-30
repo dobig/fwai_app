@@ -8,10 +8,12 @@ import {
   type GatewayModelUsage,
   type GatewayModelUsageWindow,
 } from "@/lib/api/llm-gateway";
-import { formatMicrosUSD } from "./planCatalog";
 
-// 模型用量屏：当前 5 小时 / 7 天窗口里，每个模型花了多少，以及有份额上限的
-// 模型族（如 Fable 最多占 50%）还剩多少。
+// 模型用量屏：当前 5 小时 / 7 天窗口里，每个模型用掉了多少额度，以及有份额
+// 上限的模型族（如 Fable 最多占 50%）还剩多少。
+//
+// **一律用「占窗口总额度的百分比」，不显示美元。** 额度的美元数对用户没有意义，
+// 只会引出「$400 能用多久」这类回答不了的追问 —— 理由同 planCatalog。
 //
 // 数字全部来自服务端（GET /v1/usage/models），客户端不自己按模型名归类：
 // 哪些模型算一族、上限多少，是管理员在后台配的，随时会变。
@@ -98,16 +100,20 @@ function WindowSection({
   window: GatewayModelUsageWindow;
   caps: GatewayModelCap[];
 }) {
-  // 失败的请求在服务端也记一行 0 元（请求确实发生过），这里只列花了钱的。
+  // 失败的请求在服务端也记一行 0 用量（请求确实发生过），这里只列真正耗了额度的。
   const models = w.models.filter((m) => m.charged_micros > 0);
   const capsHere = caps.filter((c) => c[windowKey]);
+  // 占这个窗口总额度的比例，不是占已用量的比例：所有模型和总数同一个刻度，
+  // 否则一个只用了 1% 的模型会画成满条。
+  const shareOfCap = (micros: number) =>
+    w.cap_micros > 0 ? clampPct((micros / w.cap_micros) * 100) : 0;
+  const totalPct = shareOfCap(w.charged_micros);
   return (
     <div className="space-y-2.5 rounded-xl border border-border bg-muted/40 p-3">
       <div className="flex items-center justify-between text-[11px] font-medium text-muted-foreground">
         <span>{WINDOW_LABELS[windowKey]}</span>
-        <span>
-          已用 {formatMicrosUSD(w.charged_micros)} /{" "}
-          {formatMicrosUSD(w.cap_micros)}
+        <span className={totalPct >= 90 ? "font-semibold text-red-500" : ""}>
+          已用 {totalPct.toFixed(1)}%
         </span>
       </div>
 
@@ -118,12 +124,7 @@ function WindowSection({
       ) : (
         <div className="space-y-1.5">
           {models.map((m) => {
-            // 占这个窗口总额度的比例，不是占已用量的比例：条的长度要和上面
-            // 的总用量条同一个刻度，否则一个只用了 1% 的模型会画成满条。
-            const pct =
-              w.cap_micros > 0
-                ? clampPct((m.charged_micros / w.cap_micros) * 100)
-                : 0;
+            const pct = shareOfCap(m.charged_micros);
             return (
               <div key={m.model}>
                 <div className="mb-0.5 flex items-center justify-between gap-2 text-[11px]">
@@ -131,7 +132,7 @@ function WindowSection({
                     {m.model}
                   </span>
                   <span className="shrink-0 text-foreground">
-                    {formatMicrosUSD(m.charged_micros)}
+                    {pct.toFixed(1)}%
                     <span className="ml-1 text-[10px] text-muted-foreground">
                       {m.requests} 次
                     </span>
