@@ -883,3 +883,14 @@ export async function setToolCompression(
   );
   return res.user;
 }
+
+// fetchTokensSaved：压缩累计替用户省下的输入 token 数（服务端 #261），只算真正
+// 压缩过的请求。只在开关打开时调用；老服务端没有这个接口会 404，调用方不显示。
+export async function fetchTokensSaved(): Promise<number> {
+  const res = await gatewayRequest<{ tokens_saved: number }>(
+    "/v1/account/tokens-saved",
+    { method: "GET" },
+    true,
+  );
+  return res.tokens_saved;
+}
