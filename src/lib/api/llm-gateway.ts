@@ -24,6 +24,8 @@ export interface GatewayUserProfile {
   // 发给上游前是否把提示里的密钥/凭据替换成占位符（服务端 #255）。老服务端
   // 不返回这个字段，所以是可选：读的时候 undefined 当作「未开启」。
   redact_secrets?: boolean;
+  // 发给上游前是否压缩工具输出（服务端 #260）。同样可选，undefined 当作「未开启」。
+  tool_compression?: boolean;
 }
 
 export interface GatewayAccountProfile {
@@ -867,4 +869,28 @@ export async function setSecretRedaction(
     true,
   );
   return res.user;
+}
+
+// setToolCompression 开关「压缩工具输出」。和 setSecretRedaction 一样，以返回
+// 资料里的 tool_compression 为准。
+export async function setToolCompression(
+  enabled: boolean,
+): Promise<GatewayUserProfile> {
+  const res = await gatewayRequest<{ user: GatewayUserProfile }>(
+    "/v1/account/tool-compression",
+    { method: "PUT", body: JSON.stringify({ enabled }) },
+    true,
+  );
+  return res.user;
+}
+
+// fetchTokensSaved：压缩累计替用户省下的输入 token 数（服务端 #261），只算真正
+// 压缩过的请求。只在开关打开时调用；老服务端没有这个接口会 404，调用方不显示。
+export async function fetchTokensSaved(): Promise<number> {
+  const res = await gatewayRequest<{ tokens_saved: number }>(
+    "/v1/account/tokens-saved",
+    { method: "GET" },
+    true,
+  );
+  return res.tokens_saved;
 }
