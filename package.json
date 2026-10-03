@@ -1,6 +1,6 @@
 {
   "name": "fwai_app",
-  "version": "1.6.7",
+  "version": "1.6.8",
   "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI",
   "type": "module",
   "scripts": {
