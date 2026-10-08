@@ -12,6 +12,8 @@
 | macOS (Intel) | `fwai_app_X.Y.Z_x64.dmg` | 同上 |
 | Windows | `fwai_app_X.Y.Z_x64-setup.exe` | 未签名,首次运行 SmartScreen 会提示,选"仍要运行" |
 | Windows | `fwai_app_X.Y.Z_x64_en-US.msi` | 同上,适合批量部署 |
+| Linux | `fwai_app_X.Y.Z_amd64.AppImage` | `chmod +x` 后直接运行,需 Ubuntu 22.04 / Debian 12 或更新的发行版 |
+| Linux | `fwai_app_X.Y.Z_amd64.deb` | Debian / Ubuntu:`sudo apt install ./fwai_app_X.Y.Z_amd64.deb` |
 
 ## 使用
 
@@ -46,5 +48,5 @@ cd src-tauri && cargo fmt --check && cargo test   # 后端
 
 ## 发布
 
-推 `vX.Y.Z` tag,CI 在 GitHub 托管的 macOS 和 Windows runner 上构建四个安装包并挂到**草稿** release,
+推 `vX.Y.Z` tag,CI 在 GitHub 托管的 macOS / Windows / Linux runner 上构建全部安装包并挂到**草稿** release,
 确认无误后手动发布。完整步骤和一次性的签名配置见 [docs/release.md](docs/release.md)。
