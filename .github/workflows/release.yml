@@ -1,12 +1,13 @@
 name: release
 
-# Builds all four installers on GitHub-hosted runners and attaches them to the
+# Builds every installer on GitHub-hosted runners and attaches them to the
 # release for the tag being built:
 #
 #   macOS   fwai_app_X.Y.Z_aarch64.dmg + _x64.dmg   (Developer ID signed, notarized)
 #   Windows fwai_app_X.Y.Z_x64-setup.exe + _x64_en-US.msi
+#   Linux   fwai_app_X.Y.Z_amd64.AppImage + _amd64.deb
 #
-# Both jobs upload with `draft: true`, so the release stays a draft until you
+# All jobs upload with `draft: true`, so the release stays a draft until you
 # review the assets and publish it yourself — a half-built release never goes
 # out, and you get to write the notes before anyone can download it. Pre-create
 # the draft with your notes if you want them in place first:
@@ -41,10 +42,10 @@ env:
 
 jobs:
   verify:
-    # Gates both build jobs. A tag that disagrees with package.json produces
+    # Gates every build job. A tag that disagrees with package.json produces
     # assets named after the wrong version, and catching it inside one platform
-    # job would still let the other upload its mis-named installers to the
-    # release. Fail before either starts.
+    # job would still let the others upload their mis-named installers to the
+    # release. Fail before any starts.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -183,8 +184,64 @@ jobs:
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
 
+  linux:
+    needs: verify
+    # 22.04 rather than latest on purpose: the AppImage and deb link against the
+    # build host's glibc, so the oldest supported Ubuntu sets the floor for
+    # which distros can run them. Building on 24.04 would lock out 22.04 users.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install the Linux build dependencies
+        # Same set as ci.yml, plus libayatana-appindicator for the tray icon,
+        # and file + xdg-utils, which the AppImage bundler needs on the build
+        # host (it copies xdg-open into the image so links open a browser).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf \
+            libayatana-appindicator3-dev file xdg-utils
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: x86_64-unknown-linux-gnu
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build the AppImage and deb
+        # rpm is left out: nobody has asked for it and it is one more artifact
+        # to keep an eye on. `--bundles appimage,deb,rpm` brings it back.
+        run: pnpm tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          draft: true
+          files: |
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+
   summary:
-    needs: [macos, windows]
+    needs: [macos, windows, linux]
     runs-on: ubuntu-latest
     steps:
       - name: Point at the draft release
@@ -194,7 +251,7 @@ jobs:
         run: |
           url="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url)"
           {
-            echo "All four installers are attached to the **draft** release for \`$TAG\`."
+            echo "All installers are attached to the **draft** release for \`$TAG\`."
             echo ""
             echo "Review the assets, write the notes, then publish: $url"
           } >> "$GITHUB_STEP_SUMMARY"

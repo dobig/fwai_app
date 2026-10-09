@@ -1,8 +1,8 @@
 # 发布 fwai_app
 
-一次发布产出四个安装包:macOS 两个 dmg(Apple Silicon / Intel,签名 + 公证)和
-Windows 的 exe + msi。全部由 GitHub 托管的 runner 构建——公开仓库上 macOS 和
-Windows runner 都不计费,所以两边都在 CI 里跑,本机不需要参与。
+一次发布产出六个安装包:macOS 两个 dmg(Apple Silicon / Intel,签名 + 公证)、
+Windows 的 exe + msi,以及 Linux x64 的 AppImage + deb。全部由 GitHub
+托管的 runner 构建——公开仓库上这些 runner 都不计费,所以全在 CI 里跑,本机不需要参与。
 
 ## 一次性:macOS 签名与公证
 
@@ -93,28 +93,32 @@ release notes 用中文,按"新增/修复/资产/备注"分节。先建草稿是
 
 ### 3. 等 CI
 
-`release.yml` 监听 `v*`,并行跑两个 job:
+`release.yml` 监听 `v*`,并行跑三个平台的 job:
 
 - **macOS**(`macos-latest`,arm64):`scripts/build-macos-release.sh` 交叉编译出两个
   架构,签名 → 公证 → staple,最后用 `spctl` 和 `stapler validate` 自检每个 dmg,
   没过就让 job 失败。公证是上传到 Apple 服务器扫描,每个包几分钟,job 超时设了 3 小时。
 - **Windows**(`windows-latest`):NSIS + MSI。
+- **Linux**(`ubuntu-22.04`):AppImage + deb,只出 x64。
+  刻意用 22.04 而不是 latest:产物链接的是构建机的 glibc,构建机越老,能跑的发行版越多。
+  Linux 包不签名,也不需要任何 secret。
 
-两个 job 都以 `draft: true` 上传,所以在你手动发布之前,release 一直是草稿状态——
+所有 job 都以 `draft: true` 上传,所以在你手动发布之前,release 一直是草稿状态——
 构建到一半失败也不会有半成品流出去。
 
 ### 4. 检查并发布
 
-四个资产齐全后:
+六个资产齐全后:
 
 ```bash
-gh release view vX.Y.Z          # 确认四个资产都在
+gh release view vX.Y.Z          # 确认六个资产都在
 gh release edit vX.Y.Z --draft=false
 ```
 
 - `fwai_app_X.Y.Z_aarch64.dmg`(Apple Silicon)
 - `fwai_app_X.Y.Z_x64.dmg`(Intel)
 - `fwai_app_X.Y.Z_x64-setup.exe`、`fwai_app_X.Y.Z_x64_en-US.msi`(Windows)
+- `fwai_app_X.Y.Z_amd64.AppImage`、`fwai_app_X.Y.Z_amd64.deb`(Linux)
 
 想验证 macOS 包是不是真的干净,下载下来跑一遍(CI 已经自检过,这是复核):
 
