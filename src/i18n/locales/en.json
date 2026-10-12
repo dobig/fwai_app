@@ -304,7 +304,6 @@
     "tabGeneral": "General",
     "tabAuth": "Auth",
     "tabAdvanced": "Advanced",
-    "tabData": "Data",
     "tabProxy": "Routing",
     "authCenter": {
       "title": "OAuth Authentication Center",

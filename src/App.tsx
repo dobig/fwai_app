@@ -45,7 +45,6 @@ import { SettingsPage } from "@/components/settings/SettingsPage";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
 import { Button } from "@/components/ui/button";
-import { useQueryClient } from "@tanstack/react-query";
 
 type View = "providers" | "settings";
 
@@ -54,7 +53,6 @@ const HEADER_HEIGHT = 64; // px
 
 function App() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
 
   // 选中的 app 提到了 context 里：转发面板是 <App/> 的兄弟节点，也要读它。
   const { activeApp, setActiveApp } = useActiveApp();
@@ -462,27 +460,6 @@ function App() {
     }
   };
 
-  const handleImportSuccess = async () => {
-    try {
-      await queryClient.invalidateQueries({
-        queryKey: ["providers"],
-        refetchType: "all",
-      });
-      await queryClient.refetchQueries({
-        queryKey: ["providers"],
-        type: "all",
-      });
-    } catch (error) {
-      console.error("[App] Failed to refresh providers after import", error);
-      await refetch();
-    }
-    try {
-      await providersApi.updateTrayMenu();
-    } catch (error) {
-      console.error("[App] Failed to refresh tray menu", error);
-    }
-  };
-
   const notifyWindowControlError = (error: unknown) => {
     toast.error(
       t("notifications.windowControlFailed", {
@@ -527,7 +504,6 @@ function App() {
         <SettingsPage
           open={true}
           onOpenChange={() => setCurrentView("providers")}
-          onImportSuccess={handleImportSuccess}
           defaultTab={settingsDefaultTab}
         />
       ) : (

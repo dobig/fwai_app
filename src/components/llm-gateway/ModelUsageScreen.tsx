@@ -12,8 +12,9 @@ import {
 // 模型用量屏：当前 5 小时 / 7 天窗口里，每个模型用掉了多少额度，以及有份额
 // 上限的模型族（如 Fable 最多占 50%）还剩多少。
 //
-// **一律用「占窗口总额度的百分比」，不显示美元。** 额度的美元数对用户没有意义，
-// 只会引出「$400 能用多久」这类回答不了的追问 —— 理由同 planCatalog。
+// **每一行只有一个数：占窗口总额度的百分比。** 不显示美元（理由同 planCatalog：
+// 额度的美元数对用户没有意义，只会引出「$400 能用多久」这类追问），也不显示
+// 请求次数 —— 次数和额度没有固定换算，摆在百分比旁边只会让人去算「一次多少钱」。
 //
 // 数字全部来自服务端（GET /v1/usage/models），客户端不自己按模型名归类：
 // 哪些模型算一族、上限多少，是管理员在后台配的，随时会变。
@@ -133,9 +134,6 @@ function WindowSection({
                   </span>
                   <span className="shrink-0 text-foreground">
                     {pct.toFixed(1)}%
-                    <span className="ml-1 text-[10px] text-muted-foreground">
-                      {m.requests} 次
-                    </span>
                   </span>
                 </div>
                 <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
