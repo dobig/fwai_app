@@ -304,7 +304,6 @@
     "tabGeneral": "一般",
     "tabAuth": "認証",
     "tabAdvanced": "詳細",
-    "tabData": "データ",
     "tabProxy": "ルーティング",
     "authCenter": {
       "title": "OAuth 認証センター",
