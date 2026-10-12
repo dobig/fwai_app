@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "fwai_app"
-version = "1.6.8"
+version = "1.6.9"
 dependencies = [
  "anyhow",
  "arboard",
