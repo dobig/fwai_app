@@ -1878,7 +1878,7 @@ describe("LlmGatewaySubscriptionDock 两步登录", () => {
   });
 });
 
-describe("LlmGatewaySubscriptionDock 模型份额与模型用量", () => {
+describe("LlmGatewaySubscriptionDock 模型份额", () => {
   const fableCap = (
     fiveUtil: number,
     weekUtil = 10,
@@ -1913,7 +1913,8 @@ describe("LlmGatewaySubscriptionDock 模型份额与模型用量", () => {
     expect(await screen.findAllByText("Fable")).toHaveLength(2);
     expect(screen.getAllByText("· 最多占 50%")).toHaveLength(2);
     expect(screen.getByText("Fable 份额已用完，其它模型仍可使用")).toBeTruthy();
-    expect(screen.getByText("按模型查看")).toBeTruthy();
+    // 「按模型查看」入口已去掉：客户端不再提供按模型拆分的用量页。
+    expect(screen.queryByText("按模型查看")).not.toBeInTheDocument();
   });
 
   it("老服务端不返回 model_caps 时照常显示，不多出任何份额条", async () => {
@@ -1926,75 +1927,6 @@ describe("LlmGatewaySubscriptionDock 模型份额与模型用量", () => {
 
     expect(await screen.findByText("5 小时")).toBeTruthy();
     expect(screen.queryByText(/最多占/)).not.toBeInTheDocument();
-  });
-
-  it("模型用量屏按花费列出模型，隐藏 0 元的失败请求，并显示份额", async () => {
-    seedActivePlan();
-    vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({
-      five_hour: { utilization: 30, resets_at: "2099-01-01T05:00:00Z" },
-      seven_day: null,
-      model_caps: [fableCap(40)],
-    });
-    const fetchModels = vi
-      .spyOn(gateway, "fetchGatewayModelUsage")
-      .mockResolvedValue({
-        five_hour: {
-          utilization: 30,
-          resets_at: "2099-01-01T05:00:00Z",
-          started_at: "2099-01-01T00:00:00Z",
-          cap_micros: 100_000_000,
-          charged_micros: 30_000_000,
-          models: [
-            {
-              model: "claude-fable-5-1",
-              requests: 2,
-              input_tokens: 0,
-              output_tokens: 0,
-              cache_tokens: 0,
-              reasoning_tokens: 0,
-              charged_micros: 20_000_000,
-            },
-            {
-              model: "claude-opus-5",
-              requests: 3,
-              input_tokens: 0,
-              output_tokens: 0,
-              cache_tokens: 0,
-              reasoning_tokens: 0,
-              charged_micros: 10_000_000,
-            },
-            {
-              model: "claude-opus-5-5",
-              requests: 1,
-              input_tokens: 0,
-              output_tokens: 0,
-              cache_tokens: 0,
-              reasoning_tokens: 0,
-              charged_micros: 0,
-            },
-          ],
-        },
-        seven_day: null,
-        model_caps: [fableCap(40)],
-      });
-    renderDock();
-
-    await userEvent.click(await screen.findByText("按模型查看"));
-    await waitFor(() => expect(fetchModels).toHaveBeenCalled());
-
-    expect(await screen.findByText("claude-fable-5-1")).toBeTruthy();
-    expect(screen.getByText("claude-opus-5")).toBeTruthy();
-    // 失败请求记的 0 元行不该出现 —— 它什么也没花。
-    expect(screen.queryByText("claude-opus-5-5")).not.toBeInTheDocument();
-    // 只显示占总额度的百分比，不出现任何美元金额。
-    expect(screen.getByText("已用 30.0%")).toBeTruthy();
-    expect(screen.getByText("20.0%")).toBeTruthy();
-    expect(screen.getByText("10.0%")).toBeTruthy();
-    expect(screen.queryByText(/\$\d/)).not.toBeInTheDocument();
-    expect(screen.getByText(/Fable 最多占总额度的 50%/)).toBeTruthy();
-
-    await userEvent.click(screen.getByText("返回"));
-    expect(await screen.findByText("按模型查看")).toBeTruthy();
   });
 });
 
