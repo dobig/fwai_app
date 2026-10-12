@@ -778,32 +778,6 @@ export interface GatewayModelCap {
   seven_day: GatewayModelCapWindow | null;
 }
 
-// GET /v1/usage/models：当前 5 小时 / 周窗口里每个模型花了多少。
-export interface GatewayModelUsageEntry {
-  model: string;
-  requests: number;
-  input_tokens: number;
-  output_tokens: number;
-  cache_tokens: number;
-  reasoning_tokens: number;
-  charged_micros: number;
-}
-
-export interface GatewayModelUsageWindow {
-  utilization: number;
-  resets_at?: string;
-  started_at?: string;
-  cap_micros: number;
-  charged_micros: number;
-  models: GatewayModelUsageEntry[];
-}
-
-export interface GatewayModelUsage {
-  five_hour: GatewayModelUsageWindow | null;
-  seven_day: GatewayModelUsageWindow | null;
-  model_caps?: GatewayModelCap[];
-}
-
 const USAGE_CACHE_KEY = "llm-gateway-usage-cache";
 
 export interface CachedGatewayUsage {
@@ -843,16 +817,6 @@ export function clearGatewayUsageCache(): void {
 export async function fetchGatewayUsage(): Promise<GatewayUsage> {
   return gatewayRequest<GatewayUsage>(
     "/api/oauth/usage",
-    { method: "GET" },
-    true,
-  );
-}
-
-// fetchGatewayModelUsage：按模型拆开的当前窗口用量，外加份额上限。模型用量页
-// 打开时拉一次；老服务端没有这个接口会 404，调用方按「暂无数据」处理。
-export async function fetchGatewayModelUsage(): Promise<GatewayModelUsage> {
-  return gatewayRequest<GatewayModelUsage>(
-    "/v1/usage/models",
     { method: "GET" },
     true,
   );
