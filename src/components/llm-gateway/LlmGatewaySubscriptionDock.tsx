@@ -37,6 +37,7 @@ import {
   forgotPassword,
   gatewayOAuthAccessToken,
   GatewayApiError,
+  fetchPlanCatalog,
   getGatewayBaseURL,
   getPaymentOrder,
   loadGatewayLogin,
@@ -57,6 +58,8 @@ import {
   verifyEmail,
   type GatewayLoginChallenge,
   type GatewayLoginResult,
+  type GatewayPeriodPrice,
+  type GatewayPlanCatalog,
   type GatewayPlanQuote,
   type GatewaySubscriptionStatus,
   type GatewayUsage,
@@ -76,17 +79,9 @@ import {
   tierBlurb,
   tierDescription,
 } from "./planCatalog";
-// 这些全部是**预览用**的价格逻辑。实付金额一律取服务端：结账页取 quote 的
-// amount_due_micros，二维码页取下单响应的 amount_credits。
-import {
-  DEFAULT_PERIOD,
-  PERIODS,
-  findPeriod,
-  periodDiscountLabel,
-  periodsFor,
-  previewTotalUSD,
-  previewUnitUSD,
-} from "./planPeriods";
+// 周期的名字和天数。价格一律来自服务端：周期列表取 GET /v1/plans 的成品价，
+// 结账页取 quote 的 amount_due_micros，二维码页取下单响应的 amount_credits。
+import { DEFAULT_PERIOD, findPeriod, periodDiscountLabel } from "./planPeriods";
 
 type Screen =
   | "auth"
@@ -185,9 +180,8 @@ interface PendingOrder {
   // 本地那套预览价不参与 —— 换档时它必然偏高（不含任何抵扣），而扫码扣的是
   // 服务端算出来的数，两个数字对不上是最伤信任的一类 bug。见 #13。
   amountMicros: number;
-  // Monthly price for the custom plan (label + retry context); catalog plans
-  // derive it from TIERS.
-  priceUSD?: number;
+  // 加量包买了几个单位，只给二维码页的文案用。订阅层不填。
+  units?: number;
   // 这一单动的是加量包还是订阅层。只用于二维码页的文案 —— 排队与否由服务端
   // 判定并通过 quote 的 action 表达，客户端不再自己选。
   asExtra?: boolean;
@@ -198,9 +192,8 @@ interface PendingOrder {
 // 让用户先表达意图 —— 同一个「买套餐」动作在新模型下有两种完全不同的含义。
 type PurchaseIntent = "subscription" | "extra";
 
-// 加量包是独立 SKU：1 单位 = 月费 $20（5h $20 / 周 $100），N 单位线性放大，
-// 无折扣。服务端的报价/下单入参里没有「单位数」这个字段，只有 price_usd，
-// 所以 N 通过月价表达：price_usd = 20 × N。
+// 加量包是独立 SKU：N 单位线性放大，无折扣。单价来自 GET /v1/plans 的
+// extra.unit_price_micros，报价/下单只发单位数（units），钱由服务端算。
 //
 // plan id 就是 "extra"，与已删除的自选金额档没有任何关系。这里一度写成
 // CUSTOM_TIER_ID —— #189 定义了定价公式却没写明 as_extra=true 时 plan id 填什么，
@@ -209,7 +202,6 @@ type PurchaseIntent = "subscription" | "extra";
 // 契约已在 llm_gateway#189 的评论里写死：as_extra 时服务端强制改写为 extra，
 // quote.target_tier 和 grant 的 plan_id 回读都是 "extra"。
 const EXTRA_PLAN_ID = "extra";
-const EXTRA_UNIT_USD = 20;
 const EXTRA_MAX_UNITS = 99;
 
 // 已确定要买什么，等着结账页确认的那一单。quote 和下单参数绑在一起存，
@@ -217,7 +209,7 @@ const EXTRA_MAX_UNITS = 99;
 interface CheckoutDraft {
   planId: string;
   period: string;
-  priceUSD?: number;
+  units?: number;
   asExtra: boolean;
   quote: GatewayPlanQuote;
 }
@@ -241,6 +233,11 @@ function parseExtraUnits(raw: string): number | null {
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1 || n > EXTRA_MAX_UNITS) return null;
   return n;
+}
+
+// 周期行上的单价：「$95/月」「$5/周」。金额和单位都是服务端给的。
+function perUnitLabel(price: GatewayPeriodPrice): string {
+  return `${formatMicrosUSD(price.per_unit_micros)}/${price.per_unit === "week" ? "周" : "月"}`;
 }
 
 const GATEWAY_PROVIDER_ID = "llm-gateway-local";
@@ -362,6 +359,10 @@ export function LlmGatewaySubscriptionDock() {
   // 选项就拉一次会让网络慢的用户看到数字闪烁。
   const [checkout, setCheckout] = useState<CheckoutDraft | null>(null);
   const [quoteError, setQuoteError] = useState<string | null>(null);
+  // 购买屏上的全部价格（GET /v1/plans）。拿不到就不显示价格、不让往下点，
+  // 而不是退回本地算 —— 本地那份价目表正是这次删掉的东西。
+  const [catalog, setCatalog] = useState<GatewayPlanCatalog | null>(null);
+  const [catalogError, setCatalogError] = useState(false);
   // 服务端支不支持换档。null = 还没探过。
   //
   // 探测是**惰性**的：第一次拉报价拿到 404 才知道。不在挂载时主动探一次，
@@ -1216,6 +1217,26 @@ requires_openai_auth = true`,
 
   // ---- purchase -------------------------------------------------------------
 
+  // 每次进购买屏都重新拉：价格可能在两次打开之间调过。上一份目录先留着显示，
+  // 新的到了再替换，免得每次进来都闪一下加载态。401 的处理同 refreshSubscription。
+  async function loadCatalog() {
+    setCatalogError(false);
+    try {
+      setCatalog(await fetchPlanCatalog());
+    } catch (error) {
+      if (gatewayErrorStatus(error) === 401) {
+        try {
+          await refreshGatewayToken();
+          setCatalog(await fetchPlanCatalog());
+          return;
+        } catch {
+          // fall through
+        }
+      }
+      setCatalogError(true);
+    }
+  }
+
   async function onActivated() {
     await refreshSubscription();
   }
@@ -1269,6 +1290,7 @@ requires_openai_auth = true`,
     // 就点下去会买错东西。只有从「再买一个加量包」进来时才预置成 extra。
     setIntent(nextIntent);
     setScreen("purchase");
+    void loadCatalog();
   }
 
   // 兑换码。服务端做归一化和全部校验，这里只负责把错误码翻成人话 ——
@@ -1319,7 +1341,7 @@ requires_openai_auth = true`,
   async function goToCheckout(
     planId: string,
     periodKey: string,
-    priceUSD?: number,
+    units?: number,
     asExtra = false,
   ) {
     if (!login) {
@@ -1329,16 +1351,15 @@ requires_openai_auth = true`,
     setQuoteError(null);
     setBusy(true);
     try {
-      // price_usd 只对加量包有意义（承载单位数：20 × N）。目录档的价格一律由
-      // 服务端按 plan 行决定，多发一个金额只会让人以为客户端能议价。
+      // units 只对加量包有意义。目录档的价格一律由服务端按 plan 行决定。
       const quote = await fetchPlanQuote(
         planId,
         periodKey,
-        asExtra ? priceUSD : undefined,
+        asExtra ? units : undefined,
         asExtra,
       );
       setQuoteSupported(true);
-      setCheckout({ planId, period: periodKey, priceUSD, asExtra, quote });
+      setCheckout({ planId, period: periodKey, units, asExtra, quote });
     } catch (error) {
       if (isPlanQuoteUnsupported(error)) {
         // 老服务端：整条换档流程都不存在，直接按旧流程下单。记下来，
@@ -1346,7 +1367,7 @@ requires_openai_auth = true`,
         setQuoteSupported(false);
         setIntent("subscription");
         setBusy(false);
-        await handlePurchasePlan(planId, periodKey, priceUSD, asExtra);
+        await handlePurchasePlan(planId, periodKey, units, asExtra);
         return;
       }
       if (gatewayErrorCode(error) === "email_not_verified") {
@@ -1372,7 +1393,7 @@ requires_openai_auth = true`,
     void handlePurchasePlan(
       checkout.planId,
       checkout.period,
-      checkout.priceUSD,
+      checkout.units,
       checkout.asExtra,
     );
   }
@@ -1380,14 +1401,14 @@ requires_openai_auth = true`,
   async function handlePurchasePlan(
     planId: string,
     periodKey: string,
-    priceUSD?: number,
+    units?: number,
     asExtra = false,
   ) {
     if (!login) {
       toast.error("请先登录");
       return;
     }
-    if (asExtra && priceUSD === undefined) {
+    if (asExtra && units === undefined) {
       toast.error(`请输入 1–${EXTRA_MAX_UNITS} 的整数单位数`);
       return;
     }
@@ -1398,12 +1419,11 @@ requires_openai_auth = true`,
       // client auto-pays within ~100ms, so the poll effect completes the
       // purchase immediately — no separate demo path.
       //
-      // price_usd 只随加量包发出（20 × 单位数）。目录档发了也会被服务端忽略，
-      // 但不发才是对的：价格是服务端权威，客户端没有报价的余地。
+      // units 只随加量包发出。价格是服务端权威，客户端只说要几个单位。
       const order = await createPlanOrder(
         planId,
         periodKey,
-        asExtra ? priceUSD : undefined,
+        asExtra ? units : undefined,
         undefined,
         asExtra,
       );
@@ -1436,7 +1456,7 @@ requires_openai_auth = true`,
         planId,
         period: periodKey,
         amountMicros: order.amount_credits,
-        priceUSD: asExtra ? priceUSD : undefined,
+        units: asExtra ? units : undefined,
         asExtra,
       });
     } catch (error) {
@@ -2059,12 +2079,8 @@ requires_openai_auth = true`,
               <div className="flex flex-col items-center gap-3 py-1 text-center">
                 <h4 className="text-[15px] font-semibold">微信扫码支付</h4>
                 <div className="text-xs text-muted-foreground">
-                  {/* priceUSD 只在 asExtra 时才会被填（见 setPending），所以
-                      第一个分支已经覆盖了它的全部取值。自选金额档删掉之后，
-                      原来那个 `自选 $X` 分支永远走不到了，留着只会让人以为
-                      客户端还有一条自报价格的下单路径。 */}
                   {pending.asExtra
-                    ? `加量包 ${Math.round((pending.priceUSD ?? 0) / EXTRA_UNIT_USD)} 单位`
+                    ? `加量包 ${pending.units ?? 0} 单位`
                     : `${planLabel(pending.planId)} 套餐`}{" "}
                   · {findPeriod(pending.period).label} ·{" "}
                   {formatMicrosUSD(pending.amountMicros)}
@@ -2099,20 +2115,41 @@ requires_openai_auth = true`,
                 busy={busy}
                 onConfirm={handleCheckoutConfirm}
               />
+            ) : !catalog ? (
+              // 价格还没到（或拿不到）。不显示任何档位和金额 —— 没有服务端
+              // 价格就没有可以显示的价格。
+              <div className="flex flex-col items-center gap-2 py-8 text-xs text-muted-foreground">
+                {catalogError ? (
+                  <>
+                    <span>价格加载失败</span>
+                    <button
+                      type="button"
+                      className="underline transition hover:text-foreground"
+                      onClick={() => void loadCatalog()}
+                    >
+                      重试
+                    </button>
+                  </>
+                ) : (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                )}
+              </div>
             ) : intent === "subscription" && selectedTier ? (
               (() => {
                 const tier = TIERS.find((t) => t.id === selectedTier);
-                const price = tier?.priceUSD ?? 0;
-                // 这一屏是订阅层的周期列表，周期档（1w/2w/3w）只卖给加量包。
-                const options = periodsFor(false);
+                // 这一屏的每一个数字都是服务端给的成品价。服务端只列这一档
+                // 卖的周期，周付档（只卖给加量包）本来就不在里面。
+                const options =
+                  catalog.plans.find((p) => p.id === selectedTier)?.prices ??
+                  [];
                 // A tier switch can strand a weekly selection on a catalog
                 // tier that cannot buy one; fall back rather than send the
                 // server a period it will reject.
-                const period = options.some((p) => p.key === selectedPeriod)
-                  ? findPeriod(selectedPeriod)
-                  : findPeriod(DEFAULT_PERIOD);
-                const total = previewTotalUSD(price, period);
-                const purchaseDisabled = busy;
+                const selected =
+                  options.find((p) => p.period === selectedPeriod) ??
+                  options.find((p) => p.period === DEFAULT_PERIOD) ??
+                  options[0];
+                const purchaseDisabled = busy || !selected;
                 return (
                   <>
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
@@ -2124,22 +2161,18 @@ requires_openai_auth = true`,
                       </div>
                     )}
                     <div className="flex flex-col gap-2">
-                      {options.map((p) => {
-                        const pTotal = previewTotalUSD(price, p);
-                        const unit = previewUnitUSD(price, p);
-                        // "省" is the discount only — a shorter term costing
-                        // less is not a saving, so compare against the
-                        // undiscounted price for the SAME period.
-                        const save =
-                          Math.round(((price * p.num) / p.den - pTotal) * 100) /
-                          100;
-                        const badge = periodDiscountLabel(p);
-                        const sel = p.key === period.key;
+                      {options.map((price) => {
+                        const p = findPeriod(price.period);
+                        const badge = periodDiscountLabel(
+                          catalog.periods.find((x) => x.key === price.period)
+                            ?.discount_bps,
+                        );
+                        const sel = price.period === selected?.period;
                         return (
                           <button
-                            key={p.key}
+                            key={price.period}
                             type="button"
-                            onClick={() => setSelectedPeriod(p.key)}
+                            onClick={() => setSelectedPeriod(price.period)}
                             className={`flex items-center justify-between rounded-xl border-[1.5px] px-3 py-2.5 text-left transition ${
                               sel
                                 ? "border-primary bg-primary/5"
@@ -2156,16 +2189,16 @@ requires_openai_auth = true`,
                                 )}
                               </div>
                               <div className="text-[11px] text-muted-foreground">
-                                ${unit.amount}/{unit.unit} · {p.days} 天
+                                {perUnitLabel(price)} · {p.days} 天
                               </div>
                             </div>
                             <div className="text-right">
                               <div className="text-[15px] font-bold">
-                                ${pTotal}
+                                {formatMicrosUSD(price.charge_micros)}
                               </div>
-                              {save > 0 && (
+                              {price.savings_micros > 0 && (
                                 <div className="text-[11px] font-medium text-green-600 dark:text-green-400">
-                                  省 ${save}
+                                  省 {formatMicrosUSD(price.savings_micros)}
                                 </div>
                               )}
                             </div>
@@ -2177,9 +2210,10 @@ requires_openai_auth = true`,
                       type="button"
                       disabled={purchaseDisabled}
                       onClick={() =>
+                        selected &&
                         void goToCheckout(
                           selectedTier,
-                          period.key,
+                          selected.period,
                           undefined,
                           false,
                         )
@@ -2190,7 +2224,9 @@ requires_openai_auth = true`,
                       {/* 这里显示的是目录价，实付要等服务端报价（抵扣后可能
                           是 $0）。所以按钮写「下一步」而不是「微信支付」——
                           金额只作为参考挂在后面。 */}
-                      下一步 · 约 ${total}
+                      下一步
+                      {selected &&
+                        ` · 约 ${formatMicrosUSD(selected.charge_micros)}`}
                     </button>
                     {quoteError && (
                       <div className="mt-2 text-center text-[11px] font-medium text-red-500">
@@ -2206,8 +2242,10 @@ requires_openai_auth = true`,
               // 用户以为 12 个月的加量包也打 9 折。
               (() => {
                 const units = parseExtraUnits(extraUnitsInput);
-                const monthlyUSD = (units ?? 0) * EXTRA_UNIT_USD;
-                const period = findPeriod(selectedPeriod);
+                const options = catalog.extra.prices;
+                const period =
+                  options.find((p) => p.period === selectedPeriod)?.period ??
+                  DEFAULT_PERIOD;
                 return (
                   <>
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
@@ -2216,7 +2254,9 @@ requires_openai_auth = true`,
                     <div className="mb-2.5 rounded-xl border-[1.5px] border-border px-3 py-2.5">
                       <label className="flex items-center justify-between gap-2 text-sm">
                         <span className="text-muted-foreground">
-                          单位数（1 单位 = ${EXTRA_UNIT_USD}/月）
+                          单位数（1 单位 ={" "}
+                          {formatMicrosUSD(catalog.extra.unit_price_micros)}
+                          /月）
                         </span>
                         <input
                           type="number"
@@ -2229,9 +2269,9 @@ requires_openai_auth = true`,
                         />
                       </label>
                       {/* 额度用相对描述，不给具体金额 —— 理由同档位卡片
-                          （见 planDescription）。1 单位恒等于 $20 = 1× Starter，
+                          （见 planDescription）。1 单位恒等于 1× Starter，
                           所以 N 单位就是 N×，倍数是精确的。上面那行标签里的
-                          $20 是**价格**不是额度，保留：用户得知道花多少钱。 */}
+                          单价是**价格**不是额度，保留：用户得知道花多少钱。 */}
                       <div className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
                         {units
                           ? `${units} 单位 = ${units}× Starter 的用量，叠加在当前套餐之上`
@@ -2248,36 +2288,35 @@ requires_openai_auth = true`,
                     </div>
                     <div className="flex flex-col gap-2">
                       {/* 周期全部开放：custom-only 的限制只作用于订阅层。 */}
-                      {PERIODS.map((p) => (
-                        <button
-                          key={p.key}
-                          type="button"
-                          onClick={() => setSelectedPeriod(p.key)}
-                          className={`flex items-center justify-between rounded-xl border-[1.5px] px-3 py-2.5 text-left transition ${
-                            p.key === period.key
-                              ? "border-primary bg-primary/5"
-                              : "border-border hover:border-primary/60"
-                          }`}
-                        >
-                          <span className="text-sm font-semibold">
-                            {p.label}
-                          </span>
-                          <span className="text-[11px] text-muted-foreground">
-                            {p.days} 天
-                          </span>
-                        </button>
-                      ))}
+                      {options.map((price) => {
+                        const p = findPeriod(price.period);
+                        return (
+                          <button
+                            key={price.period}
+                            type="button"
+                            onClick={() => setSelectedPeriod(price.period)}
+                            className={`flex items-center justify-between rounded-xl border-[1.5px] px-3 py-2.5 text-left transition ${
+                              price.period === period
+                                ? "border-primary bg-primary/5"
+                                : "border-border hover:border-primary/60"
+                            }`}
+                          >
+                            <span className="text-sm font-semibold">
+                              {p.label}
+                            </span>
+                            <span className="text-[11px] text-muted-foreground">
+                              {p.days} 天
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
                     <button
                       type="button"
                       disabled={busy || units === null}
                       onClick={() =>
-                        void goToCheckout(
-                          EXTRA_PLAN_ID,
-                          period.key,
-                          monthlyUSD,
-                          true,
-                        )
+                        units !== null &&
+                        void goToCheckout(EXTRA_PLAN_ID, period, units, true)
                       }
                       className="mt-3.5 flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-2.5 font-semibold text-primary-foreground transition hover:brightness-105 disabled:opacity-60"
                     >
@@ -2377,7 +2416,14 @@ requires_openai_auth = true`,
                         </span>
                       )}
                       <div className="my-0.5 text-xl font-bold tracking-tight">
-                        ${tier.priceUSD}
+                        {(() => {
+                          const plan = catalog.plans.find(
+                            (p) => p.id === tier.id,
+                          );
+                          return plan
+                            ? formatMicrosUSD(plan.price_usd_micros)
+                            : "—";
+                        })()}
                       </div>
                       {/* 额度用相对描述，不给具体金额 —— 「5h $400」对用户是
                           个无从解读的数字，「20× Starter」才说明得了买哪档。 */}
@@ -2629,7 +2675,7 @@ requires_openai_auth = true`,
           void handlePurchasePlan(
             checkout.planId,
             checkout.period,
-            checkout.priceUSD,
+            checkout.units,
             checkout.asExtra,
           );
         }}
