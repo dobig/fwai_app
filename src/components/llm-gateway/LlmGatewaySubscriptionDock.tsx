@@ -1360,16 +1360,35 @@ requires_openai_auth = true`,
     }
     setRedeemBusy(true);
     try {
-      await redeemPromoCode(code);
+      const result = await redeemPromoCode(code);
       await onActivated();
+      if (result.reset) {
+        // 重置码改的是用量不是套餐：主动拉一次用量，让进度条马上归零，
+        // 而不是等下一次打开面板。拉不到也不影响兑换结果。
+        try {
+          const u = await fetchGatewayUsage();
+          saveGatewayUsageCache(u);
+          setUsage(u);
+          setUsageFetchedAt(Date.now());
+        } catch {
+          // 回到账号屏时会再拉一次。
+        }
+      }
       setRedeemInput("");
       setScreen("account");
-      toast.success("兑换成功，套餐已开通");
+      toast.success(
+        result.reset === "reset_week"
+          ? "兑换成功，本周额度和 5 小时额度已重置"
+          : result.reset === "reset_5h"
+            ? "兑换成功，5 小时额度已重置"
+            : "兑换成功，套餐已开通",
+      );
     } catch (error) {
       const messages: Record<string, string> = {
         promo_code_not_found: "兑换码无效",
         promo_code_not_yours: "此兑换码不属于当前账号",
         promo_code_already_redeemed: "此兑换码已被使用",
+        promo_code_expired: "此兑换码已过期",
         promo_code_required: "请输入兑换码",
         email_not_verified: "兑换前请先验证邮箱",
       };
@@ -1598,7 +1617,7 @@ requires_openai_auth = true`,
       : screen === "purchase"
         ? "微信扫码支付，支付成功即时开通"
         : screen === "redeem"
-          ? "输入兑换码即时开通，额度与现有套餐叠加"
+          ? "兑换套餐或重置已用额度，即时生效"
           : screen === "verify-email"
             ? "验证后即可购买套餐"
             : screen === "forgot-password"
@@ -2023,7 +2042,7 @@ requires_openai_auth = true`,
             </button>
             <div className="space-y-3">
               <p className="text-xs leading-relaxed text-muted-foreground">
-                输入管理员发给你的兑换码。兑换后的套餐会和现有套餐叠加，额度相加。
+                输入管理员发给你的兑换码。套餐码兑换后会和现有套餐叠加，额度相加；额度重置码兑换后立即清零当前已用额度。
               </p>
               <input
                 className="w-full rounded-lg border border-border bg-background px-3 py-2.5 text-center font-mono text-sm tracking-widest uppercase outline-none transition focus:border-primary"

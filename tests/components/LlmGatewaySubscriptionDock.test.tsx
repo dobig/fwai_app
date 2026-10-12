@@ -1451,6 +1451,31 @@ describe("LlmGatewaySubscriptionDock 兑换码", () => {
     );
   });
 
+  // 重置码改的是用量不是套餐：提示要说清重置了什么，并且主动重拉用量，
+  // 让进度条立刻归零 —— 用户正是因为额度满了才来兑换的。
+  it.each([
+    ["reset_5h", "兑换成功，5 小时额度已重置"],
+    ["reset_week", "兑换成功，本周额度和 5 小时额度已重置"],
+  ] as const)("重置码 %s 提示重置范围并重拉用量", async (reset, message) => {
+    seedActivePlan();
+    vi.spyOn(gateway, "redeemPromoCode").mockResolvedValue({
+      subscription: { active: true, tier: "pro" },
+      reset,
+    });
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    const usage = vi.spyOn(gateway, "fetchGatewayUsage");
+
+    const input = await openRedeemScreen();
+    const callsBefore = usage.mock.calls.length;
+    await userEvent.type(input, "ABCDE-FGHJK");
+    await userEvent.click(screen.getByRole("button", { name: "兑换" }));
+
+    await waitFor(() => expect(toasts.success).toHaveBeenCalledWith(message));
+    expect(usage.mock.calls.length).toBeGreaterThan(callsBefore);
+  });
+
   it("输入自动转大写，用户不必自己切键盘", async () => {
     seedActivePlan();
     const input = (await openRedeemScreen()) as HTMLInputElement;
@@ -1462,10 +1487,16 @@ describe("LlmGatewaySubscriptionDock 兑换码", () => {
     ["promo_code_not_found", "兑换码无效"],
     ["promo_code_not_yours", "此兑换码不属于当前账号"],
     ["promo_code_already_redeemed", "此兑换码已被使用"],
+    ["promo_code_expired", "此兑换码已过期"],
   ])("错误码 %s 给出对应提示", async (code, message) => {
     seedActivePlan();
+    const status: Record<string, number> = {
+      promo_code_not_found: 404,
+      promo_code_already_redeemed: 409,
+      promo_code_expired: 410,
+    };
     vi.spyOn(gateway, "redeemPromoCode").mockRejectedValue(
-      new GatewayApiError(code === "promo_code_not_found" ? 404 : 403, code),
+      new GatewayApiError(status[code] ?? 403, code),
     );
 
     const input = await openRedeemScreen();

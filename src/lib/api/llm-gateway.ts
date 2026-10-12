@@ -762,13 +762,23 @@ export async function createPlanOrder(
 // it so a caller can also refresh `email_verified`, which may have changed on
 // another device or through a password reset — the cached login copy would
 // otherwise stay stale until the next sign-in.
+// 额度重置码兑换后返回的 `reset`：清零当前 5h，或清零当前周（连带 5h）。
+// 窗口的起止时间不变，到点照常刷新。
+export type GatewayQuotaReset = "reset_5h" | "reset_week";
+
 // redeemPromoCode 兑换管理员发的兑换码。码是发给特定用户的，只有本人能用，
-// 且只能用一次。兑换出来的套餐和已有套餐叠加，不会顶掉已经买的东西。
+// 且只能用一次，过了兑换截止时间就不能用（410 promo_code_expired）。
+// 两种码：套餐码开通一个套餐，和已有套餐叠加，不会顶掉已经买的东西；
+// 额度重置码把当前窗口的已用量清零，返回里带 `reset`。
 // 服务端做归一化（大小写、中划线、空格），所以这里原样传用户输入的内容。
-export async function redeemPromoCode(
-  code: string,
-): Promise<{ subscription: GatewaySubscriptionStatus }> {
-  return await gatewayRequest<{ subscription: GatewaySubscriptionStatus }>(
+export async function redeemPromoCode(code: string): Promise<{
+  subscription: GatewaySubscriptionStatus;
+  reset?: GatewayQuotaReset;
+}> {
+  return await gatewayRequest<{
+    subscription: GatewaySubscriptionStatus;
+    reset?: GatewayQuotaReset;
+  }>(
     "/v1/promo-codes/redeem",
     { method: "POST", body: JSON.stringify({ code }) },
     true,
