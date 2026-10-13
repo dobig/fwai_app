@@ -139,7 +139,12 @@ export function ProviderList({
       <ProviderEmptyState
         appId={appId}
         onCreate={onCreate}
-        onImport={() => importMutation.mutate()}
+        // Claude Desktop 没有可导入的现有配置：那份 profile 是我们写出去的产物，
+        // 不是用户手工配的来源（后端 import_default_config 对它恒返回 false）。
+        // 不传 onImport，空状态就只留「添加供应商」这一个主按钮。
+        onImport={
+          appId === "claude-desktop" ? undefined : () => importMutation.mutate()
+        }
       />
     );
   }

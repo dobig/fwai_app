@@ -130,6 +130,58 @@ describe("ProviderList Component", () => {
     expect(placeholders).toHaveLength(3);
   });
 
+  it("hides the import button on the Claude Desktop empty state", () => {
+    // Desktop 的 profile 是我们写出去的产物，没有「现有配置」可导入：后端的
+    // import_default_config 对它恒返回 false，留着按钮点一下只会弹一句
+    // 不相干的「还没有添加任何供应商」。
+    useDragSortMock.mockReturnValueOnce({
+      sortedProviders: [],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{}}
+        currentProviderId=""
+        appId="claude-desktop"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+        onCreate={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("provider.importCurrent")).toBeNull();
+    expect(screen.getByText("provider.addProvider")).toBeInTheDocument();
+  });
+
+  it("keeps the import button for CLI apps", () => {
+    useDragSortMock.mockReturnValueOnce({
+      sortedProviders: [],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{}}
+        currentProviderId=""
+        appId="claude"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+        onCreate={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("provider.importCurrent")).toBeInTheDocument();
+  });
+
   it("should show empty state and trigger create callback when no providers exist", () => {
     const handleCreate = vi.fn();
     useDragSortMock.mockReturnValueOnce({
@@ -200,12 +252,12 @@ describe("ProviderList Component", () => {
     // Drag attributes from useSortable
     expect(
       providerCardRenderSpy.mock.calls[0][0].dragHandleProps?.attributes[
-      "data-dnd-id"
+        "data-dnd-id"
       ],
     ).toBe("b");
     expect(
       providerCardRenderSpy.mock.calls[1][0].dragHandleProps?.attributes[
-      "data-dnd-id"
+        "data-dnd-id"
       ],
     ).toBe("a");
 

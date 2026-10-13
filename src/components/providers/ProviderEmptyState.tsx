@@ -10,11 +10,15 @@ interface ProviderEmptyStateProps {
 }
 
 export function ProviderEmptyState({
+  appId,
   onCreate,
   onImport,
 }: ProviderEmptyStateProps) {
   const { t } = useTranslation();
-  const showSnippetHint = true;
+  const isClaudeDesktop = appId === "claude-desktop";
+  // Desktop 没有通用配置片段（它的 profile 里只有我们独占的几个网关字段，
+  // 其余键原样保留，没有可共享的片段），这条提示对它不成立。
+  const showSnippetHint = !isClaudeDesktop;
 
   return (
     <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border p-10 text-center">
@@ -23,7 +27,11 @@ export function ProviderEmptyState({
       </div>
       <h3 className="text-lg font-semibold">{t("provider.noProviders")}</h3>
       <p className="mt-2 max-w-lg text-sm text-muted-foreground">
-        {t("provider.noProvidersDescription")}
+        {t(
+          isClaudeDesktop
+            ? "provider.noProvidersDescriptionClaudeDesktop"
+            : "provider.noProvidersDescription",
+        )}
       </p>
       {showSnippetHint && (
         <p className="mt-1 max-w-lg text-sm text-muted-foreground">

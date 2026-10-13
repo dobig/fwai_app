@@ -102,6 +102,7 @@
     "tabUniversal": "統一プロバイダー",
     "noProviders": "まだプロバイダーがありません",
     "noProvidersDescription": "既存の設定がある場合は「現在の設定をインポート」をクリックしてください。すべてのデータが default プロバイダーに安全に保存されます",
+    "noProvidersDescriptionClaudeDesktop": "「プロバイダーを追加」をクリックしてください。エンドポイントと API キーは現在のゲートウェイログインから自動入力されます。切り替えを反映するには Claude Desktop の再起動が必要です。",
     "noProvidersDescriptionSnippet": "API キーとリクエスト URL 以外のデータ（プラグインなど）は共通設定スニペットに保存され、プロバイダー間で共有できます",
     "importCurrent": "現在の設定をインポート",
     "importFromClaude": "Claude Code の既存プロバイダーをインポート",
