@@ -25,6 +25,7 @@ import { Badge } from "@/components/ui/badge";
 import { motion } from "framer-motion";
 import appIcon from "@/assets/icons/app-icon.png";
 import { isWindows } from "@/lib/platform";
+import { applyAppUpdate } from "@/lib/appUpdate";
 
 interface AboutSectionProps {
   isPortable: boolean;
@@ -251,14 +252,14 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     }
   }, [t]);
 
-  const handleOpenReleases = useCallback(async () => {
+  const handleApplyUpdate = useCallback(async () => {
     if (!updateInfo) return;
     try {
-      await settingsApi.openExternal(updateInfo.releaseUrl);
+      await applyAppUpdate(updateInfo, t);
     } catch (error) {
-      console.error("[AboutSection] Failed to open releases page", error);
+      console.error("[AboutSection] Failed to apply update", error);
     }
-  }, [updateInfo]);
+  }, [updateInfo, t]);
 
   const displayVersion = version ?? t("common.unknown");
 
@@ -308,10 +309,12 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                   title={t("settings.updateAvailable", {
                     version: `v${updateInfo.latest}`,
                   })}
-                  onClick={handleOpenReleases}
+                  onClick={handleApplyUpdate}
                 >
                   <ArrowUpCircle className="h-3 w-3" />
-                  {t("settings.updateBadge")}
+                  {updateInfo.installable && updateInfo.latest
+                    ? t("settings.updateTo", { version: updateInfo.latest })
+                    : t("settings.updateBadge")}
                 </Badge>
               )}
               {isPortable && (

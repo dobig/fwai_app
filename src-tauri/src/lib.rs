@@ -125,6 +125,7 @@ pub fn run() {
             }
         })
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -519,6 +520,7 @@ pub fn run() {
             commands::open_provider_terminal,
             commands::get_tool_versions,
             commands::check_app_update,
+            commands::install_app_update,
             // Window theme control
             commands::set_window_theme,
         ]);

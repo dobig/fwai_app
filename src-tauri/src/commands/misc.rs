@@ -12,6 +12,7 @@ use std::time::Duration;
 use tauri::AppHandle;
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -263,26 +264,30 @@ async fn fetch_github_latest_version(client: &reqwest::Client, repo: &str) -> Op
 
 /// 本应用自身的发布仓库
 const APP_REPO: &str = "dobig/fwai_app";
-/// 下载页地址（提示用户手动下载，本应用不做应用内自动安装）。
+/// 下载页地址：应用内安装不可用或失败时，退回到让用户手动下载。
 ///
 /// 指向官网而不是 GitHub Releases：国内用户打不开 github.com。官网的安装包
-/// 由服务器每 10 分钟从 GitHub 同步并校验，所以这里的"有新版本"提示最多比
-/// 官网早 10 分钟，用户点开时看到的仍是上一版。版本检查本身还走 GitHub API
-/// （api.github.com 在国内通常可达），连不上时按"已是最新"静默处理。
+/// 由服务器每 10 分钟从 GitHub 同步并校验。
 const RELEASES_URL: &str = "https://fwai.space/#download";
 /// 检查更新的请求超时。get_tool_versions 用的是无超时的裸 client，
 /// 但这里的调用方要么是启动时的后台任务（会泄漏），要么是带 spinner 的按钮
 /// （spinner 会一直转），所以必须有超时。
 const UPDATE_CHECK_TIMEOUT_SECS: u64 = 10;
+/// 下载更新包的超时。安装包几十 MB，按慢网给足余量；只用于用户主动点了
+/// 「更新」之后，不会拖住启动检查。
+const UPDATE_DOWNLOAD_TIMEOUT_SECS: u64 = 15 * 60;
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppUpdateInfo {
     /// 当前运行的版本
     current: String,
-    /// GitHub 上最新的正式版；网络失败或仓库无 release 时为 None
+    /// 最新的正式版；没有更新、网络失败或仓库无 release 时为 None
     latest: Option<String>,
     update_available: bool,
+    /// 能否在应用内直接下载安装（来自 fwai.space 的签名更新清单）。
+    /// false 时只能跳下载页手动安装。
+    installable: bool,
     release_url: String,
 }
 
@@ -302,13 +307,48 @@ fn is_newer_stable_release(current: &semver::Version, latest_tag: &str) -> bool 
     }
 }
 
-/// 检查是否有新版本可用（只提示，不安装）
+/// 向 fwai.space 的更新清单查询可安装的更新。
+///
+/// 清单由服务器同步脚本生成，只会指向正式版；版本比较器再套一层
+/// is_newer_stable_release，和 GitHub 那条路径保持同一套规则。
+async fn find_installable_update(
+    app: &AppHandle,
+    timeout: Duration,
+) -> Result<Option<tauri_plugin_updater::Update>, tauri_plugin_updater::Error> {
+    app.updater_builder()
+        .timeout(timeout)
+        .version_comparator(|current, remote| {
+            is_newer_stable_release(&current, &remote.version.to_string())
+        })
+        .build()?
+        .check()
+        .await
+}
+
+/// 检查是否有新版本可用
 #[tauri::command]
 pub async fn check_app_update(app: AppHandle) -> Result<AppUpdateInfo, String> {
     let current = app.package_info().version.clone();
+    let timeout = Duration::from_secs(UPDATE_CHECK_TIMEOUT_SECS);
+
+    // 首选 fwai.space 的签名更新清单：国内可达，且查到的更新可以直接安装。
+    // 拿不到清单（官网故障、首个带清单的版本还没同步上去）时退回 GitHub，
+    // 至少还能提示用户去下载页。
+    match find_installable_update(&app, timeout).await {
+        Ok(update) => {
+            return Ok(AppUpdateInfo {
+                current: current.to_string(),
+                update_available: update.is_some(),
+                installable: update.is_some(),
+                latest: update.map(|u| u.version),
+                release_url: RELEASES_URL.to_string(),
+            });
+        }
+        Err(e) => log::warn!("更新清单不可用，改查 GitHub: {e}"),
+    }
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(UPDATE_CHECK_TIMEOUT_SECS))
+        .timeout(timeout)
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
 
@@ -324,8 +364,30 @@ pub async fn check_app_update(app: AppHandle) -> Result<AppUpdateInfo, String> {
         current: current.to_string(),
         latest,
         update_available,
+        installable: false,
         release_url: RELEASES_URL.to_string(),
     })
+}
+
+/// 下载并安装更新，成功后重启应用。
+///
+/// 更新包的签名由 updater 插件用 tauri.conf.json 里的公钥校验，校验不过
+/// 不会安装。Windows 上 NSIS/MSI 安装器会自己结束当前进程，走不到 restart。
+#[tauri::command]
+pub async fn install_app_update(app: AppHandle) -> Result<(), String> {
+    let update = find_installable_update(&app, Duration::from_secs(UPDATE_DOWNLOAD_TIMEOUT_SECS))
+        .await
+        .map_err(|e| format!("检查更新失败: {e}"))?
+        .ok_or_else(|| "没有可安装的更新".to_string())?;
+
+    log::info!("开始安装更新 v{}", update.version);
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| format!("安装更新失败: {e}"))?;
+
+    log::info!("更新已安装，重启应用");
+    app.restart();
 }
 
 /// 预编译的版本号正则表达式

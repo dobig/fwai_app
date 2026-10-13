@@ -644,6 +644,7 @@
     "resetDefault": "デフォルトに戻す（保存後に反映）",
     "checkForUpdates": "アップデートを確認",
     "updateTo": "v{{version}} に更新",
+    "updateNow": "今すぐ更新",
     "updating": "更新中...",
     "checking": "確認中...",
     "upToDate": "最新バージョンです",

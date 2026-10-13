@@ -7,6 +7,11 @@ name: release
 #   Windows fwai_app_X.Y.Z_x64-setup.exe + _x64_en-US.msi
 #   Linux   fwai_app_X.Y.Z_amd64.AppImage + _amd64.deb
 #
+# plus the in-app updater's files: a .sig next to every exe/msi/AppImage, and
+# fwai_app_X.Y.Z_{aarch64,x64}.app.tar.gz(.sig) for macOS. fwai.space mirrors
+# them and builds the update manifest the client polls (llm_gateway repo,
+# deploy/site/sync-client-release.sh).
+#
 # All jobs upload with `draft: true`, so the release stays a draft until you
 # review the assets and publish it yourself — a half-built release never goes
 # out, and you get to write the notes before anyone can download it. Pre-create
@@ -15,7 +20,10 @@ name: release
 #   gh release create vX.Y.Z --draft --title vX.Y.Z --notes-file notes.md
 #   git tag vX.Y.Z && git push origin vX.Y.Z
 #
-# Required repository secrets (macOS only — Windows needs none):
+# Required repository secrets. Every platform needs the updater signing key:
+#   TAURI_SIGNING_PRIVATE_KEY          minisign private key (~/.tauri/fwai_app.key)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD its password
+# macOS additionally needs:
 #   APPLE_CERTIFICATE           base64 of the Developer ID Application .p12
 #   APPLE_CERTIFICATE_PASSWORD  password set when exporting that .p12
 #   APPLE_ID                    Apple account used for notarization
@@ -39,6 +47,10 @@ env:
   # Baked into the renderer at build time so the shipped binary defaults to
   # prod. Override the repository variable to retarget without a code change.
   VITE_GATEWAY_URL: ${{ vars.VITE_GATEWAY_URL || 'https://api.fwai.space' }}
+  # Signs the updater artifacts. Without it `tauri build` fails, which is the
+  # point: a release the installed clients cannot update to must not ship.
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
 jobs:
   verify:
@@ -113,6 +125,8 @@ jobs:
           files: |
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/fwai_app_*.app.tar.gz*
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/fwai_app_*.app.tar.gz*
 
   windows:
     needs: verify
@@ -171,6 +185,8 @@ jobs:
           $nsis = Get-ChildItem "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue
           if (-not $nsis) { throw "no NSIS installer found -- bundling produced nothing to upload" }
           $nsis | ForEach-Object { Write-Host "built $($_.Name) ($([math]::Round($_.Length/1MB,1)) MB)" }
+          $sig = Get-ChildItem "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig" -ErrorAction SilentlyContinue
+          if (-not $sig) { throw "no updater signature next to the NSIS installer" }
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -182,7 +198,9 @@ jobs:
           fail_on_unmatched_files: false
           files: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.sig
 
   linux:
     needs: verify
@@ -238,6 +256,7 @@ jobs:
           draft: true
           files: |
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+            src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage.sig
             src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
 
   summary:
