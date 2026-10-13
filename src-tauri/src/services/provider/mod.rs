@@ -134,6 +134,90 @@ mod tests {
         result
     }
 
+    /// `add_to_live = false` 必须真的不写 live。
+    ///
+    /// 这个参数以前被丢掉了，于是切到一个还没配过供应商的 app（全新安装的
+    /// providers 表是空的）光是打开那个 tab，网关面板的 ensureGatewayProviderListed
+    /// 就会把那份「只有凭据的最小配置」当成整份 live 配置写进去。
+    #[test]
+    #[serial]
+    fn add_without_add_to_live_does_not_touch_live_config() {
+        with_test_home(|state, _home| {
+            let provider = claude_env_provider("gw", "Gateway", "sk-gw", "https://gw.example");
+
+            ProviderService::add(state, AppType::Claude, provider, false).expect("add");
+
+            // 条目进了库 —— 这是调用方唯一想要的效果
+            assert!(state
+                .db
+                .get_provider_by_id("gw", "claude")
+                .expect("query")
+                .is_some());
+            // 但没被设成当前，也没写 live
+            assert_eq!(
+                state.db.get_current_provider("claude").expect("current"),
+                None
+            );
+            assert!(
+                !get_claude_settings_path().exists(),
+                "add_to_live=false 不该创建 live 配置"
+            );
+        });
+    }
+
+    /// 反面：默认（`add_to_live = true`）仍然把第一家写进 live。
+    ///
+    /// 前端正常的「添加供应商」走的是这条路（mutations.ts 不传第三个参数），
+    /// 修 bug 时不能把它一起改掉。
+    #[test]
+    #[serial]
+    fn add_with_add_to_live_still_writes_the_first_provider() {
+        with_test_home(|state, _home| {
+            let provider =
+                claude_env_provider("first", "First", "sk-first", "https://first.example");
+
+            ProviderService::add(state, AppType::Claude, provider, true).expect("add");
+
+            assert_eq!(
+                state.db.get_current_provider("claude").expect("current"),
+                Some("first".to_string())
+            );
+            let live: serde_json::Value =
+                read_json_file(&get_claude_settings_path()).expect("live written");
+            assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], json!("sk-first"));
+        });
+    }
+
+    /// 用户已有的 live 配置不能被 `add_to_live = false` 覆盖。
+    ///
+    /// 这是上面那个 bug 真正的伤害：网关条目是份只有凭据的最小配置，整份写出去会把
+    /// 用户的 model、MCP server 之类全削掉。
+    #[test]
+    #[serial]
+    fn add_without_add_to_live_preserves_an_existing_live_config() {
+        with_test_home(|state, _home| {
+            let path = get_claude_settings_path();
+            fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            write_json_file(
+                &path,
+                &json!({
+                    "env": { "ANTHROPIC_AUTH_TOKEN": "sk-mine" },
+                    "model": "opus",
+                    "theme": "dark",
+                }),
+            )
+            .expect("seed live");
+
+            let provider = claude_env_provider("gw", "Gateway", "sk-gw", "https://gw.example");
+            ProviderService::add(state, AppType::Claude, provider, false).expect("add");
+
+            let live: serde_json::Value = read_json_file(&path).expect("read live");
+            assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], json!("sk-mine"));
+            assert_eq!(live["model"], json!("opus"));
+            assert_eq!(live["theme"], json!("dark"));
+        });
+    }
+
     fn claude_env_provider(id: &str, name: &str, api_key: &str, base_url: &str) -> Provider {
         Provider {
             id: id.to_string(),
@@ -577,15 +661,22 @@ impl ProviderService {
         Self::normalize_provider_if_claude(&app_type, &mut provider);
         Self::validate_provider_settings(&app_type, &provider)?;
         normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
-        let _ = add_to_live;
 
         // Save to database
         state.db.save_provider(app_type.as_str(), &provider)?;
 
-        // Check if sync is needed (if this is current provider, or no current provider)
+        // 还没有当前供应商时，新添的这一家就是第一家：设为当前并写 live。
+        //
+        // `add_to_live = false` 的调用方明确表示「只要这个条目出现在列表里，不要
+        // 切换、不要写 live」——网关面板的 ensureGatewayProviderListed 就是这么调的。
+        // 这个参数以前被 `let _ = add_to_live;` 丢掉了，于是切到一个还没配过供应商
+        // 的 app（全新安装的 providers 表是空的）光是打开那个 tab，就会把网关那份
+        // 「只有凭据的最小配置」当成整份 live 配置写进去，覆盖掉用户原有的
+        // ~/.codex/config.toml 或 ~/.claude/settings.json。而且这条路径不写转发备份，
+        // 所以 is_forwarding 仍是 false、界面显示「转发未开启」、stop_forwarding 是
+        // 空操作——用户在 UI 里没有任何入口能撤销它。
         let current = state.db.get_current_provider(app_type.as_str())?;
-        if current.is_none() {
-            // No current provider, set as current and sync
+        if current.is_none() && add_to_live {
             state
                 .db
                 .set_current_provider(app_type.as_str(), &provider.id)?;
