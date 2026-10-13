@@ -1,6 +1,7 @@
 mod app_config;
 mod app_store;
 mod auto_launch;
+mod claude_desktop_config;
 mod claude_plugin;
 mod codex_config;
 mod commands;
@@ -452,6 +453,7 @@ pub fn run() {
             commands::switch_provider,
             commands::import_default_config,
             commands::get_claude_config_status,
+            commands::get_claude_desktop_status,
             commands::get_config_status,
             commands::get_claude_code_config_path,
             commands::get_config_dir,
@@ -612,6 +614,10 @@ fn initialize_common_config_snippets(state: &store::AppState) {
     // This must run before proxy takeover is restored on startup, otherwise we'd read
     // proxy-placeholder configs instead of the user's actual live settings.
     for app_type in crate::app_config::AppType::all() {
+        // Desktop 没有「通用配置片段」这回事，顺带也省掉每次启动去读它的 profile。
+        if matches!(app_type, crate::app_config::AppType::ClaudeDesktop) {
+            continue;
+        }
         if !state
             .db
             .should_auto_extract_config_snippet(app_type.as_str())

@@ -319,6 +319,8 @@ fn settings_contain_common_config(app_type: &AppType, settings: &Value, snippet:
     }
 
     match app_type {
+        // Desktop 的 profile 没有通用配置片段，见 claude_desktop_config 的模块注释。
+        AppType::ClaudeDesktop => false,
         AppType::Claude => match serde_json::from_str::<Value>(trimmed) {
             Ok(source) if source.is_object() => json_is_subset(settings, &source),
             _ => false,
@@ -391,6 +393,7 @@ pub(crate) fn remove_common_config_from_settings(
             json_deep_remove(&mut result, &source);
             Ok(result)
         }
+        AppType::ClaudeDesktop => Ok(settings.clone()),
         AppType::Codex => {
             let mut result = settings.clone();
             let config_toml = settings.get("config").and_then(Value::as_str).unwrap_or("");
@@ -443,6 +446,7 @@ fn apply_common_config_to_settings(
             json_deep_merge(&mut result, &source);
             Ok(result)
         }
+        AppType::ClaudeDesktop => Ok(settings.clone()),
         AppType::Codex => {
             let mut result = settings.clone();
             let config_toml = settings.get("config").and_then(Value::as_str).unwrap_or("");
@@ -716,6 +720,9 @@ impl LiveSnapshot {
 /// Write live configuration snapshot for a provider
 pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Result<(), AppError> {
     match app_type {
+        AppType::ClaudeDesktop => {
+            crate::claude_desktop_config::apply_provider(provider)?;
+        }
         AppType::Claude => {
             let path = get_claude_settings_path();
             let settings = sanitize_claude_settings_for_live(&provider.settings_config);
@@ -818,6 +825,18 @@ pub(crate) fn sync_current_provider_for_app_to_live(
 pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
     // Sync providers based on mode
     for app_type in AppType::all() {
+        // Desktop 的 profile 不在启动同步的范围内。
+        //
+        // 这里是「每次启动都把当前供应商写一遍 live」。对 CLI 没问题——那些文件
+        // 本来就由我们管。但 Desktop 的配置是另一个应用的，没有用户的明确动作就
+        // 往里写是 add_provider 那个 bug 的同一类问题。而且这台机器没装 Desktop
+        // 时 apply_provider 会报错，用 `?` 传上去会直接搞挂启动流程。
+        //
+        // 代价是：token 轮换后 profile 会暂时陈旧。那由前端刷新 token 的那条路径
+        // 负责重写（它同时会提示重启 Desktop），而不是在这里偷偷补。
+        if matches!(app_type, AppType::ClaudeDesktop) {
+            continue;
+        }
         if app_type.is_additive_mode() {
             // Additive mode: sync ALL providers
             sync_all_providers_to_live(state, &app_type)?;
@@ -850,6 +869,7 @@ pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
 /// Read current live settings for an app type
 pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
     match app_type {
+        AppType::ClaudeDesktop => crate::claude_desktop_config::read_profile(),
         AppType::Codex => {
             let auth_path = get_codex_auth_path();
             if !auth_path.exists() {
@@ -929,6 +949,9 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
     }
 
     let settings_config = match app_type {
+        // Desktop 的 profile 是我们写出去的产物，不是用户手工配置的来源：导回来只会
+        // 造出一个引用自己刚写进去的 Key 的条目。
+        AppType::ClaudeDesktop => return Ok(false),
         AppType::Codex => {
             let auth_path = get_codex_auth_path();
             if !auth_path.exists() {

@@ -1779,7 +1779,12 @@ describe("LlmGatewaySubscriptionDock token 刷新", () => {
         expect.any(String),
       ),
     );
-    expect(providersApi.update).not.toHaveBeenCalled();
+    // 断言限定在被转发的那个 app：Claude Desktop 不走转发（它写的是 Desktop 自己
+    // 的 3P profile），刷新 token 时用普通 update 同步它的条目是预期行为。
+    expect(providersApi.update).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "claude",
+    );
   });
 
   it("转发没开时仍走普通 update", async () => {

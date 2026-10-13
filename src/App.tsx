@@ -36,6 +36,7 @@ import {
   DRAG_REGION_STYLE,
 } from "@/lib/platform";
 import { AppSwitcher } from "@/components/AppSwitcher";
+import { DEFAULT_VISIBLE_APPS } from "@/lib/apps";
 import { useActiveApp } from "@/components/active-app-provider";
 import { ProviderList } from "@/components/providers/ProviderList";
 import { AddProviderDialog } from "@/components/providers/AddProviderDialog";
@@ -66,11 +67,8 @@ function App() {
     isLinux() && (settingsData?.useAppWindowControls ?? false);
   const dragBarHeight = useAppWindowControls ? 32 : DEFAULT_DRAG_BAR_HEIGHT;
   const contentTopOffset = dragBarHeight + HEADER_HEIGHT;
-  const visibleApps: VisibleApps = settingsData?.visibleApps ?? {
-    claude: true,
-    codex: true,
-    gemini: true,
-  };
+  const visibleApps: VisibleApps =
+    settingsData?.visibleApps ?? DEFAULT_VISIBLE_APPS;
 
   const getFirstVisibleApp = (): AppId => {
     if (visibleApps.claude) return "claude";

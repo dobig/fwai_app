@@ -1,3 +1,8 @@
+/// 网关供应商条目的固定 id。
+///
+/// Dock 负责维护它的凭据，供应商列表和切换逻辑按这个 id 识别它。
+export const GATEWAY_PROVIDER_ID = "llm-gateway-local";
+
 // Provider 类型常量
 export const PROVIDER_TYPES = {
   GITHUB_COPILOT: "github_copilot",

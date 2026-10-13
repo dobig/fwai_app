@@ -10,9 +10,13 @@ import type {
 type ProvidersByApp = Record<AppId, Record<string, Provider>>;
 type CurrentProviderState = Record<AppId, string>;
 type McpConfigState = Record<AppId, Record<string, McpServer>>;
-type LiveProviderIdsByApp = Record<"opencode" | "openclaw" | "hermes", string[]>;
+type LiveProviderIdsByApp = Record<
+  "opencode" | "openclaw" | "hermes",
+  string[]
+>;
 
 const createDefaultProviders = (): ProvidersByApp => ({
+  "claude-desktop": {},
   claude: {
     "claude-1": {
       id: "claude-1",
@@ -67,6 +71,8 @@ const createDefaultProviders = (): ProvidersByApp => ({
 });
 
 const createDefaultCurrent = (): CurrentProviderState => ({
+  // Desktop 默认没有当前供应商：profile 只在用户明确切换时才写。
+  "claude-desktop": "",
   claude: "claude-1",
   codex: "codex-1",
   gemini: "gemini-1",
@@ -139,6 +145,8 @@ const createDefaultSessionMessages = (): Record<string, SessionMessage[]> => ({
 let sessionsState = createDefaultSessions();
 let sessionMessagesState = createDefaultSessionMessages();
 let mcpConfigs: McpConfigState = {
+  // 我们不给 Desktop 管 MCP，这里永远是空的。
+  "claude-desktop": {},
   claude: {
     sample: {
       id: "sample",
@@ -203,6 +211,7 @@ export const resetProviderState = () => {
   };
   appConfigDirOverride = null;
   mcpConfigs = {
+    "claude-desktop": {},
     claude: {
       sample: {
         id: "sample",
@@ -250,9 +259,9 @@ export const getProviders = (appType: AppId) =>
 
 export const getCurrentProviderId = (appType: AppId) => current[appType] ?? "";
 
-export const getLiveProviderIds = (appType: "opencode" | "openclaw" | "hermes") => [
-  ...liveProviderIds[appType],
-];
+export const getLiveProviderIds = (
+  appType: "opencode" | "openclaw" | "hermes",
+) => [...liveProviderIds[appType]];
 
 export const setLiveProviderIds = (
   appType: "opencode" | "openclaw" | "hermes",

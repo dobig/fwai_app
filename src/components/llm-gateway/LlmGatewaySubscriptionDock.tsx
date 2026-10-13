@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { toast } from "sonner";
+import { GATEWAY_PROVIDER_ID } from "@/config/constants";
 import {
   ArrowLeft,
   ChevronDown,
@@ -247,7 +248,6 @@ function perUnitLabel(price: GatewayPeriodPrice): string {
   return `${formatMicrosUSD(price.per_unit_micros)}/${price.per_unit === "week" ? "周" : "月"}`;
 }
 
-const GATEWAY_PROVIDER_ID = "llm-gateway-local";
 const DOCK_OPEN_KEY = "llm-gateway-dock-open";
 
 function initials(name: string): string {
@@ -665,6 +665,43 @@ requires_openai_auth = true`,
     }
   }
 
+  /// token 刷新后把新凭据落到 Claude Desktop 的条目上。
+  ///
+  /// Desktop 只在启动时读 profile，所以陈旧的 Key 要用户重启一次才会被换掉。
+  /// 这里先把条目和 profile 写对，重启提示由切换/编辑那条路径负责。
+  ///
+  /// 只在条目已经存在时更新，不替用户创建：Desktop 还没有当前供应商时，后端的
+  /// `add` 会顺手把新条目设成当前并写 live——那是另一条路径的问题，不该在这里
+  /// 触发。用户要用网关就自己在 Desktop 页点「添加」，表单会预填凭据。
+  ///
+  /// 保留原条目的 meta：模型清单存在那里，整份替换会把用户的勾选抹掉。
+  async function syncDesktopGatewayEntry(): Promise<void> {
+    try {
+      const providers = await providersApi.getAll("claude-desktop");
+      const existing = providers[GATEWAY_PROVIDER_ID];
+      if (!existing) return;
+
+      const token = gatewayOAuthAccessToken();
+      if (!token) return;
+      const base = getGatewayBaseURL().replace(/\/+$/, "");
+
+      await providersApi.update(
+        {
+          ...existing,
+          settingsConfig: {
+            ...(typeof existing.settingsConfig === "object"
+              ? existing.settingsConfig
+              : {}),
+            env: { ANTHROPIC_BASE_URL: base, ANTHROPIC_AUTH_TOKEN: token },
+          },
+        },
+        "claude-desktop",
+      );
+    } catch {
+      // best-effort：读不到或写不动就等下一次刷新
+    }
+  }
+
   // 仅登出时使用：清掉条目与（若正在启用的）live 配置。规则 1 会在下次
   // 打开 app 时重新补条目，但登出后的机器上不应留下带凭据的供应商。
   async function removeGatewayProvider(): Promise<void> {
@@ -677,6 +714,13 @@ requires_openai_auth = true`,
       await providersApi.removeManaged(GATEWAY_PROVIDER_ID, "codex");
     } catch {
       // Same idempotency for the codex side.
+    }
+    try {
+      // Desktop 这边顺带把 deploymentMode 交还 1p：留着一个 token 已作废的
+      // profile，Desktop 会一直 401，而用户在界面上看不出原因。
+      await providersApi.removeManaged(GATEWAY_PROVIDER_ID, "claude-desktop");
+    } catch {
+      // 同样保持幂等：条目可能从来没建过。
     }
   }
 
@@ -868,6 +912,7 @@ requires_openai_auth = true`,
       await ensureGatewayProviderListed(target);
       await syncGatewayProviderEntry(target);
     }
+    await syncDesktopGatewayEntry();
     toast.success(justRegistered ? "注册成功，请验证邮箱" : "登录成功");
   }
 
@@ -1183,6 +1228,7 @@ requires_openai_auth = true`,
       // 刷新即轮换，旧 token 全部作废。用标准 update 同步条目：live 仅在
       // 该条目正被启用时随之更新（转发 + 启用的合取由列表守卫保证）。
       if (target) await syncGatewayProviderEntry(target);
+      await syncDesktopGatewayEntry();
       toast.success("Auth Token 已刷新");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "刷新失败");

@@ -337,7 +337,8 @@ fn capture_live(app_type: &AppType, backup: &mut ForwardingBackup) -> Result<(),
     match app_type {
         AppType::Claude => capture_claude(backup),
         AppType::Codex => capture_codex(backup),
-        AppType::Gemini => Ok(()),
+        // Desktop 不走字段级转发，理由见 apply_live。
+        AppType::ClaudeDesktop | AppType::Gemini => Ok(()),
     }
 }
 
@@ -345,7 +346,10 @@ fn apply_live(app_type: &AppType, token: &str, base_url: &str) -> Result<(), App
     match app_type {
         AppType::Claude => apply_claude(token, base_url),
         AppType::Codex => apply_codex(token, base_url),
-        AppType::Gemini => Ok(()),
+        // Desktop 不走字段级转发:profile 里只有 5 个网关字段是我们的,用户的其它
+        // 设置在标准切换路径里本来就原样保留(见 claude_desktop_config 的
+        // floor/seed),再叠一层备份只会多一份会过期的状态。
+        AppType::ClaudeDesktop | AppType::Gemini => Ok(()),
     }
 }
 
@@ -353,7 +357,7 @@ fn restore_live(app_type: &AppType, backup: &ForwardingBackup) -> Result<(), App
     match app_type {
         AppType::Claude => restore_claude(backup),
         AppType::Codex => restore_codex(backup),
-        AppType::Gemini => Ok(()),
+        AppType::ClaudeDesktop | AppType::Gemini => Ok(()),
     }
 }
 
@@ -393,7 +397,7 @@ fn credentials_from_provider(app_type: &AppType, provider: &Provider) -> Option<
             let base_url = raw.trim_end_matches('/').trim_end_matches("/v1");
             Some((token.to_string(), base_url.to_string()))
         }
-        AppType::Gemini => None,
+        AppType::ClaudeDesktop | AppType::Gemini => None,
     }
 }
 
@@ -517,7 +521,7 @@ pub(crate) fn pin_gateway_credentials(
             obj.insert("config".to_string(), Value::String(doc.to_string()));
             Ok(())
         }
-        AppType::Gemini => Ok(()),
+        AppType::ClaudeDesktop | AppType::Gemini => Ok(()),
     }
 }
 
@@ -546,7 +550,7 @@ pub fn start_forwarding(
     token: &str,
     base_url: &str,
 ) -> Result<(), AppError> {
-    if matches!(app_type, AppType::Gemini) {
+    if matches!(app_type, AppType::ClaudeDesktop | AppType::Gemini) {
         return Ok(());
     }
 

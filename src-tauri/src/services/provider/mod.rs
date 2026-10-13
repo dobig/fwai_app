@@ -713,6 +713,9 @@ impl ProviderService {
         match app_type {
             AppType::Claude => {}
             AppType::Codex => return Self::clear_managed_codex_live_config_if_matches(provider),
+            AppType::ClaudeDesktop => {
+                return Self::clear_managed_claude_desktop_config_if_matches(provider)
+            }
             _ => return Ok(()),
         }
 
@@ -783,6 +786,10 @@ impl ProviderService {
     /// match the managed provider being removed, so a hand-edited auth.json
     /// is never clobbered. The config.toml is deleted only on an exact match
     /// (it then contains nothing but what we wrote).
+    fn clear_managed_claude_desktop_config_if_matches(provider: &Provider) -> Result<(), AppError> {
+        crate::claude_desktop_config::restore_official_if_matches(provider)
+    }
+
     fn clear_managed_codex_live_config_if_matches(provider: &Provider) -> Result<(), AppError> {
         let Some(expected_key) = provider
             .settings_config
@@ -1054,6 +1061,7 @@ impl ProviderService {
 
         match app_type {
             AppType::Claude => Self::extract_claude_common_config(&provider.settings_config),
+            AppType::ClaudeDesktop => Ok(String::new()),
             AppType::Codex => Self::extract_codex_common_config(&provider.settings_config),
             AppType::Gemini => Self::extract_gemini_common_config(&provider.settings_config),
         }
@@ -1066,6 +1074,7 @@ impl ProviderService {
     ) -> Result<String, AppError> {
         match app_type {
             AppType::Claude => Self::extract_claude_common_config(settings_config),
+            AppType::ClaudeDesktop => Ok(String::new()),
             AppType::Codex => Self::extract_codex_common_config(settings_config),
             AppType::Gemini => Self::extract_gemini_common_config(settings_config),
         }
@@ -1333,6 +1342,10 @@ impl ProviderService {
 
     fn validate_provider_settings(app_type: &AppType, provider: &Provider) -> Result<(), AppError> {
         match app_type {
+            // 比别的 app 严:模型名不合规会让 Desktop 拒收整组模型,必须在存库前挡住。
+            AppType::ClaudeDesktop => {
+                crate::claude_desktop_config::validate_provider(provider)?;
+            }
             AppType::Claude => {
                 if !provider.settings_config.is_object() {
                     return Err(AppError::localized(
@@ -1397,6 +1410,11 @@ impl ProviderService {
         app_type: &AppType,
     ) -> Result<(String, String), AppError> {
         match app_type {
+            // 和 Claude 读同一组 env 字段,同一个网关条目能同时喂给 CLI 和 Desktop。
+            AppType::ClaudeDesktop => {
+                let credentials = crate::claude_desktop_config::gateway_credentials(provider)?;
+                Ok((credentials.api_key, credentials.base_url))
+            }
             AppType::Claude => {
                 let env = provider
                     .settings_config

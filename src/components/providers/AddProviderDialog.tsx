@@ -9,6 +9,7 @@ import {
   ProviderForm,
   type ProviderFormValues,
 } from "@/components/providers/forms/ProviderForm";
+import { ClaudeDesktopProviderForm } from "@/components/providers/forms/ClaudeDesktopProviderForm";
 import { providerPresets } from "@/config/claudeProviderPresets";
 import { codexProviderPresets } from "@/config/codexProviderPresets";
 import { geminiProviderPresets } from "@/config/geminiProviderPresets";
@@ -183,14 +184,24 @@ export function AddProviderDialog({
       onClose={() => onOpenChange(false)}
       footer={footer}
     >
-      <ProviderForm
-        appId={appId}
-        submitLabel={t("common.add")}
-        onSubmit={handleSubmit}
-        onCancel={() => onOpenChange(false)}
-        onSubmittingChange={setIsFormSubmitting}
-        showButtons={false}
-      />
+      {appId === "claude-desktop" ? (
+        <ClaudeDesktopProviderForm
+          submitLabel={t("common.add")}
+          onSubmit={handleSubmit}
+          onCancel={() => onOpenChange(false)}
+          onSubmittingChange={setIsFormSubmitting}
+          showButtons={false}
+        />
+      ) : (
+        <ProviderForm
+          appId={appId}
+          submitLabel={t("common.add")}
+          onSubmit={handleSubmit}
+          onCancel={() => onOpenChange(false)}
+          onSubmittingChange={setIsFormSubmitting}
+          showButtons={false}
+        />
+      )}
     </FullScreenPanel>
   );
 }

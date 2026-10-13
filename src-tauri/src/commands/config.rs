@@ -15,6 +15,16 @@ pub async fn get_claude_config_status() -> Result<ConfigStatus, String> {
     Ok(config::get_claude_config_status())
 }
 
+/// Claude Desktop 的 3P 配置自检。
+///
+/// 前端用它显示状态条:没装、profile 指向的地址和当前供应商不一致、profile 里混进
+/// 了 Desktop 不认的模型名(会让模型菜单整个空掉)。
+#[tauri::command]
+pub async fn get_claude_desktop_status(
+) -> Result<crate::claude_desktop_config::ClaudeDesktopStatus, String> {
+    crate::claude_desktop_config::get_status().map_err(|e| e.to_string())
+}
+
 use std::str::FromStr;
 
 fn invalid_json_format_error(error: serde_json::Error) -> String {
@@ -69,6 +79,15 @@ pub async fn get_config_status(
 ) -> Result<ConfigStatus, String> {
     match AppType::from_str(&app).map_err(|e| e.to_string())? {
         AppType::Claude => Ok(config::get_claude_config_status()),
+        AppType::ClaudeDesktop => {
+            let status = crate::claude_desktop_config::get_status().map_err(|e| e.to_string())?;
+            Ok(ConfigStatus {
+                // 「有配置」= Desktop 正指着我们的 profile。不能按文件在不在判断：
+                // 切回官方后 profile 文件还留着，只是关键字段被清空了。
+                exists: status.configured,
+                path: status.config_library_path.unwrap_or_default(),
+            })
+        }
         AppType::Codex => {
             let auth_path = codex_config::get_codex_auth_path();
             let exists = auth_path.exists();
@@ -99,6 +118,9 @@ pub async fn get_claude_code_config_path() -> Result<String, String> {
 pub async fn get_config_dir(app: String) -> Result<String, String> {
     let dir = match AppType::from_str(&app).map_err(|e| e.to_string())? {
         AppType::Claude => config::get_claude_config_dir(),
+        AppType::ClaudeDesktop => {
+            crate::claude_desktop_config::config_library_path().map_err(|e| e.to_string())?
+        }
         AppType::Codex => codex_config::get_codex_config_dir(),
         AppType::Gemini => crate::gemini_config::get_gemini_dir(),
     };
@@ -108,13 +130,25 @@ pub async fn get_config_dir(app: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, String> {
-    let config_dir = match AppType::from_str(&app).map_err(|e| e.to_string())? {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    let config_dir = match &app_type {
         AppType::Claude => config::get_claude_config_dir(),
+        AppType::ClaudeDesktop => {
+            crate::claude_desktop_config::config_library_path().map_err(|e| e.to_string())?
+        }
         AppType::Codex => codex_config::get_codex_config_dir(),
         AppType::Gemini => crate::gemini_config::get_gemini_dir(),
     };
 
     if !config_dir.exists() {
+        // Desktop 的目录是它自己建的。缺失说明没装过（或没启动过），替它建一个
+        // 空目录只会让用户以为配置已经就位。
+        if matches!(app_type, AppType::ClaudeDesktop) {
+            return Err(
+                "没找到 Claude Desktop 的配置目录。请先安装并至少启动一次 Claude Desktop。"
+                    .to_string(),
+            );
+        }
         std::fs::create_dir_all(&config_dir).map_err(|e| format!("创建目录失败: {e}"))?;
     }
 

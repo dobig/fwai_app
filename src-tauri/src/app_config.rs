@@ -11,6 +11,15 @@ use crate::provider::ProviderManager;
 #[serde(rename_all = "lowercase")]
 pub enum AppType {
     Claude,
+    /// Claude Desktop 的第三方推理网关（3P）配置。和 Claude Code 完全无关：
+    /// Desktop 不读 `~/.claude/settings.json`，只读自己的 profile，见
+    /// [`crate::claude_desktop_config`]。
+    #[serde(
+        rename = "claude-desktop",
+        alias = "claude_desktop",
+        alias = "claudeDesktop"
+    )]
+    ClaudeDesktop,
     Codex,
     Gemini,
 }
@@ -19,6 +28,7 @@ impl AppType {
     pub fn as_str(&self) -> &str {
         match self {
             AppType::Claude => "claude",
+            AppType::ClaudeDesktop => "claude-desktop",
             AppType::Codex => "codex",
             AppType::Gemini => "gemini",
         }
@@ -32,7 +42,13 @@ impl AppType {
 
     /// Return an iterator over all app types
     pub fn all() -> impl Iterator<Item = AppType> {
-        [AppType::Claude, AppType::Codex, AppType::Gemini].into_iter()
+        [
+            AppType::Claude,
+            AppType::ClaudeDesktop,
+            AppType::Codex,
+            AppType::Gemini,
+        ]
+        .into_iter()
     }
 }
 
@@ -43,12 +59,17 @@ impl FromStr for AppType {
         let normalized = s.trim().to_lowercase();
         match normalized.as_str() {
             "claude" => Ok(AppType::Claude),
+            "claude-desktop" | "claude_desktop" | "claudedesktop" => Ok(AppType::ClaudeDesktop),
             "codex" => Ok(AppType::Codex),
             "gemini" => Ok(AppType::Gemini),
             other => Err(AppError::localized(
                 "unsupported_app",
-                format!("不支持的应用标识: '{other}'。可选值: claude, codex, gemini。"),
-                format!("Unsupported app id: '{other}'. Allowed: claude, codex, gemini."),
+                format!(
+                    "不支持的应用标识: '{other}'。可选值: claude, claude-desktop, codex, gemini。"
+                ),
+                format!(
+                    "Unsupported app id: '{other}'. Allowed: claude, claude-desktop, codex, gemini."
+                ),
             )),
         }
     }
@@ -72,6 +93,9 @@ impl CommonConfigSnippets {
     pub fn get(&self, app: &AppType) -> Option<&String> {
         match app {
             AppType::Claude => self.claude.as_ref(),
+            // Desktop 的 profile 没有「通用配置片段」这回事：我们只独占 5 个
+            // 网关字段，其余键本来就原样保留，不需要再叠一层片段。
+            AppType::ClaudeDesktop => None,
             AppType::Codex => self.codex.as_ref(),
             AppType::Gemini => self.gemini.as_ref(),
         }
@@ -81,6 +105,7 @@ impl CommonConfigSnippets {
     pub fn set(&mut self, app: &AppType, snippet: Option<String>) {
         match app {
             AppType::Claude => self.claude = snippet,
+            AppType::ClaudeDesktop => {}
             AppType::Codex => self.codex = snippet,
             AppType::Gemini => self.gemini = snippet,
         }
@@ -238,7 +263,29 @@ mod tests {
         assert_eq!(AppType::from_str("Codex").unwrap(), AppType::Codex);
         assert_eq!(AppType::from_str(" gemini ").unwrap(), AppType::Gemini);
         assert!(AppType::from_str("opencode").is_err());
-        assert!(AppType::from_str("claude-desktop").is_err());
+        assert_eq!(
+            AppType::from_str("claude-desktop").unwrap(),
+            AppType::ClaudeDesktop
+        );
+        assert_eq!(
+            AppType::from_str("claude_desktop").unwrap(),
+            AppType::ClaudeDesktop
+        );
+    }
+
+    /// `as_str` 和 serde 必须给出同一个标识。
+    ///
+    /// 枚举上有 `rename_all = "lowercase"`，variant 上又单独 `rename`，写错了会让
+    /// 数据库里的 app_type（走 as_str）和序列化出去的值（走 serde）对不上，
+    /// 症状是供应商列表看起来是空的。
+    #[test]
+    fn serde_identifier_matches_as_str() {
+        for app in AppType::all() {
+            let json = serde_json::to_string(&app).expect("serialize");
+            assert_eq!(json, format!("\"{}\"", app.as_str()));
+            let back: AppType = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, app);
+        }
     }
 
     #[test]

@@ -64,13 +64,23 @@ pub struct TrayAppSection {
 pub const AUTO_SUFFIX: &str = "auto";
 pub const TRAY_ID: &str = "fwai-app";
 
-pub const TRAY_SECTIONS: [TrayAppSection; 3] = [
+pub const TRAY_SECTIONS: [TrayAppSection; 4] = [
     TrayAppSection {
         app_type: AppType::Claude,
         prefix: "claude_",
         empty_id: "claude_empty",
         header_label: "Claude",
         log_name: "Claude",
+    },
+    TrayAppSection {
+        // 刻意不叫 "claude_desktop_":`handle_provider_tray_event` 是按顺序
+        // `strip_prefix`,而 "claude_desktop_x" 会先被 "claude_" 削掉,点 Desktop
+        // 的条目会跑去切 Claude 的供应商。`prefixes_are_unambiguous` 守着这件事。
+        app_type: AppType::ClaudeDesktop,
+        prefix: "claudedesktop_",
+        empty_id: "claudedesktop_empty",
+        header_label: "Claude Desktop",
+        log_name: "Claude Desktop",
     },
     TrayAppSection {
         app_type: AppType::Codex,
@@ -367,10 +377,46 @@ pub fn schedule_tray_refresh(app: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::TRAY_ID;
+    use super::*;
 
     #[test]
     fn tray_id_is_unique_to_app() {
         assert_eq!(TRAY_ID, "fwai-app");
+    }
+
+    /// 分区前缀之间不能互为前缀。
+    ///
+    /// `handle_provider_tray_event` 按数组顺序 `strip_prefix`,第一个命中就返回。
+    /// 一旦某个前缀是另一个的前缀,后者的菜单点击会被前者吃掉,切错 app 的供应商。
+    #[test]
+    fn prefixes_are_unambiguous() {
+        for outer in TRAY_SECTIONS.iter() {
+            for inner in TRAY_SECTIONS.iter() {
+                if outer.app_type == inner.app_type {
+                    continue;
+                }
+                assert!(
+                    !inner.prefix.starts_with(outer.prefix),
+                    "{} 的前缀 \"{}\" 是 {} 的前缀 \"{}\" 的前缀,托盘点击会串台",
+                    inner.log_name,
+                    inner.prefix,
+                    outer.log_name,
+                    outer.prefix,
+                );
+            }
+        }
+    }
+
+    /// empty 占位项的 id 也要各自唯一,否则两个分区会抢同一个菜单项。
+    #[test]
+    fn empty_ids_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for section in TRAY_SECTIONS.iter() {
+            assert!(
+                seen.insert(section.empty_id),
+                "empty_id 重复: {}",
+                section.empty_id
+            );
+        }
     }
 }

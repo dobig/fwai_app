@@ -5,6 +5,7 @@ import { ProviderIcon } from "@/components/ProviderIcon";
 import type { SettingsFormState } from "@/hooks/useSettings";
 import type { VisibleApps } from "@/types";
 import type { AppId } from "@/lib/api";
+import { DEFAULT_VISIBLE_APPS } from "@/lib/apps";
 
 interface AppVisibilitySettingsProps {
   settings: SettingsFormState;
@@ -27,11 +28,7 @@ export function AppVisibilitySettings({
 }: AppVisibilitySettingsProps) {
   const { t } = useTranslation();
 
-  const visibleApps: VisibleApps = settings.visibleApps ?? {
-    claude: true,
-    codex: true,
-    gemini: true,
-  };
+  const visibleApps: VisibleApps = settings.visibleApps ?? DEFAULT_VISIBLE_APPS;
 
   // Count how many apps are currently visible
   const visibleCount = Object.values(visibleApps).filter(Boolean).length;

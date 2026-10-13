@@ -32,6 +32,7 @@ export function AppSwitcher({
   const iconSize = 20;
   const appIconName: Record<AppId, string> = {
     claude: "claude",
+    "claude-desktop": "claude",
     codex: "openai",
     gemini: "gemini",
   };
