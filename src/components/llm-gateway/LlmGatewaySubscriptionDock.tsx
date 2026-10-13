@@ -3,6 +3,10 @@ import { QRCodeSVG } from "qrcode.react";
 import { toast } from "sonner";
 import { GATEWAY_PROVIDER_ID } from "@/config/constants";
 import {
+  DEFAULT_DESKTOP_MODEL_ROWS,
+  rowsToMeta,
+} from "@/lib/claudeDesktopModels";
+import {
   ArrowLeft,
   ChevronDown,
   Eye,
@@ -578,6 +582,29 @@ export function LlmGatewaySubscriptionDock() {
   function buildGatewayProvider(app: ForwardableApp): Provider {
     const token = gatewayOAuthAccessToken();
     const base = getGatewayBaseURL().replace(/\/+$/, "");
+    if (app === "claude-desktop") {
+      // Desktop 读的是自己的 3P profile，但条目形状和 Claude 一样（env 里两个
+      // 键）。额外带一份模型清单：Desktop 的模型菜单按它渲染，留空的话菜单要靠
+      // Desktop 自己去读 /v1/models。只放 Claude 系——直连不改写模型名。
+      return {
+        id: GATEWAY_PROVIDER_ID,
+        name: "LLM Gateway",
+        category: "custom",
+        websiteUrl: base,
+        settingsConfig: {
+          env: {
+            ANTHROPIC_AUTH_TOKEN: token,
+            ANTHROPIC_BASE_URL: base,
+          },
+        },
+        meta: {
+          claudeDesktopMode: "direct",
+          claudeDesktopModelRoutes: rowsToMeta(DEFAULT_DESKTOP_MODEL_ROWS),
+        },
+        notes: `Endpoint: ${base}/v1/messages`,
+        createdAt: Date.now(),
+      };
+    }
     if (app === "claude") {
       return {
         id: GATEWAY_PROVIDER_ID,
@@ -665,40 +692,18 @@ requires_openai_auth = true`,
     }
   }
 
-  /// token 刷新后把新凭据落到 Claude Desktop 的条目上。
+  /// token 刷新后同步网关条目。
   ///
-  /// Desktop 只在启动时读 profile，所以陈旧的 Key 要用户重启一次才会被换掉。
-  /// 这里先把条目和 profile 写对，重启提示由切换/编辑那条路径负责。
-  ///
-  /// 只在条目已经存在时更新，不替用户创建：Desktop 还没有当前供应商时，后端的
-  /// `add` 会顺手把新条目设成当前并写 live——那是另一条路径的问题，不该在这里
-  /// 触发。用户要用网关就自己在 Desktop 页点「添加」，表单会预填凭据。
-  ///
-  /// 保留原条目的 meta：模型清单存在那里，整份替换会把用户的勾选抹掉。
-  async function syncDesktopGatewayEntry(): Promise<void> {
-    try {
-      const providers = await providersApi.getAll("claude-desktop");
-      const existing = providers[GATEWAY_PROVIDER_ID];
-      if (!existing) return;
-
-      const token = gatewayOAuthAccessToken();
-      if (!token) return;
-      const base = getGatewayBaseURL().replace(/\/+$/, "");
-
-      await providersApi.update(
-        {
-          ...existing,
-          settingsConfig: {
-            ...(typeof existing.settingsConfig === "object"
-              ? existing.settingsConfig
-              : {}),
-            env: { ANTHROPIC_BASE_URL: base, ANTHROPIC_AUTH_TOKEN: token },
-          },
-        },
-        "claude-desktop",
-      );
-    } catch {
-      // best-effort：读不到或写不动就等下一次刷新
+  /// 除了当前选中的那个 app，还要点名同步 Claude Desktop：它的转发可以在用户停留
+  /// 在 Claude 页时开着，而 Desktop 只在启动时读 profile，陈旧的 Key 会一直 401。
+  /// `syncGatewayProviderEntry` 对没有条目或没开转发的 app 自己会早退，白调不要钱。
+  async function syncGatewayEntries(
+    active: ForwardableApp | null,
+  ): Promise<void> {
+    const apps = new Set<ForwardableApp>(["claude-desktop"]);
+    if (active) apps.add(active);
+    for (const app of apps) {
+      await syncGatewayProviderEntry(app);
     }
   }
 
@@ -827,11 +832,7 @@ requires_openai_auth = true`,
   async function handleToggleForwarding() {
     if (fwdBusy) return;
     if (!target) {
-      toast.info(
-        activeApp === "claude-desktop"
-          ? "Claude Desktop 到它自己的页里启用 LLM Gateway"
-          : `${activeAppName} 暂不支持转发`,
-      );
+      toast.info(`${activeAppName} 暂不支持转发`);
       return;
     }
     if (forwarding) {
@@ -914,9 +915,8 @@ requires_openai_auth = true`,
     // 规则 1 + 凭据就绪：确保条目在列表里，并把最新 token 写进条目数据。
     if (target) {
       await ensureGatewayProviderListed(target);
-      await syncGatewayProviderEntry(target);
     }
-    await syncDesktopGatewayEntry();
+    await syncGatewayEntries(target);
     toast.success(justRegistered ? "注册成功，请验证邮箱" : "登录成功");
   }
 
@@ -1231,8 +1231,7 @@ requires_openai_auth = true`,
       await refreshGatewayToken();
       // 刷新即轮换，旧 token 全部作废。用标准 update 同步条目：live 仅在
       // 该条目正被启用时随之更新（转发 + 启用的合取由列表守卫保证）。
-      if (target) await syncGatewayProviderEntry(target);
-      await syncDesktopGatewayEntry();
+      await syncGatewayEntries(target);
       toast.success("Auth Token 已刷新");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "刷新失败");
@@ -1994,27 +1993,17 @@ requires_openai_auth = true`,
                 <Plug className="h-4 w-4" />
               )}
               {!target
-                ? activeApp === "claude-desktop"
-                  ? "Claude Desktop 在它自己的页里启用"
-                  : `${activeAppName} 暂不支持转发`
+                ? `${activeAppName} 暂不支持转发`
                 : forwarding
                   ? `结束转发（${activeAppName}）`
                   : `开启转发（${activeAppName}）`}
             </button>
-            {target ? (
-              // 说清楚作用范围：用户要能确信别的 CLI 没被碰过。
+            {activeApp === "claude-desktop" && (
+              // Desktop 只在启动时读 profile，不说这句用户会以为开关没生效。
               <p className="mt-1.5 text-center text-xs text-muted-foreground">
-                只改 {activeAppName} 的配置，其它 CLI 不受影响
+                需要重启 Claude Desktop 才生效（macOS 上按 ⌘Q 彻底退出）
               </p>
-            ) : activeApp === "claude-desktop" ? (
-              // Desktop 确实支持走网关，只是不经这个开关：它写的是 Desktop 自己的
-              // 3P profile，入口在它那一页的供应商列表里。这里不说清楚，用户会以为
-              // 功能没做。
-              <p className="mt-1.5 text-center text-xs text-muted-foreground">
-                到「Claude Desktop」页启用 LLM Gateway 即可；改完需要重启 Claude
-                Desktop
-              </p>
-            ) : null}
+            )}
 
             {/* 版本过旧提示。挡的只有购买 —— 上面的转发开关照常可用，说清楚
                 这一点，不然人会以为整个客户端废了。 */}

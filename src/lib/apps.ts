@@ -13,11 +13,11 @@ export const ALL_APPS: AppId[] = [
 /// Gemini 不在里面：后端的 capture_live/apply_live 对它是空操作，网关也不提供
 /// Gemini 的上游。
 ///
-/// Claude Desktop 也不在里面，但原因不同：它走的是标准切换路径（把供应商写进
-/// Desktop 自己的 3P profile）。转发那套「备份两个字段再覆盖」是为了保住用户在
-/// live 文件里的其它修改，而 profile 的写入本来就只动我们独占的那几个键。
-/// Desktop 的 token 跟随见 `syncDesktopGatewayEntry`。
-export const FORWARDABLE_APPS = ["claude", "codex"] as const;
+/// Claude Desktop 在里面。它的「live」是 Desktop 自己的 3P profile 而不是某个
+/// settings.json，但对用户来说没有区别：面板上一个开关，接上或撤掉。还原时按
+/// 动手前的快照（deploymentMode / appliedId）回滚，所以本来就在用 3P 的人不会
+/// 被按回官方登录。
+export const FORWARDABLE_APPS = ["claude", "claude-desktop", "codex"] as const;
 
 export type ForwardableApp = (typeof FORWARDABLE_APPS)[number];
 

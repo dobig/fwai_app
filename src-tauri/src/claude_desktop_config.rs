@@ -22,7 +22,7 @@
 //! 2. Desktop 只在启动时读 profile。改完必须让用户重启 Desktop(macOS 上要 ⌘Q
 //!    彻底退出,只关窗口不算)。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
@@ -463,6 +463,16 @@ fn backup_once(path: &Path, backup_dir: &Path) -> Result<(), AppError> {
     crate::config::copy_file(path, &target)
 }
 
+/// `None` 表示原本没有这个键：删掉，而不是写一个我们编的值。
+fn apply_deployment_mode(map: &mut Map<String, Value>, mode: Option<&str>) {
+    match mode {
+        Some(mode) => set_deployment_mode(map, mode),
+        None => {
+            map.shift_remove("deploymentMode");
+        }
+    }
+}
+
 fn set_deployment_mode(map: &mut Map<String, Value>, mode: &str) {
     match map.get_mut("deploymentMode") {
         Some(slot) => *slot = json!(mode),
@@ -627,8 +637,20 @@ fn set_private_permissions(_path: &Path) -> Result<(), AppError> {
 
 /// 把一个供应商写成 Desktop 的生效配置。
 pub fn apply_provider(provider: &Provider) -> Result<(), AppError> {
+    let credentials = gateway_credentials(provider)?;
+    apply_with_credentials(provider, &credentials)
+}
+
+/// 用指定凭据写 Desktop 配置，模型清单仍取自条目。
+///
+/// 转发路径走这个:endpoint + key 由网关面板给(可能刚轮换过,比条目里存的新),
+/// 而用户勾的模型档位只存在条目的 meta 里。两边各取所需。
+pub fn apply_with_credentials(
+    provider: &Provider,
+    credentials: &GatewayCredentials,
+) -> Result<(), AppError> {
     let paths = current_paths()?;
-    apply_provider_to_paths(provider, &paths, &default_backup_dir())
+    apply_provider_to_paths(provider, credentials, &paths, &default_backup_dir())
 }
 
 fn default_backup_dir() -> PathBuf {
@@ -637,6 +659,7 @@ fn default_backup_dir() -> PathBuf {
 
 fn apply_provider_to_paths(
     provider: &Provider,
+    credentials: &GatewayCredentials,
     paths: &DesktopPaths,
     backup_dir: &Path,
 ) -> Result<(), AppError> {
@@ -645,9 +668,8 @@ fn apply_provider_to_paths(
     }
     validate_provider(provider)?;
 
-    let credentials = gateway_credentials(provider)?;
     let models = inference_model_specs(provider)?;
-    let fields = build_profile_fields(&credentials, &models);
+    let fields = build_profile_fields(credentials, &models);
 
     let mut normal = read_object(&paths.normal_config)?;
     set_deployment_mode(&mut normal, "3p");
@@ -684,6 +706,58 @@ fn apply_provider_to_paths(
     )
 }
 
+/// 动手之前的 Desktop 状态,交给转发的备份机制保存。
+///
+/// 为什么需要它:直接写 `1p` 是错的。用户完全可能本来就在 3P 模式、用着自己的
+/// profile(Desktop 的 configLibrary 本来就支持多份),那种情况下「还原」应该回到
+/// 他原来的值,而不是被我们按成 1P。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopSnapshot {
+    /// 两个 `claude_desktop_config.json` 的 `deploymentMode` 原值。
+    /// `None` 表示原本没有这个键——还原时应当删掉,而不是写一个我们编的值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_deployment_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threep_deployment_mode: Option<String>,
+    /// `_meta.json` 原来的 `appliedId`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_id: Option<String>,
+}
+
+/// 采集动手前的状态。Desktop 没装时返回空快照(还原时就什么都不做)。
+pub fn capture_snapshot() -> Result<DesktopSnapshot, AppError> {
+    let paths = current_paths()?;
+    if !paths.normal_dir.is_dir() {
+        return Ok(DesktopSnapshot::default());
+    }
+    capture_snapshot_at_paths(&paths)
+}
+
+fn capture_snapshot_at_paths(paths: &DesktopPaths) -> Result<DesktopSnapshot, AppError> {
+    let read_mode = |path: &Path| -> Result<Option<String>, AppError> {
+        Ok(read_object(path)?
+            .get("deploymentMode")
+            .and_then(Value::as_str)
+            .map(str::to_string))
+    };
+    Ok(DesktopSnapshot {
+        normal_deployment_mode: read_mode(&paths.normal_config)?,
+        threep_deployment_mode: read_mode(&paths.threep_config)?,
+        applied_id: read_object(&paths.meta)?
+            .get("appliedId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+/// 按快照还原:`deploymentMode` 回到原值(原本没有就删掉),摘掉我们的 profile 条目,
+/// `appliedId` 回到原来指的那个,profile 文件保留、只清我们独占的字段。
+pub fn restore_snapshot(snapshot: &DesktopSnapshot) -> Result<(), AppError> {
+    let paths = current_paths()?;
+    restore_at_paths(&paths, Some(snapshot), &default_backup_dir())
+}
+
 /// 交还给 Desktop 自己的 1P 登录。
 ///
 /// profile 文件保留、只清我们独占的字段:用户在 Desktop 里对这个 profile 改过的
@@ -695,15 +769,30 @@ pub fn restore_official() -> Result<(), AppError> {
 }
 
 fn restore_official_at_paths(paths: &DesktopPaths, backup_dir: &Path) -> Result<(), AppError> {
+    restore_at_paths(paths, None, backup_dir)
+}
+
+/// `snapshot` 为 `None` 时按 1P 兜底——没有动手前的记录可依据（删除条目那条路径）。
+fn restore_at_paths(
+    paths: &DesktopPaths,
+    snapshot: Option<&DesktopSnapshot>,
+    backup_dir: &Path,
+) -> Result<(), AppError> {
     // 没装过就没什么可还原的。不要在这里把目录建出来。
     if !paths.normal_dir.is_dir() {
         return Ok(());
     }
 
     let mut normal = read_object(&paths.normal_config)?;
-    set_deployment_mode(&mut normal, "1p");
+    apply_deployment_mode(
+        &mut normal,
+        snapshot.map_or(Some("1p"), |s| s.normal_deployment_mode.as_deref()),
+    );
     let mut threep = read_object(&paths.threep_config)?;
-    set_deployment_mode(&mut threep, "1p");
+    apply_deployment_mode(
+        &mut threep,
+        snapshot.map_or(Some("1p"), |s| s.threep_deployment_mode.as_deref()),
+    );
     // 旧版本把网关设置写进了 enterpriseConfig,一并清掉;清空了就把这个壳也去掉。
     if let Some(Value::Object(enterprise)) = threep.get_mut("enterpriseConfig") {
         for key in LEGACY_ENTERPRISE_GATEWAY_KEYS {
@@ -715,6 +804,13 @@ fn restore_official_at_paths(paths: &DesktopPaths, backup_dir: &Path) -> Result<
     }
     let mut meta = read_object(&paths.meta)?;
     unapply_meta(&mut meta)?;
+    // 快照里记着动手前 appliedId 指的是谁，优先还原成那个（它可能是用户自己的
+    // profile，unapply_meta 只会退到「列表里随便下一个」）。
+    if let Some(prior) = snapshot.and_then(|s| s.applied_id.as_deref()) {
+        if prior != PROFILE_ID {
+            meta.insert("appliedId".to_string(), json!(prior));
+        }
+    }
 
     let mut writes = vec![
         PendingWrite {
@@ -904,6 +1000,12 @@ mod tests {
         std::fs::create_dir_all(&paths.normal_dir).expect("normal dir");
         std::fs::create_dir_all(&paths.config_library).expect("config library");
         paths
+    }
+
+    /// 测试里按条目自带的凭据写入（等价于直接切换那条路径）。
+    fn apply(provider: &Provider, paths: &DesktopPaths, backup_dir: &Path) -> Result<(), AppError> {
+        let credentials = gateway_credentials(provider)?;
+        apply_provider_to_paths(provider, &credentials, paths, backup_dir)
     }
 
     fn read(path: &Path) -> Value {
@@ -1266,7 +1368,7 @@ mod tests {
         let paths = installed_paths(temp.path());
         let provider = provider_with(&[("claude-sonnet-5", true), ("claude-opus-5", false)]);
 
-        apply_provider_to_paths(&provider, &paths, &backups).expect("apply");
+        apply(&provider, &paths, &backups).expect("apply");
 
         assert_eq!(read(&paths.normal_config)["deploymentMode"], json!("3p"));
         assert_eq!(read(&paths.threep_config)["deploymentMode"], json!("3p"));
@@ -1296,8 +1398,8 @@ mod tests {
         let paths = paths_from_dirs(temp.path().join("Claude"), temp.path().join("Claude-3p"));
         let provider = provider_with(&[("claude-sonnet-5", false)]);
 
-        let err = apply_provider_to_paths(&provider, &paths, &temp.path().join("backups"))
-            .expect_err("should refuse");
+        let err =
+            apply(&provider, &paths, &temp.path().join("backups")).expect_err("should refuse");
         assert!(err.to_string().contains("Claude Desktop"), "{err}");
         // 最重要的是别在用户机器上凭空造出目录
         assert!(!paths.config_library.exists());
@@ -1319,7 +1421,7 @@ mod tests {
         )
         .expect("seed");
 
-        apply_provider_to_paths(
+        apply(
             &provider_with(&[("claude-sonnet-5", false)]),
             &paths,
             &temp.path().join("backups"),
@@ -1345,7 +1447,7 @@ mod tests {
         )
         .expect("seed");
 
-        apply_provider_to_paths(
+        apply(
             &provider_with(&[("claude-sonnet-5", false)]),
             &paths,
             &temp.path().join("backups"),
@@ -1366,8 +1468,8 @@ mod tests {
         std::fs::write(&paths.normal_config, r#"{"deploymentMode":"1p"}"#).expect("seed");
 
         let provider = provider_with(&[("claude-sonnet-5", false)]);
-        apply_provider_to_paths(&provider, &paths, &backups).expect("first apply");
-        apply_provider_to_paths(&provider, &paths, &backups).expect("second apply");
+        apply(&provider, &paths, &backups).expect("first apply");
+        apply(&provider, &paths, &backups).expect("second apply");
 
         // 备份留的始终是我们没碰过之前那一份，第二次写入不该把它覆盖成 3p
         let backup = backups.join("claude-desktop.Claude.claude_desktop_config.json");
@@ -1384,7 +1486,7 @@ mod tests {
         let backups = temp.path().join("backups");
         let paths = installed_paths(temp.path());
         let provider = provider_with(&[("claude-sonnet-5", false)]);
-        apply_provider_to_paths(&provider, &paths, &backups).expect("apply");
+        apply(&provider, &paths, &backups).expect("apply");
 
         restore_official_at_paths(&paths, &backups).expect("restore");
 
@@ -1457,6 +1559,113 @@ mod tests {
         assert_eq!(threep["enterpriseConfig"], json!({ "someOrgPolicy": true }));
     }
 
+    // ---- 动手前快照 ----------------------------------------------------
+
+    #[test]
+    fn snapshot_records_the_prior_deployment_mode_and_applied_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = installed_paths(temp.path());
+        std::fs::write(&paths.normal_config, r#"{"deploymentMode":"3p"}"#).expect("seed");
+        std::fs::write(
+            &paths.meta,
+            r#"{"entries":[{"id":"theirs","name":"Theirs"}],"appliedId":"theirs"}"#,
+        )
+        .expect("seed");
+
+        let snapshot = capture_snapshot_at_paths(&paths).expect("capture");
+        assert_eq!(snapshot.normal_deployment_mode.as_deref(), Some("3p"));
+        // 这个文件还不存在，原本就没有这个键
+        assert_eq!(snapshot.threep_deployment_mode, None);
+        assert_eq!(snapshot.applied_id.as_deref(), Some("theirs"));
+    }
+
+    /// 一个本来就在用 3P、还配着自己 profile 的用户，开关一轮之后必须回到原样。
+    ///
+    /// 这是 restore 不能硬写 `1p` 的理由：那会把他从 3P 模式踢回官方登录，
+    /// 而他的 profile 还在 configLibrary 里躺着。
+    #[test]
+    fn a_user_already_on_3p_is_returned_to_their_own_profile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let backups = temp.path().join("backups");
+        let paths = installed_paths(temp.path());
+        std::fs::write(&paths.normal_config, r#"{"deploymentMode":"3p"}"#).expect("seed");
+        std::fs::write(&paths.threep_config, r#"{"deploymentMode":"3p"}"#).expect("seed");
+        std::fs::write(
+            &paths.meta,
+            r#"{"entries":[{"id":"theirs","name":"Theirs"}],"appliedId":"theirs"}"#,
+        )
+        .expect("seed");
+
+        let snapshot = capture_snapshot_at_paths(&paths).expect("capture");
+        apply(
+            &provider_with(&[("claude-sonnet-5", false)]),
+            &paths,
+            &backups,
+        )
+        .expect("apply");
+        // 我们接管期间 appliedId 指向我们
+        assert_eq!(read(&paths.meta)["appliedId"], json!(PROFILE_ID));
+
+        restore_at_paths(&paths, Some(&snapshot), &backups).expect("restore");
+
+        // 回到他原来的模式和 profile，而不是被按成 1p
+        assert_eq!(read(&paths.normal_config)["deploymentMode"], json!("3p"));
+        assert_eq!(read(&paths.threep_config)["deploymentMode"], json!("3p"));
+        assert_eq!(read(&paths.meta)["appliedId"], json!("theirs"));
+        let entries = read(&paths.meta)["entries"].as_array().unwrap().clone();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["id"], json!("theirs"));
+    }
+
+    #[test]
+    fn restore_removes_the_key_when_it_was_absent_before() {
+        // 原本没有 deploymentMode（全新安装的 Desktop）：还原时该删掉，
+        // 而不是替用户写一个他从没设过的 1p。
+        let temp = tempfile::tempdir().expect("tempdir");
+        let backups = temp.path().join("backups");
+        let paths = installed_paths(temp.path());
+        std::fs::write(&paths.normal_config, r#"{"preferences":{"locale":"zh"}}"#).expect("seed");
+
+        let snapshot = capture_snapshot_at_paths(&paths).expect("capture");
+        assert_eq!(snapshot.normal_deployment_mode, None);
+
+        apply(&provider_with(&[]), &paths, &backups).expect("apply");
+        assert_eq!(read(&paths.normal_config)["deploymentMode"], json!("3p"));
+
+        restore_at_paths(&paths, Some(&snapshot), &backups).expect("restore");
+
+        let normal = read(&paths.normal_config);
+        assert!(
+            !normal.as_object().unwrap().contains_key("deploymentMode"),
+            "原本没有这个键，还原后不该凭空出现: {normal}"
+        );
+        // 用户自己的键照旧
+        assert_eq!(normal["preferences"]["locale"], json!("zh"));
+    }
+
+    #[test]
+    fn restore_without_a_snapshot_falls_back_to_1p() {
+        // 删除条目那条路径没有动手前的记录可依据，兜底交还官方。
+        let temp = tempfile::tempdir().expect("tempdir");
+        let backups = temp.path().join("backups");
+        let paths = installed_paths(temp.path());
+        apply(&provider_with(&[]), &paths, &backups).expect("apply");
+
+        restore_at_paths(&paths, None, &backups).expect("restore");
+
+        assert_eq!(read(&paths.normal_config)["deploymentMode"], json!("1p"));
+    }
+
+    #[test]
+    fn snapshot_is_empty_when_desktop_is_not_installed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = paths_from_dirs(temp.path().join("Claude"), temp.path().join("Claude-3p"));
+        // 没装过时不该去读（也读不到）任何东西，更不该建目录
+        let snapshot = capture_snapshot_at_paths(&paths).expect("capture");
+        assert_eq!(snapshot, DesktopSnapshot::default());
+        assert!(!paths.config_library.exists());
+    }
+
     #[test]
     fn restore_is_a_noop_when_desktop_is_not_installed() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1473,7 +1682,7 @@ mod tests {
         let paths = installed_paths(temp.path());
         std::fs::write(&paths.normal_config, "{ this is not json").expect("seed");
 
-        let err = apply_provider_to_paths(
+        let err = apply(
             &provider_with(&[("claude-sonnet-5", false)]),
             &paths,
             &temp.path().join("backups"),
@@ -1490,8 +1699,7 @@ mod tests {
         let paths = installed_paths(temp.path());
         let provider = provider_with(&[("gpt-5.6", false)]);
 
-        apply_provider_to_paths(&provider, &paths, &temp.path().join("backups"))
-            .expect_err("should reject");
+        apply(&provider, &paths, &temp.path().join("backups")).expect_err("should reject");
         // 校验不过就一个文件都不碰——写一半会让 Desktop 的模型菜单整个空掉
         assert!(!paths.profile.exists());
         assert!(!paths.normal_config.exists());
@@ -1503,7 +1711,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().expect("tempdir");
         let paths = installed_paths(temp.path());
-        apply_provider_to_paths(
+        apply(
             &provider_with(&[("claude-sonnet-5", false)]),
             &paths,
             &temp.path().join("backups"),
@@ -1523,7 +1731,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let backups = temp.path().join("backups");
         let paths = installed_paths(temp.path());
-        apply_provider_to_paths(&provider_with(&[]), &paths, &backups).expect("apply");
+        apply(&provider_with(&[]), &paths, &backups).expect("apply");
 
         // 删的是个 key 不同的旧条目：它不是当前生效的那家，不该动 Desktop 的配置
         let mut other = provider_with(&[]);
@@ -1542,7 +1750,7 @@ mod tests {
         let backups = temp.path().join("backups");
         let paths = installed_paths(temp.path());
         let provider = provider_with(&[]);
-        apply_provider_to_paths(&provider, &paths, &backups).expect("apply");
+        apply(&provider, &paths, &backups).expect("apply");
 
         restore_official_if_matches_at_paths(&provider, &paths, &backups).expect("restore");
 

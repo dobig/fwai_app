@@ -2346,20 +2346,26 @@ describe("LlmGatewaySubscriptionDock 加量包规则", () => {
   });
 });
 
-describe("LlmGatewaySubscriptionDock Claude Desktop 页", () => {
-  // Desktop 不在 FORWARDABLE_APPS 里，但它**支持**走网关——只是不经这个开关
-  // （它写的是 Desktop 自己的 3P profile，入口在那一页的供应商列表）。
-  // 原来的 `!target` 分支会一律显示「暂不支持转发」，等于告诉用户功能没做。
-  it("不说「暂不支持转发」，而是指向 Claude Desktop 页", async () => {
+describe("LlmGatewaySubscriptionDock Claude Desktop", () => {
+  it("和 Claude / Codex 一样是一个转发开关", async () => {
+    // Desktop 的「live」是它自己的 3P profile 而不是 settings.json，但对用户来说
+    // 没区别：面板上一个开关。早先把它排除出 FORWARDABLE_APPS，面板就只会显示
+    // 「暂不支持转发」，等于告诉用户功能没做。
     seedActivePlan();
     renderDock("claude-desktop");
 
     expect(
-      await screen.findByText("Claude Desktop 在它自己的页里启用"),
+      await screen.findByText(/^开启转发（Claude Desktop）/),
     ).toBeInTheDocument();
     expect(screen.queryByText(/暂不支持转发/)).toBeNull();
+  });
+
+  it("提示要重启 Desktop 才生效", async () => {
+    // Desktop 只在启动时读 profile，不说这句用户会以为开关没生效。
+    seedActivePlan();
+    renderDock("claude-desktop");
     expect(
-      screen.getByText(/到「Claude Desktop」页启用 LLM Gateway/),
+      await screen.findByText(/需要重启 Claude Desktop 才生效/),
     ).toBeInTheDocument();
   });
 
@@ -2367,5 +2373,13 @@ describe("LlmGatewaySubscriptionDock Claude Desktop 页", () => {
     seedActivePlan();
     renderDock("gemini");
     expect(await screen.findByText(/暂不支持转发/)).toBeInTheDocument();
+  });
+
+  it("不再有「只改 X 的配置」那行", async () => {
+    // 每个 tab 下面那句说明已按要求去掉。
+    seedActivePlan();
+    renderDock("claude");
+    await screen.findByText(/^开启转发（Claude Code）/);
+    expect(screen.queryByText(/其它 CLI 不受影响/)).toBeNull();
   });
 });

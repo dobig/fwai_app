@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 import { providersApi, settingsApi, type AppId } from "@/lib/api";
 import { forwardingFlagKey } from "@/lib/apps";
 import { GATEWAY_PROVIDER_ID } from "@/config/constants";
-import { gatewayOAuthAccessToken } from "@/lib/api/llm-gateway";
 import type { Provider } from "@/types";
 import {
   useAddProviderMutation,
@@ -90,30 +89,16 @@ export function useProviderActions(activeApp: AppId) {
       // 还顺带修掉「用户已经手动切走、备份早已作废，标志却还留着」那个洞——那
       // 时候放行等于触发一次整份写盘。
       if (provider.id === GATEWAY_PROVIDER_ID) {
-        if (activeApp === "claude-desktop") {
-          // Desktop 不走转发（见 FORWARDABLE_APPS 的注释）：在它自己的列表里启用
-          // 这个条目，本身就是用户的明确动作，不需要再要求「先开转发」——那个开关
-          // 对 Desktop 根本不存在，照搬只会让这里永远点不动。
-          //
-          // 但没登录就没有有效 token，写进 profile 只会让 Desktop 一直 401；
-          // 而 Desktop 只在启动时读配置，用户要重启一次才看得到结果，那种失败
-          // 很难自己诊断，所以在这里挡住。
-          if (!gatewayOAuthAccessToken()) {
-            toast.info("请先在 LLM Gateway 面板登录，再启用该供应商");
-            return;
-          }
-        } else {
-          let forwardingOn: boolean;
-          try {
-            forwardingOn = await providersApi.isForwarding(activeApp);
-          } catch {
-            forwardingOn =
-              localStorage.getItem(forwardingFlagKey(activeApp)) === "1";
-          }
-          if (!forwardingOn) {
-            toast.info("请先在 LLM Gateway 面板登录并开启转发，再启用该供应商");
-            return;
-          }
+        let forwardingOn: boolean;
+        try {
+          forwardingOn = await providersApi.isForwarding(activeApp);
+        } catch {
+          forwardingOn =
+            localStorage.getItem(forwardingFlagKey(activeApp)) === "1";
+        }
+        if (!forwardingOn) {
+          toast.info("请先在 LLM Gateway 面板登录并开启转发，再启用该供应商");
+          return;
         }
       }
       try {
