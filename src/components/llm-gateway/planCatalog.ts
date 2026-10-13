@@ -4,7 +4,8 @@
 // 这里**没有任何付款金额的计算**。实付金额一律来自服务端的报价（见
 // fetchPlanQuote），本文件只负责「这个档位叫什么」「这个数字怎么显示」。
 
-// Plans mirror the gateway seed SKUs, named by their monthly price. The 5h /
+// Plans mirror the gateway seed SKUs, named by their monthly price. **价格本身
+// 不在这里** —— 档位卡片上的金额取 GET /v1/plans 的 price_usd_micros。The 5h /
 // weekly quota windows shown here mirror the server derivation (default 1×/5×
 // of price; business overrides with 2×/10×) — the server stays authoritative.
 //
@@ -14,7 +15,6 @@
 export interface PlanTier {
   id: string;
   label: string;
-  priceUSD: number;
   usage5hUSD: number;
   usageWeekUSD: number;
 }
@@ -23,21 +23,18 @@ export const TIERS: PlanTier[] = [
   {
     id: "starter",
     label: "$20",
-    priceUSD: 20,
     usage5hUSD: 20,
     usageWeekUSD: 100,
   },
   {
     id: "pro",
     label: "$100",
-    priceUSD: 100,
     usage5hUSD: 100,
     usageWeekUSD: 500,
   },
   {
     id: "business",
     label: "$200",
-    priceUSD: 200,
     usage5hUSD: 400,
     usageWeekUSD: 2000,
   },

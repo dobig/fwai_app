@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   createPlanOrder,
+  fetchPlanCatalog,
   fetchPlanQuote,
   isPlanQuoteUnsupported,
   planRole,
@@ -107,16 +108,25 @@ describe("fetchPlanQuote", () => {
     expect(requestBody()).toEqual({ period: "3m" });
   });
 
-  it("自选档带上 price_usd，加量包带上 as_extra", async () => {
+  it("加量包带上 units 和 as_extra，不发 price_usd", async () => {
     mockFetchOnce(200, quoteBody("extra"));
 
-    await fetchPlanQuote("custom", "1w", 30, true);
+    await fetchPlanQuote("extra", "1w", 3, true);
 
+    // 客户端不再把单位数折成金额：价格是服务端算的。
     expect(requestBody()).toEqual({
       period: "1w",
-      price_usd: 30,
+      units: 3,
       as_extra: true,
     });
+  });
+
+  it("订阅层即使传了 units 也不发", async () => {
+    mockFetchOnce(200, quoteBody("activate_now"));
+
+    await fetchPlanQuote("pro", "1m", 3, false);
+
+    expect(requestBody()).toEqual({ period: "1m" });
   });
 
   it("as_extra=false 时不发这个字段", async () => {
@@ -232,5 +242,49 @@ describe("planRole", () => {
   it("显式的两种角色原样返回", () => {
     expect(planRole(plan("subscription"))).toBe("subscription");
     expect(planRole(plan("extra"))).toBe("extra");
+  });
+});
+
+describe("fetchPlanCatalog", () => {
+  it("读 GET /v1/plans，价格原样返回", async () => {
+    const body = {
+      plans: [
+        {
+          id: "pro",
+          name: "Pro",
+          price_usd_micros: 100_000_000,
+          prices: [
+            {
+              period: "6m",
+              charge_micros: 570_000_000,
+              list_micros: 600_000_000,
+              savings_micros: 30_000_000,
+              per_unit_micros: 95_000_000,
+              per_unit: "month",
+            },
+          ],
+        },
+      ],
+      periods: [],
+      extra: { unit_price_micros: 20_000_000, max_units: 99, prices: [] },
+    };
+    mockFetchOnce(200, body);
+
+    const catalog = await fetchPlanCatalog();
+
+    expect(captured[0].url).toBe("https://gw.test/v1/plans");
+    expect(captured[0].init.method).toBe("GET");
+    expect(catalog).toEqual(body);
+  });
+
+  it("老网关没有成品价时抛错，不让调用方退回本地算价", async () => {
+    // 老网关的 /v1/plans 只有月价和折扣率。拿那份数据去乘就又回到了客户端
+    // 算钱，所以直接当成拿不到目录。
+    mockFetchOnce(200, {
+      plans: [{ id: "pro", name: "Pro", price_usd_micros: 100_000_000 }],
+      periods: [],
+    });
+
+    await expect(fetchPlanCatalog()).rejects.toThrow();
   });
 });

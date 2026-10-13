@@ -538,6 +538,83 @@ export async function getPaymentOrder(
 
 // --- 套餐换档 ---------------------------------------------------------------
 
+// GET /v1/plans 里某个周期的价格。**全部是服务端算好的成品价**，客户端只
+// 负责显示，不做任何加减乘除 —— 本地留一份折扣表去乘的话，服务端一调价
+// 两边就对不上（6 个月到底是 9 折还是 95 折这种问题就是这么来的）。
+//   charge_micros    整个周期要付多少（已打折）
+//   list_micros      同一周期不打折的原价
+//   savings_micros   省了多少，0 表示这一档没有折扣
+//   per_unit_micros  折到每月 / 每周（per_unit）是多少
+export interface GatewayPeriodPrice {
+  period: string;
+  charge_micros: number;
+  list_micros: number;
+  savings_micros: number;
+  per_unit_micros: number;
+  per_unit: "month" | "week";
+}
+
+export interface GatewayCatalogPlan {
+  id: string;
+  name: string;
+  price_usd_micros: number;
+  // 这一档卖的周期，按服务端顺序。不含只卖给加量包的周付档。
+  prices: GatewayPeriodPrice[];
+}
+
+export interface GatewayCatalogPeriod {
+  key: string;
+  days: number;
+  // 只用来画「9折」角标，不拿来算价。
+  discount_bps: number;
+  extra_only: boolean;
+}
+
+export interface GatewayPlanCatalog {
+  plans: GatewayCatalogPlan[];
+  periods: GatewayCatalogPeriod[];
+  extra: {
+    unit_price_micros: number;
+    max_units: number;
+    // **一个单位**的各周期价格。N 单位的实付以结账页的 quote 为准。
+    prices: GatewayPeriodPrice[];
+  };
+}
+
+// fetchPlanCatalog 读购买屏要显示的全部价格。老网关的 /v1/plans 没有 prices /
+// extra 字段，这里当成拿不到目录抛错 —— 宁可让购买屏显示「加载失败」，也不
+// 在本地补算一份可能和扣款对不上的价格。
+export async function fetchPlanCatalog(): Promise<GatewayPlanCatalog> {
+  const catalog = await gatewayRequest<GatewayPlanCatalog>(
+    "/v1/plans",
+    { method: "GET" },
+    true,
+  );
+  if (!catalog?.extra || catalog.plans.some((p) => !Array.isArray(p.prices))) {
+    throw new Error("服务端版本过旧，无法获取价格");
+  }
+  return catalog;
+}
+
+// 报价和下单共用的请求体。两边必须一模一样，否则结账页报的价和实际扣的
+// 就可能不是同一单。
+function purchaseBody(
+  period: string,
+  units: number | undefined,
+  asExtra: boolean,
+): { period: string; units?: number; as_extra?: boolean } {
+  const body: { period: string; units?: number; as_extra?: boolean } = {
+    period,
+  };
+  if (asExtra) {
+    body.as_extra = true;
+    if (units !== undefined) {
+      body.units = units;
+    }
+  }
+  return body;
+}
+
 // 服务端算出来的一次换档结果。四种 action 的语义：
 //   upgrade_now  低档 → 高档，立即生效，旧档剩余价值按天折成金额抵扣
 //   renew        买的是当前正在生效的同一个档 → 就地延长现有 grant 的到期日,
@@ -578,18 +655,10 @@ export interface GatewayPlanQuote {
 export async function fetchPlanQuote(
   planId: string,
   period = "1m",
-  priceUSD?: number,
+  units?: number,
   asExtra = false,
 ): Promise<GatewayPlanQuote> {
-  const body: { period: string; price_usd?: number; as_extra?: boolean } = {
-    period,
-  };
-  if (priceUSD !== undefined) {
-    body.price_usd = priceUSD;
-  }
-  if (asExtra) {
-    body.as_extra = true;
-  }
+  const body = purchaseBody(period, units, asExtra);
   return await gatewayRequest<GatewayPlanQuote>(
     `/v1/plans/${encodeURIComponent(planId)}/quote`,
     { method: "POST", body: JSON.stringify(body) },
@@ -626,9 +695,8 @@ export interface GatewayPlanOrder extends Omit<GatewayNativeOrder, "code_url"> {
 // `period` (see PERIODS). The gateway computes the price authoritatively and,
 // on the verified paid callback, grants the period's days.
 //
-// priceUSD 只在 asExtra 时有意义：它是加量包的**单位数 × $20**，即等效月价，
-// 与买的周期无关。目录三档（starter/pro/business）的价格一律由服务端的目录决定,
-// 传了也会被忽略 —— 用户不能自己给自己定价（自选金额档已删除）。
+// units 只在 asExtra 时有意义：加量包买几个单位。目录三档（starter/pro/
+// business）的价格一律由服务端的目录决定 —— 用户不能自己给自己定价。
 //
 // asExtra 决定这一单动的是哪一层：false（默认）是订阅层，服务端按档位高低
 // 自己判定立即换档还是排队；true 是加量包，永远立即生效并叠加。
@@ -640,20 +708,12 @@ export interface GatewayPlanOrder extends Omit<GatewayNativeOrder, "code_url"> {
 export async function createPlanOrder(
   planId: string,
   period = "1m",
-  priceUSD?: number,
+  units?: number,
   startAfterCurrent?: boolean,
   asExtra = false,
 ): Promise<GatewayPlanOrder> {
   void startAfterCurrent;
-  const body: { period: string; price_usd?: number; as_extra?: boolean } = {
-    period,
-  };
-  if (priceUSD !== undefined) {
-    body.price_usd = priceUSD;
-  }
-  if (asExtra) {
-    body.as_extra = true;
-  }
+  const body = purchaseBody(period, units, asExtra);
   return await gatewayRequest<GatewayPlanOrder>(
     `/v1/plans/${encodeURIComponent(planId)}/orders`,
     { method: "POST", body: JSON.stringify(body) },

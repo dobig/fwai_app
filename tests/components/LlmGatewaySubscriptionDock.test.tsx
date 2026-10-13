@@ -79,6 +79,82 @@ function mockQuote(patch: Partial<gateway.GatewayPlanQuote> = {}) {
   });
 }
 
+/**
+ * 服务端目录（GET /v1/plans）。购买屏上的每个金额都从这里来，所以价格故意
+ * 给成和档位名不同的数：断言里出现的金额如果是客户端自己算的或写死的，
+ * 就会和这里对不上。
+ */
+function catalogPrice(
+  period: string,
+  charge: number,
+  list: number,
+  perUnit: number,
+  unit: "month" | "week" = "month",
+): gateway.GatewayPeriodPrice {
+  return {
+    period,
+    charge_micros: charge * 1_000_000,
+    list_micros: list * 1_000_000,
+    savings_micros: (list - charge) * 1_000_000,
+    per_unit_micros: perUnit * 1_000_000,
+    per_unit: unit,
+  };
+}
+
+function tierPrices(monthly: number): gateway.GatewayPeriodPrice[] {
+  return [
+    catalogPrice("1m", monthly, monthly, monthly),
+    catalogPrice("3m", monthly * 3, monthly * 3, monthly),
+    catalogPrice("6m", monthly * 6 * 0.95, monthly * 6, monthly * 0.95),
+    catalogPrice("12m", monthly * 12 * 0.9, monthly * 12, monthly * 0.9),
+  ];
+}
+
+const CATALOG: gateway.GatewayPlanCatalog = {
+  plans: [
+    {
+      id: "starter",
+      name: "Starter",
+      price_usd_micros: 20_000_000,
+      prices: tierPrices(20),
+    },
+    {
+      id: "pro",
+      name: "Pro",
+      price_usd_micros: 100_000_000,
+      prices: tierPrices(100),
+    },
+    {
+      id: "business",
+      name: "Business",
+      price_usd_micros: 200_000_000,
+      prices: tierPrices(200),
+    },
+  ],
+  periods: [
+    { key: "1w", days: 7, discount_bps: 10000, extra_only: true },
+    { key: "2w", days: 14, discount_bps: 10000, extra_only: true },
+    { key: "3w", days: 21, discount_bps: 10000, extra_only: true },
+    { key: "1m", days: 30, discount_bps: 10000, extra_only: false },
+    { key: "3m", days: 90, discount_bps: 10000, extra_only: false },
+    { key: "6m", days: 180, discount_bps: 9500, extra_only: false },
+    { key: "12m", days: 360, discount_bps: 9000, extra_only: false },
+  ],
+  extra: {
+    unit_price_micros: 20_000_000,
+    max_units: 99,
+    prices: [
+      catalogPrice("1w", 5, 5, 5, "week"),
+      catalogPrice("2w", 10, 10, 5, "week"),
+      catalogPrice("3w", 15, 15, 5, "week"),
+      catalogPrice("1m", 20, 20, 20),
+      catalogPrice("3m", 60, 60, 20),
+      catalogPrice("6m", 120, 120, 20),
+      catalogPrice("12m", 240, 240, 20),
+    ],
+  },
+};
+
 /** 服务端说：套餐是开着的（管理员刚开的）。 */
 function serverSaysActive() {
   return {
@@ -128,6 +204,8 @@ beforeEach(() => {
   toasts.info.mockClear();
   toasts.success.mockClear();
   toasts.warning.mockClear();
+  // 购买屏拿不到目录就不显示任何档位，所以默认给一份。
+  vi.spyOn(gateway, "fetchPlanCatalog").mockResolvedValue(CATALOG);
   // 用量在这些 case 里不是重点，但组件挂载就会拉，给个空窗口避免噪音。
   vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({
     five_hour: null,
@@ -671,12 +749,13 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     await userEvent.click(await screen.findByText(/^微信支付/));
 
     await waitFor(() => expect(createOrder).toHaveBeenCalled());
-    const [planId, period, priceUSD, , asExtra] = createOrder.mock.calls[0];
+    const [planId, period, sentUnits, , asExtra] = createOrder.mock.calls[0];
     // 加量包打的是 /v1/plans/extra/orders。历史上这里写的是 "custom",
     // 服务端靠 as_extra 覆盖才没出事 —— 那个绕道已经拆掉。
     expect(planId).toBe("extra");
     expect(period).toBe("1m");
-    expect(priceUSD).toBe(40);
+    // 只发单位数，不发金额：$20 × 2 这一步是服务端的事。
+    expect(sentUnits).toBe(2);
     // 漏掉 as_extra 的话服务端会把这一单当成换档，直接顶掉现有套餐。
     expect(asExtra).toBe(true);
   });
@@ -1951,5 +2030,65 @@ describe("LlmGatewaySubscriptionDock 与应用设置页同步", () => {
     // 面板随后写回缓存（比如刷新订阅）时不能把设置页刚开的开关覆盖回去。
     const cached = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
     expect(cached.user.redact_secrets).toBe(true);
+  });
+});
+
+describe("LlmGatewaySubscriptionDock 购买屏价格来自服务端", () => {
+  it("档位卡片和周期列表原样显示目录里的金额，不在本地乘折扣", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    // 故意给一组任何本地折扣表都乘不出来的数：Pro 卡片 $99，6 个月 $555。
+    // 屏幕上出现的如果是 $570 / $95，就说明客户端还在自己算。
+    vi.spyOn(gateway, "fetchPlanCatalog").mockResolvedValue({
+      ...CATALOG,
+      plans: CATALOG.plans.map((p) =>
+        p.id === "pro"
+          ? {
+              ...p,
+              price_usd_micros: 99_000_000,
+              prices: [
+                catalogPrice("1m", 99, 99, 99),
+                catalogPrice("6m", 555, 600, 92.5),
+              ],
+            }
+          : p,
+      ),
+    });
+
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("$99"));
+
+    expect(await screen.findByText("$555")).toBeTruthy();
+    expect(screen.getByText("省 $45")).toBeTruthy();
+    expect(screen.getByText(/\$92\.50\/月/)).toBeTruthy();
+    expect(screen.getByText("95折")).toBeTruthy();
+    // 服务端没列的周期就不显示。
+    expect(screen.queryByText("12 个月")).toBeNull();
+    expect(screen.queryByText("$570")).toBeNull();
+  });
+
+  it("拿不到目录时不显示任何价格，给重试", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    const fetchCatalog = vi
+      .spyOn(gateway, "fetchPlanCatalog")
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(CATALOG);
+
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+
+    expect(await screen.findByText("价格加载失败")).toBeTruthy();
+    expect(screen.queryByText("$20")).toBeNull();
+    expect(screen.queryByText("$100")).toBeNull();
+
+    await userEvent.click(screen.getByText("重试"));
+    expect(await screen.findByText("$100")).toBeTruthy();
+    expect(fetchCatalog).toHaveBeenCalledTimes(2);
   });
 });

@@ -200,9 +200,9 @@ describe(`plan epic 联调 (${BASE})`, () => {
     expect((await res.json()).error).toBe("unknown_plan");
   });
 
-  it("目录档下单时 price_usd 被忽略，价格照目录", async () => {
-    // 自选档删掉之后，「服务端不接受任意金额」的保证就落在这里：
-    // price_usd 仍然是加量包的单位数载体，但对目录档必须无效。
+  it("目录档下单时单位数被忽略，价格照目录", async () => {
+    // 「服务端不接受任意金额」的保证落在这里：units 只对加量包有意义，
+    // 目录档的价格只看目录。
     const q = await fetchPlanQuote("starter", "1m", 3);
     expect(q.target_tier).toBe("starter");
     expect(q.amount_due_micros + q.credit_applied_micros).toBe(20_000_000);
@@ -215,8 +215,8 @@ describe(`plan epic 联调 (${BASE})`, () => {
       (p) => p.role === "extra",
     ).length;
 
-    // 2 单位加量包。price_usd 在 as_extra 下承载的是单位数 × $20。
-    await createPlanOrder("extra", "1m", 40, undefined, true);
+    // 2 单位加量包。只发单位数，金额由服务端算。
+    await createPlanOrder("extra", "1m", 2, undefined, true);
     await settleUntil(
       (s) =>
         (s.plans ?? []).filter((p) => p.role === "extra").length >
@@ -383,10 +383,10 @@ describe(`plan epic 联调 (${BASE})`, () => {
 
   it("加量包 99 份收在服务端，不只是选择器封顶", async () => {
     await expect(
-      fetchPlanQuote("extra", "1m", 2000, true),
+      fetchPlanQuote("extra", "1m", 100, true),
     ).rejects.toBeInstanceOf(GatewayApiError);
     // 99 是含的 —— 边界写错一格，UI 上能选的最大值会下不了单。
-    const ok = await fetchPlanQuote("extra", "1m", 1980, true);
+    const ok = await fetchPlanQuote("extra", "1m", 99, true);
     expect(ok.action).toBe("extra");
   });
 });
