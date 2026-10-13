@@ -82,6 +82,20 @@ import {
 // 周期的名字和天数。价格一律来自服务端：周期列表取 GET /v1/plans 的成品价，
 // 结账页取 quote 的 amount_due_micros，二维码页取下单响应的 amount_credits。
 import { DEFAULT_PERIOD, findPeriod, periodDiscountLabel } from "./planPeriods";
+import {
+  businessRateLabel,
+  bulkExtraSizes,
+  extraBlockedMessage,
+  extraErrorMessage,
+  extraPeriodPrice,
+  extraUnitRules,
+  extraUnitsRuleText,
+  maxExtraUnits,
+  nextExtraUnitsInput,
+  parseExtraUnits,
+  snapExtraUnits,
+  stepExtraUnits,
+} from "./extraPack";
 
 type Screen =
   | "auth"
@@ -202,7 +216,6 @@ type PurchaseIntent = "subscription" | "extra";
 // 契约已在 llm_gateway#189 的评论里写死：as_extra 时服务端强制改写为 extra，
 // quote.target_tier 和 grant 的 plan_id 回读都是 "extra"。
 const EXTRA_PLAN_ID = "extra";
-const EXTRA_MAX_UNITS = 99;
 
 // 已确定要买什么，等着结账页确认的那一单。quote 和下单参数绑在一起存，
 // 免得用户在结账页停留时改了别处的选择、付款用的却是另一份报价。
@@ -227,12 +240,6 @@ interface SettledOrder {
   targetTier: string;
   newValidUntil?: string;
   resultingBalanceMicros?: number;
-}
-
-function parseExtraUnits(raw: string): number | null {
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < 1 || n > EXTRA_MAX_UNITS) return null;
-  return n;
 }
 
 // 周期行上的单价：「$95/月」「$5/周」。金额和单位都是服务端给的。
@@ -361,6 +368,10 @@ export function LlmGatewaySubscriptionDock() {
   const [quoteError, setQuoteError] = useState<string | null>(null);
   // 购买屏上的全部价格（GET /v1/plans）。拿不到就不显示价格、不让往下点，
   // 而不是退回本地算 —— 本地那份价目表正是这次删掉的东西。
+  //
+  // 加量包的规则也在这里（extra 块）：能买多大、这个用户能不能买、有没有
+  // 商务价。eligibility 跟着用户状态走（刚买了一个加量包，上限就近了一步），
+  // 所以每次进购买屏都重拉，见 loadCatalog。
   const [catalog, setCatalog] = useState<GatewayPlanCatalog | null>(null);
   const [catalogError, setCatalogError] = useState(false);
   // 服务端支不支持换档。null = 还没探过。
@@ -438,10 +449,11 @@ export function LlmGatewaySubscriptionDock() {
   // 在前——那也是先被扣额度的那一层。老服务端不返回这个字段，取空数组，
   // 展示逻辑会退回单套餐那一行。
   const planList = subscription?.plans ?? [];
-  // 有没有生效的**订阅层**。这曾经是「能不能买加量包」的判据 —— 服务端要求
-  // 底下必须垫一个订阅层，否则 409。那个前置已经取消（赠送的额度是 extra
-  // 角色，被赠送的用户根本没有订阅层，却最该能加量），所以这个标志现在**只
-  // 决定文案**：有档位时说「更换 / 续费」，没有时说「购买」。
+  // 有没有生效的**订阅层**。这个标志**只决定文案**：有档位时说「更换 /
+  // 续费」，没有时说「购买」。「能不能买加量包」不看它 —— 那个前置（必须有
+  // 生效的付费套餐，赠送额度不算）由服务端判定，客户端读目录里的
+  // eligibility（见 catalog），不在本地复刻：赠送额度、admin 发的档位
+  // 算不算，本地判断不准。
   // 老服务端不返回 role 也不返回 plans，退回看 isActive。
   const hasActiveSubscriptionTier =
     planList.length > 0
@@ -469,6 +481,16 @@ export function LlmGatewaySubscriptionDock() {
   useEffect(() => {
     localStorage.setItem(DOCK_OPEN_KEY, open ? "1" : "0");
   }, [open]);
+  // 目录到手后把已经填着的单位数吸到合法的一档。用户在目录回来之前按老规则
+  // 填了 50 的话，不吸附就会停在一个红字提示上。空的不动 —— 那是用户正在打字。
+  useEffect(() => {
+    const rules = extraUnitRules(catalog?.extra);
+    setExtraUnitsInput((prev) =>
+      prev.trim() === "" || parseExtraUnits(prev, rules) !== null
+        ? prev
+        : String(snapExtraUnits(Number(prev), rules)),
+    );
+  }, [catalog]);
 
   // Refresh the account usage whenever the dock is open on the account screen
   // for a logged-in user. Cheap GET; keeps the number current after purchases
@@ -1293,6 +1315,40 @@ requires_openai_auth = true`,
     void loadCatalog();
   }
 
+  // 意图卡片上「购买加量包」那一格的小字。优先听服务端的 eligibility；
+  // 目录里没有 eligibility（未带登录态、服务端读买家状态失败）时按本地有没有
+  // 订阅层说一句不承诺的话。
+  function extraIntentDesc(): string {
+    const extra = catalog?.extra;
+    switch (extra?.eligibility?.reason) {
+      case "subscription_required":
+        return "需先订阅套餐，赠送额度不算";
+      case "extra_pack_limit":
+        return `已持有 ${extra.max_concurrent_paid_packs ?? 2} 个，到期后可再买`;
+    }
+    if (hasActiveSubscriptionTier) return "立即生效，额度叠加，不影响当前套餐";
+    // 老网关：目录里没有 requires_plan，那边确实不需要先买套餐。
+    if (extra && extra.requires_plan === undefined) {
+      return "立即生效，额度叠加，无需先买套餐";
+    }
+    return "需先订阅套餐，额度叠加在套餐之上";
+  }
+
+  // 加量包被服务端拒绝时的人话。subscription_required / extra_pack_limit
+  // 说明本地的 eligibility 过期了（比如套餐刚好到期），顺手重拉一次目录，让
+  // 页面上的「为什么不能买」跟上。不是这几个码返回 null。
+  function extraPurchaseErrorMessage(error: unknown): string | null {
+    const code = gatewayErrorCode(error);
+    const message = extraErrorMessage(code, catalog?.extra);
+    if (
+      message &&
+      (code === "subscription_required" || code === "extra_pack_limit")
+    ) {
+      void loadCatalog();
+    }
+    return message;
+  }
+
   // 兑换码。服务端做归一化和全部校验，这里只负责把错误码翻成人话 ——
   // 尤其是「不属于当前账号」：一个人可能有好几个账号，笼统说「无效」会让他
   // 反复重试同一个正确的码。
@@ -1376,7 +1432,8 @@ requires_openai_auth = true`,
         return;
       }
       setQuoteError(
-        error instanceof Error ? error.message : "获取报价失败，请重试",
+        (asExtra ? extraPurchaseErrorMessage(error) : null) ??
+          (error instanceof Error ? error.message : "获取报价失败，请重试"),
       );
     } finally {
       setBusy(false);
@@ -1409,7 +1466,7 @@ requires_openai_auth = true`,
       return;
     }
     if (asExtra && units === undefined) {
-      toast.error(`请输入 1–${EXTRA_MAX_UNITS} 的整数单位数`);
+      toast.error(extraUnitsRuleText(extraUnitRules(catalog?.extra)));
       return;
     }
     setBusy(true);
@@ -1468,7 +1525,10 @@ requires_openai_auth = true`,
         goToVerifyEmail();
         return;
       }
-      toast.error(error instanceof Error ? error.message : "购买失败");
+      toast.error(
+        (asExtra ? extraPurchaseErrorMessage(error) : null) ??
+          (error instanceof Error ? error.message : "购买失败"),
+      );
     } finally {
       setBusy(false);
     }
@@ -2238,19 +2298,56 @@ requires_openai_auth = true`,
               })()
             ) : intent === "extra" ? (
               // 加量包路径：两个输入（买几个单位、买多久），**没有档位卡片、
-              // 没有折扣角标** —— 加量包无折扣，把订阅那边的角标搬过来会让
-              // 用户以为 12 个月的加量包也打 9 折。
+              // 没有期限折扣角标** —— 加量包不吃 6/12 个月的折扣，把订阅那边
+              // 的角标搬过来会让用户以为 12 个月的加量包也打 9 折。唯一的折扣
+              // 是商务价，它有自己的角标和说明，条件是服务端说了算。
               (() => {
-                const units = parseExtraUnits(extraUnitsInput);
-                const options = catalog.extra.prices;
+                const extra = catalog.extra;
+                const rules = extraUnitRules(extra);
+                const units = parseExtraUnits(extraUnitsInput, rules);
+                const options = extra.prices;
                 const period =
                   options.find((p) => p.period === selectedPeriod)?.period ??
                   DEFAULT_PERIOD;
+                // 不能买的原因（没有付费套餐 / 加量包已到上限）。目录里没有
+                // eligibility 时是 null，不拦 —— 报价那一步服务端会再说一次。
+                const blocked = extraBlockedMessage(extra);
+                const noPlan =
+                  extra.eligibility?.reason === "subscription_required";
+                const rate = extra.business_rate;
+                const rateQualified = Boolean(
+                  rate && extra.eligibility?.business_rate,
+                );
+                // 20 以上可选的那几档，连同 20 本身做成快捷选项：输入框里一格
+                // 一格点到 80 太累，而这几档正好是商务价的整块。
+                const bulk = bulkExtraSizes(rules);
+                const quickSizes = bulk.length > 0 ? [rules.step, ...bulk] : [];
+                const rateSizes = rate
+                  ? quickSizes.filter((n) => n % rate.unit_step === 0)
+                  : [];
                 return (
                   <>
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
                       购买加量包 · 立即生效，与当前套餐额度叠加
                     </div>
+                    {blocked && (
+                      <div className="mb-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+                        <div className="font-medium">{blocked}</div>
+                        {noPlan && (
+                          <button
+                            type="button"
+                            className="mt-1.5 rounded-lg bg-amber-500 px-2.5 py-1 text-xs font-semibold text-white transition hover:brightness-105"
+                            onClick={() => {
+                              setIntent("subscription");
+                              setSelectedTier(null);
+                              setSelectedPeriod(DEFAULT_PERIOD);
+                            }}
+                          >
+                            去订阅套餐
+                          </button>
+                        )}
+                      </div>
+                    )}
                     <div className="mb-2.5 rounded-xl border-[1.5px] border-border px-3 py-2.5">
                       <label className="flex items-center justify-between gap-2 text-sm">
                         <span className="text-muted-foreground">
@@ -2261,59 +2358,162 @@ requires_openai_auth = true`,
                         <input
                           type="number"
                           min={1}
-                          max={EXTRA_MAX_UNITS}
+                          max={maxExtraUnits(rules)}
                           step={1}
                           value={extraUnitsInput}
-                          onChange={(e) => setExtraUnitsInput(e.target.value)}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            setExtraUnitsInput((prev) =>
+                              nextExtraUnitsInput(prev, raw, rules),
+                            );
+                          }}
+                          onKeyDown={(e) => {
+                            // 方向键在合法单位数之间走：20 往上是 40。
+                            if (e.key !== "ArrowUp" && e.key !== "ArrowDown")
+                              return;
+                            e.preventDefault();
+                            setExtraUnitsInput((prev) =>
+                              String(
+                                stepExtraUnits(
+                                  Number(prev) || 1,
+                                  e.key === "ArrowUp" ? 1 : -1,
+                                  rules,
+                                ),
+                              ),
+                            );
+                          }}
+                          // 打字的中途不吸附（打「40」必然经过「4」），失焦时
+                          // 再把 25 这类买不到的数吸到最近的一档。
+                          onBlur={() =>
+                            setExtraUnitsInput((prev) =>
+                              String(snapExtraUnits(Number(prev), rules)),
+                            )
+                          }
                           className="w-16 rounded-md border border-border bg-background px-2 py-1 text-right text-sm font-semibold outline-none focus:border-primary"
                         />
                       </label>
+                      {quickSizes.length > 0 && (
+                        <div className="mt-2 flex items-center gap-1.5">
+                          {quickSizes.map((n) => (
+                            <button
+                              key={n}
+                              type="button"
+                              onClick={() => setExtraUnitsInput(String(n))}
+                              className={`flex-1 rounded-md border px-1 py-1 text-xs font-semibold transition ${
+                                units === n
+                                  ? "border-primary bg-primary/5"
+                                  : "border-border hover:border-primary/60"
+                              }`}
+                            >
+                              {n}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                       {/* 额度用相对描述，不给具体金额 —— 理由同档位卡片
                           （见 planDescription）。1 单位恒等于 1× Starter，
                           所以 N 单位就是 N×，倍数是精确的。上面那行标签里的
-                          单价是**价格**不是额度，保留：用户得知道花多少钱。 */}
-                      <div className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                          单价是**价格**不是额度，保留：用户得知道花多少钱。
+                          商务价折的只是价钱，额度照旧是 N×。 */}
+                      <div className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
                         {units
                           ? `${units} 单位 = ${units}× Starter 的用量，叠加在当前套餐之上`
                           : "额度按单位线性叠加在当前套餐之上"}
                       </div>
-                      {units === null && (
+                      {units === null ? (
                         <div className="mt-1 text-[11px] font-medium text-red-500">
-                          请输入 1–{EXTRA_MAX_UNITS} 的整数
+                          {extraUnitsRuleText(rules)}
                         </div>
+                      ) : (
+                        bulk.length > 0 && (
+                          <div className="mt-0.5 text-[10px] text-muted-foreground">
+                            {extraUnitsRuleText(rules)}
+                          </div>
+                        )
                       )}
                     </div>
+                    {/* 商务价说明。对所有人都说：不是 Business 的用户也该知道
+                        有这回事；是的话说清楚他这一单享不享受（要整 20 单位、
+                        按月）。周付原价也要说，不然选了周付看到原价会以为坏了。 */}
+                    {rate && rateSizes.length > 0 && (
+                      <div
+                        className={`mb-2.5 rounded-lg px-3 py-2 text-[11px] leading-relaxed ${
+                          rateQualified
+                            ? "bg-green-500/10 text-green-700 dark:text-green-300"
+                            : "bg-muted/40 text-muted-foreground"
+                        }`}
+                      >
+                        {rateQualified
+                          ? `你的 ${planLabel(rate.plan_id)} 套餐享商务价：${rateSizes.join(" / ")} 单位按月购买${businessRateLabel(rate.discount_bps)}，按周购买仍为原价`
+                          : `${planLabel(rate.plan_id)} 套餐用户按月购买 ${rateSizes.join(" / ")} 单位享商务价（${businessRateLabel(rate.discount_bps)}）`}
+                      </div>
+                    )}
                     <div className="mb-1 text-xs font-medium text-muted-foreground">
                       购买时长
                     </div>
                     <div className="flex flex-col gap-2">
-                      {/* 周期全部开放：custom-only 的限制只作用于订阅层。 */}
-                      {options.map((price) => {
-                        const p = findPeriod(price.period);
+                      {/* 周期全部开放：周付的限制只作用于订阅层。每行的价格是
+                          目录里「一个单位」的成品价（商务价取 business_rate
+                          的那一份），不乘单位数 —— N 单位的实付以结账页的报价
+                          为准，客户端不算钱。 */}
+                      {options.map((listPrice) => {
+                        const p = findPeriod(listPrice.period);
+                        const price =
+                          units === null
+                            ? null
+                            : extraPeriodPrice(extra, units, listPrice.period);
                         return (
                           <button
-                            key={price.period}
+                            key={listPrice.period}
                             type="button"
-                            onClick={() => setSelectedPeriod(price.period)}
+                            onClick={() => setSelectedPeriod(listPrice.period)}
                             className={`flex items-center justify-between rounded-xl border-[1.5px] px-3 py-2.5 text-left transition ${
-                              price.period === period
+                              listPrice.period === period
                                 ? "border-primary bg-primary/5"
                                 : "border-border hover:border-primary/60"
                             }`}
                           >
-                            <span className="text-sm font-semibold">
-                              {p.label}
-                            </span>
-                            <span className="text-[11px] text-muted-foreground">
-                              {p.days} 天
-                            </span>
+                            <div>
+                              <div className="text-sm font-semibold">
+                                {p.label}
+                                {price?.businessRate && (
+                                  <span className="ml-1.5 rounded bg-green-600 px-1 py-0.5 text-[10px] font-bold text-white">
+                                    商务价
+                                  </span>
+                                )}
+                              </div>
+                              {price && (
+                                <div className="text-[11px] text-muted-foreground">
+                                  {p.days} 天
+                                </div>
+                              )}
+                            </div>
+                            {price ? (
+                              <div className="text-right">
+                                <div className="text-[15px] font-bold">
+                                  {formatMicrosUSD(price.chargeMicros)}
+                                  <span className="text-[11px] font-normal text-muted-foreground">
+                                    /单位
+                                  </span>
+                                </div>
+                                {price.listMicros > price.chargeMicros && (
+                                  <div className="text-[11px] text-muted-foreground line-through">
+                                    {formatMicrosUSD(price.listMicros)}/单位
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-[11px] text-muted-foreground">
+                                {p.days} 天
+                              </span>
+                            )}
                           </button>
                         );
                       })}
                     </div>
                     <button
                       type="button"
-                      disabled={busy || units === null}
+                      disabled={busy || units === null || blocked !== null}
                       onClick={() =>
                         units !== null &&
                         void goToCheckout(EXTRA_PLAN_ID, period, units, true)
@@ -2336,10 +2536,11 @@ requires_openai_auth = true`,
                 {/* 意图分支。同一个「买套餐」动作在新模型下有两种完全不同的
                     含义，服务端靠 as_extra 区分，所以用户必须先表达意图。
 
-                    没有订阅层时**照样要问**：加量包不再需要底下垫一个套餐
-                    （服务端已取消该前置），而没有订阅层的人恰恰包括被赠送额度
-                    的用户 —— 赠送的额度是 extra 角色，他们手上有量可用却一个
-                    档位都没有。不问的话，这条路径在 UI 上根本走不到。
+                    没有订阅层时也照样问，但加量包那一格要说实话：服务端现在
+                    要求先有生效的付费套餐才能买加量包（赠送额度不算，见
+                    llm_gateway#325）。不把入口藏掉，点进去能看到原因和「去订阅
+                    套餐」—— 藏掉的话，被赠送额度的用户不知道加量包为什么没了。
+                    老网关的目录不带 requires_plan，那边仍是「无需先买套餐」。
 
                     老网关（探测到没有 quote 端点）仍然不问：那边不认 as_extra，
                     选了加量包只会买到一份并行叠加的普通套餐。 */}
@@ -2363,9 +2564,7 @@ requires_openai_auth = true`,
                         {
                           key: "extra" as const,
                           title: "购买加量包",
-                          desc: hasActiveSubscriptionTier
-                            ? "立即生效，额度叠加，不影响当前套餐"
-                            : "立即生效，额度叠加，无需先买套餐",
+                          desc: extraIntentDesc(),
                         },
                       ] as const
                     ).map((opt) => (

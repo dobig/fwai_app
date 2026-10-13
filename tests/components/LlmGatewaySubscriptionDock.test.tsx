@@ -824,7 +824,9 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     await userEvent.type(units, "0");
 
     expect(await screen.findByText(/请输入 1–99 的整数/)).toBeTruthy();
-    await userEvent.click(screen.getByText(/^下一步/));
+    // 只断言按钮置灰，不去点它：点击会先让输入框失焦，失焦把 0 吸附成 1，
+    // 那就是另一个（合法的）单位数了。
+    expect(screen.getByText(/^下一步/).closest("button")).toBeDisabled();
     expect(createOrder).not.toHaveBeenCalled();
   });
 });
@@ -2090,5 +2092,220 @@ describe("LlmGatewaySubscriptionDock 购买屏价格来自服务端", () => {
     await userEvent.click(screen.getByText("重试"));
     expect(await screen.findByText("$100")).toBeTruthy();
     expect(fetchCatalog).toHaveBeenCalledTimes(2);
+  });
+});
+
+// llm_gateway#325 起加量包的新规则：必须有生效的付费套餐（赠送额度不算）、
+// 最多同时持有 2 个、20 以上只能买 40/60/80、Business 用户按月买 20 的整数倍
+// 半价。规则全在服务端，客户端读 GET /v1/plans 的 extra 块来显示；这些 case
+// 盯的是「读到了就照着显示」和「被拒了能看懂」。
+describe("LlmGatewaySubscriptionDock 加量包规则", () => {
+  // 一个单位的价：charge / list / 每月或每周折算。
+  function price(period: string, charge: number, list = charge) {
+    const weeks = period.endsWith("w") ? Number(period.slice(0, -1)) : 0;
+    return weeks
+      ? catalogPrice(period, charge, list, charge / weeks, "week")
+      : catalogPrice(
+          period,
+          charge,
+          list,
+          charge / Number(period.slice(0, -1)),
+        );
+  }
+  function mockCatalog(
+    eligibility: gateway.GatewayExtraEligibility,
+  ): ReturnType<typeof vi.spyOn> {
+    return vi.spyOn(gateway, "fetchPlanCatalog").mockResolvedValue({
+      ...CATALOG,
+      extra: {
+        unit_price_micros: 20_000_000,
+        max_units: 99,
+        prices: [
+          price("1w", 5),
+          price("2w", 10),
+          price("3w", 15),
+          price("1m", 20),
+          price("3m", 60),
+          price("6m", 120),
+          price("12m", 240),
+        ],
+        bulk_step_units: 20,
+        requires_plan: true,
+        max_concurrent_paid_packs: 2,
+        business_rate: {
+          plan_id: "business",
+          discount_bps: 5000,
+          unit_step: 20,
+          month_periods_only: true,
+          prices: [
+            price("1m", 10, 20),
+            price("3m", 30, 60),
+            price("6m", 60, 120),
+            price("12m", 120, 240),
+          ],
+        },
+        eligibility,
+      },
+    });
+  }
+  const canBuy = {
+    plan_in_force: true,
+    business_rate: false,
+    active_paid_packs: 0,
+    can_buy: true,
+  };
+
+  async function openExtra() {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("购买加量包"));
+    return await screen.findByRole("spinbutton");
+  }
+
+  it("Business 用户选 20 单位按月：显示商务价（半价），按周仍原价", async () => {
+    mockCatalog({ ...canBuy, business_rate: true });
+    const input = await openExtra();
+    await userEvent.click(await screen.findByRole("button", { name: "20" }));
+    expect(input).toHaveValue(20);
+
+    expect(
+      await screen.findByText(
+        /你的 \$200 套餐享商务价：20 \/ 40 \/ 60 \/ 80 单位按月购买半价/,
+      ),
+    ).toBeTruthy();
+    // 1 个月：每单位商务价 $10，划掉的原价 $20。照搬目录，不乘单位数 ——
+    // 20 单位的实付以结账页的报价为准。
+    const month = screen.getByText("1 个月").closest("button")!;
+    expect(month.textContent).toContain("商务价");
+    expect(month.textContent).toContain("$10/单位");
+    expect(month.textContent).toContain("$20/单位");
+    expect(month.textContent).not.toContain("$200");
+    // 1 周：原价每单位 $5，没有角标。
+    const week = screen.getByText("1 周").closest("button")!;
+    expect(week.textContent).not.toContain("商务价");
+    expect(week.textContent).toContain("$5/单位");
+  });
+
+  it("非 Business 用户：同样 20 单位按月是原价，只给一句说明", async () => {
+    mockCatalog(canBuy);
+    await openExtra();
+    await userEvent.click(await screen.findByRole("button", { name: "20" }));
+    expect(
+      await screen.findByText(
+        /\$200 套餐用户按月购买 20 \/ 40 \/ 60 \/ 80 单位享商务价/,
+      ),
+    ).toBeTruthy();
+    const month = screen.getByText("1 个月").closest("button")!;
+    expect(month.textContent).not.toContain("商务价");
+    expect(month.textContent).toContain("$20/单位");
+    expect(month.textContent).not.toContain("$10/单位");
+  });
+
+  it("没有付费套餐：置灰并说明赠送额度不算，可以直接去订阅", async () => {
+    mockCatalog({
+      plan_in_force: false,
+      business_rate: false,
+      active_paid_packs: 0,
+      can_buy: false,
+      reason: "subscription_required",
+    });
+    await openExtra();
+    expect(
+      await screen.findByText("需要先订阅套餐才能购买加量包（赠送额度不算）"),
+    ).toBeTruthy();
+    expect(screen.getByText(/^下一步/).closest("button")).toBeDisabled();
+    await userEvent.click(screen.getByText("去订阅套餐"));
+    expect(await screen.findByText("选择套餐 · 微信支付")).toBeTruthy();
+    // 意图卡片上那一格也说了实话。
+    expect(screen.getByText("需先订阅套餐，赠送额度不算")).toBeTruthy();
+  });
+
+  it("已持有 2 个加量包：置灰并说明上限", async () => {
+    mockCatalog({
+      plan_in_force: true,
+      business_rate: false,
+      active_paid_packs: 2,
+      can_buy: false,
+      reason: "extra_pack_limit",
+    });
+    await openExtra();
+    expect(
+      await screen.findByText(
+        "已持有 2 个加量包，最多同时持有 2 个，等其中一个到期后再买",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText(/^下一步/).closest("button")).toBeDisabled();
+  });
+
+  it("单位数只能是 1–20 或 40/60/80：失焦吸附、箭头跳档", async () => {
+    mockCatalog(canBuy);
+    const input = await openExtra();
+    // 等目录到手（快捷选项出现）再测，否则还在老规则下。
+    await screen.findByRole("button", { name: "80" });
+    await userEvent.clear(input);
+    await userEvent.type(input, "25");
+    expect(screen.getByText("可选 1–20，或 40、60、80")).toBeTruthy();
+    expect(screen.getByText(/^下一步/).closest("button")).toBeDisabled();
+    await userEvent.tab();
+    expect(input).toHaveValue(20);
+    await userEvent.type(input, "{ArrowUp}");
+    expect(input).toHaveValue(40);
+    await userEvent.type(input, "{ArrowDown}");
+    expect(input).toHaveValue(20);
+    await userEvent.clear(input);
+    await userEvent.type(input, "99");
+    await userEvent.tab();
+    expect(input).toHaveValue(80);
+  });
+
+  it("报价被拒（409 extra_pack_limit / subscription_required）：显示人话并重拉目录", async () => {
+    const cat = mockCatalog(canBuy);
+    await openExtra();
+    await screen.findByRole("button", { name: "80" });
+    vi.spyOn(gateway, "fetchPlanQuote").mockRejectedValue(
+      new GatewayApiError(409, "subscription_required", {
+        error: "subscription_required",
+      }),
+    );
+    await userEvent.click(screen.getByText(/^下一步/));
+    expect(
+      await screen.findByText("需要先订阅套餐才能购买加量包（赠送额度不算）"),
+    ).toBeTruthy();
+    await waitFor(() => expect(cat).toHaveBeenCalledTimes(2));
+  });
+
+  it("下单被拒（400 invalid_extra_units）：toast 说清可选的单位数", async () => {
+    mockCatalog(canBuy);
+    await openExtra();
+    await screen.findByRole("button", { name: "80" });
+    mockQuote({ action: "extra", target_tier: "extra" });
+    vi.spyOn(gateway, "createPlanOrder").mockRejectedValue(
+      new GatewayApiError(400, "invalid_extra_units", {
+        error: "invalid_extra_units",
+      }),
+    );
+    await userEvent.click(screen.getByText(/^下一步/));
+    await userEvent.click(await screen.findByText(/^微信支付/));
+    await waitFor(() =>
+      expect(toasts.error).toHaveBeenCalledWith(
+        "加量包单位数不可用：可选 1–20，或 40、60、80",
+      ),
+    );
+  });
+
+  it("目录不带新规则字段（老网关）：按老规则 1–99 任选，也不拦", async () => {
+    // CATALOG 的 extra 只有 #45 时的三个字段：没有步长、没有 eligibility。
+    vi.spyOn(gateway, "fetchPlanCatalog").mockResolvedValue(CATALOG);
+    const input = await openExtra();
+    await userEvent.clear(input);
+    await userEvent.type(input, "57");
+    await userEvent.tab();
+    expect(input).toHaveValue(57);
+    expect(screen.queryByRole("button", { name: "80" })).toBeNull();
+    expect(screen.getByText(/^下一步/).closest("button")).toBeEnabled();
   });
 });

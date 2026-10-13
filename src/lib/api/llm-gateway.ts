@@ -570,15 +570,51 @@ export interface GatewayCatalogPeriod {
   extra_only: boolean;
 }
 
+// 加量包的商务价：Business 套餐生效中、单位数是 unit_step 的整数倍、按月买，
+// 实付按 discount_bps 打折（5000 = 半价）。额度不变 —— 折的只是价钱。
+// prices 只列按月的周期，周付不在其中（周付永远原价）。
+export interface GatewayExtraBusinessRate {
+  plan_id: string;
+  discount_bps: number;
+  unit_step: number;
+  month_periods_only: boolean;
+  prices: GatewayPeriodPrice[];
+}
+
+// 这个用户此刻能不能买加量包。**只是提示**：报价和下单两个端点会重新校验一切，
+// 所以界面上过期的「能买」最坏只会换来一个 409，反过来不会发生。
+//
+// reason 就是此刻下单会拿到的错误码：subscription_required（没有生效的套餐，
+// 赠送额度不算）或 extra_pack_limit（加量包已到同时持有上限）。
+export interface GatewayExtraEligibility {
+  plan_in_force: boolean;
+  business_rate: boolean;
+  active_paid_packs: number;
+  can_buy: boolean;
+  reason?: "subscription_required" | "extra_pack_limit" | string;
+}
+
+// 目录里的加量包 SKU。prices 之后的字段是加商务价时一起加的，老网关不发，
+// 所以全部可选；缺省时客户端退回老规则（1–max_units 任选、无前置、无商务价）。
+// prices 是**一个单位**的各周期价格，N 单位的实付以结账页的 quote 为准。
+export interface GatewayExtraCatalog {
+  unit_price_micros: number;
+  // 兼容字段，仍然是 99。叠加 bulk_step_units 的规则后实际能买的最大是 80。
+  max_units: number;
+  prices: GatewayPeriodPrice[];
+  // 1..bulk_step_units 任选，再往上只能选它的整数倍（20 → 40/60/80）。
+  bulk_step_units?: number;
+  requires_plan?: boolean;
+  max_concurrent_paid_packs?: number;
+  business_rate?: GatewayExtraBusinessRate;
+  // 只在已登录的 GET /v1/plans 上有；服务端读买家状态失败时也会省略。
+  eligibility?: GatewayExtraEligibility;
+}
+
 export interface GatewayPlanCatalog {
   plans: GatewayCatalogPlan[];
   periods: GatewayCatalogPeriod[];
-  extra: {
-    unit_price_micros: number;
-    max_units: number;
-    // **一个单位**的各周期价格。N 单位的实付以结账页的 quote 为准。
-    prices: GatewayPeriodPrice[];
-  };
+  extra: GatewayExtraCatalog;
 }
 
 // fetchPlanCatalog 读购买屏要显示的全部价格。老网关的 /v1/plans 没有 prices /
