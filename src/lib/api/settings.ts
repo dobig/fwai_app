@@ -147,6 +147,11 @@ export const settingsApi = {
     return await invoke("check_app_update");
   },
 
+  /** 下载并安装更新后重启；成功时不会返回 */
+  async installAppUpdate(): Promise<void> {
+    await invoke("install_app_update");
+  },
+
   async getRectifierConfig(): Promise<RectifierConfig> {
     return await invoke("get_rectifier_config");
   },
@@ -177,6 +182,8 @@ export interface AppUpdateInfo {
   /** null 表示没拿到（断网 / 仓库无 release），不代表已是最新 */
   latest: string | null;
   updateAvailable: boolean;
+  /** 能否应用内安装；false 时只能打开 releaseUrl 手动下载 */
+  installable: boolean;
   releaseUrl: string;
 }
 

@@ -644,6 +644,7 @@
     "resetDefault": "Reset to default directory (takes effect after saving)",
     "checkForUpdates": "Check for Updates",
     "updateTo": "Update to v{{version}}",
+    "updateNow": "Update now",
     "updating": "Updating...",
     "checking": "Checking...",
     "upToDate": "Up to Date",

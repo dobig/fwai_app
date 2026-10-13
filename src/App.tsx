@@ -24,6 +24,7 @@ import {
 } from "@/lib/api";
 import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
 import { dismissVersion, isVersionDismissed } from "@/lib/updateCheck";
+import { applyAppUpdate } from "@/lib/appUpdate";
 import { APP_VERSION, useClientUpgradeSignal } from "@/lib/clientUpgrade";
 import { useProviderActions } from "@/hooks/useProviderActions";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
@@ -233,9 +234,13 @@ function App() {
         onClick: () => {
           void settingsApi
             .checkAppUpdate()
-            .then((info) => settingsApi.openExternal(info.releaseUrl))
+            .then((info) =>
+              info.updateAvailable
+                ? applyAppUpdate(info, t)
+                : settingsApi.openExternal(info.releaseUrl),
+            )
             .catch((error) => {
-              console.error("[App] Failed to open releases page:", error);
+              console.error("[App] Failed to apply update:", error);
             });
         },
       },
@@ -243,7 +248,8 @@ function App() {
     });
   }, [upgradeSignal, t]);
 
-  // 启动时静默检查新版本。只提示，不安装——点「查看」跳到 releases 页手动下载。
+  // 启动时静默检查新版本。只提示，不自动安装——用户点了「立即更新」才下载
+  // 安装；拿不到签名更新清单时按钮退化为「查看」，跳下载页手动安装。
   useEffect(() => {
     // dev 下每次热重启都弹属于纯干扰。About 页的「检查更新」按钮没有这道门，
     // 那才是 dev 下验证这条链路的入口。
@@ -266,10 +272,12 @@ function App() {
           duration: 10000,
           closeButton: true,
           action: {
-            label: t("common.view"),
+            label: info.installable
+              ? t("settings.updateNow")
+              : t("common.view"),
             onClick: () => {
-              void settingsApi.openExternal(info.releaseUrl).catch((error) => {
-                console.error("[App] Failed to open releases page:", error);
+              void applyAppUpdate(info, t).catch((error) => {
+                console.error("[App] Failed to apply update:", error);
               });
             },
           },

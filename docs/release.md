@@ -65,6 +65,25 @@ Program($99/年)签发的 **Developer ID Application** 证书 + 公证才能让�
 凭据有效期:证书 5 年;App 专用密码永久有效,但改了 Apple ID 密码会全部失效需重新生成;
 会员资格每年续费,过期后无法公证。
 
+## 一次性:应用内更新的签名密钥
+
+客户端的应用内更新(`tauri-plugin-updater`)只安装用这把密钥签过名的包,
+公钥写在 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`。它和 Apple
+签名无关,三个平台都要。2026-10-13 已生成并配置好:
+
+| 位置 | 内容 |
+| --- | --- |
+| `~/.tauri/fwai_app.key` | minisign 私钥(已用密码加密) |
+| `~/.tauri/fwai_app.key.password` | 私钥密码 |
+| secret `TAURI_SIGNING_PRIVATE_KEY` | 私钥文件内容 |
+| secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 私钥密码 |
+
+**私钥和密码务必另存一份到密码管理器。** 丢了就再也签不出已装客户端认可的包,
+所有用户只能手动重装一次才能换到新公钥。GitHub secret 写进去就读不出来,不算备份。
+
+`createUpdaterArtifacts` 打开后,没有私钥 `tauri build` 会直接失败——这是有意的,
+已装的客户端更新不到的版本不该发出去。
+
 ## 发布流程
 
 ### 1. 版本号
@@ -108,10 +127,10 @@ release notes 用中文,按"新增/修复/资产/备注"分节。先建草稿是
 
 ### 4. 检查并发布
 
-六个资产齐全后:
+六个安装包加七个更新文件齐全后:
 
 ```bash
-gh release view vX.Y.Z          # 确认六个资产都在
+gh release view vX.Y.Z          # 确认十三个资产都在
 gh release edit vX.Y.Z --draft=false
 ```
 
@@ -119,6 +138,13 @@ gh release edit vX.Y.Z --draft=false
 - `fwai_app_X.Y.Z_x64.dmg`(Intel)
 - `fwai_app_X.Y.Z_x64-setup.exe`、`fwai_app_X.Y.Z_x64_en-US.msi`(Windows)
 - `fwai_app_X.Y.Z_amd64.AppImage`、`fwai_app_X.Y.Z_amd64.deb`(Linux)
+- 应用内更新用:`fwai_app_X.Y.Z_aarch64.app.tar.gz`、`fwai_app_X.Y.Z_x64.app.tar.gz`,
+  以及它们和 exe / msi / AppImage 各自的 `.sig`
+
+发布后 fwai.space 的同步脚本(`llm_gateway` 仓库 `deploy/site/`)10 分钟内把这些
+文件镜像过去,并生成客户端轮询的 `https://fwai.space/download/update.json`。
+已装客户端下次启动或点「检查更新」就会提示「立即更新」。deb 用户不支持应用内
+更新,仍跳下载页。
 
 想验证 macOS 包是不是真的干净,下载下来跑一遍(CI 已经自检过,这是复核):
 
@@ -138,7 +164,8 @@ security add-generic-password -s fwai-notary -a "$APPLE_ID" -w   # 一次性,存
 ```
 
 脚本没有 `APPLE_CERTIFICATE` 时走本机分支:从登录钥匙串取证书,从 `fwai-notary`
-取 App 专用密码。两个坑:
+取 App 专用密码;没有 `TAURI_SIGNING_PRIVATE_KEY` 时从 `~/.tauri/fwai_app.key(.password)`
+取更新签名密钥。两个坑:
 
 - `security add-generic-password -w` 后不给值会交互提示,若在提示处直接回车,会静默存入
   **空密码**,之后公证报 401 且不易发现——脚本会检查长度并提前报错。

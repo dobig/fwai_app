@@ -21,6 +21,10 @@
 #
 # APPLE_ID and APPLE_TEAM_ID are required either way and are never hardcoded —
 # the Apple ID is a personal mailbox and this repo is public.
+#
+# The in-app updater also needs every build signed with the updater key
+# (minisign, unrelated to Apple's signing). CI passes it as
+# TAURI_SIGNING_PRIVATE_KEY(_PASSWORD); locally it is read from ~/.tauri/.
 set -euo pipefail
 
 : "${APPLE_ID:?set APPLE_ID to the Apple account used for notarization (see docs/release.md)}"
@@ -60,6 +64,19 @@ fi
 
 export APPLE_ID APPLE_TEAM_ID APPLE_PASSWORD
 
+# createUpdaterArtifacts makes `tauri build` fail without the updater key, so
+# check up front instead of after a full compile.
+UPDATER_KEY="${UPDATER_KEY:-$HOME/.tauri/fwai_app.key}"
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+  if [[ ! -f "$UPDATER_KEY" || ! -f "$UPDATER_KEY.password" ]]; then
+    echo "no updater signing key at $UPDATER_KEY(.password) — see docs/release.md" >&2
+    exit 1
+  fi
+  TAURI_SIGNING_PRIVATE_KEY="$(cat "$UPDATER_KEY")"
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(cat "$UPDATER_KEY.password")"
+fi
+export TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+
 targets=("aarch64-apple-darwin" "x86_64-apple-darwin")
 if [[ $# -gt 0 ]]; then
   targets=()
@@ -78,6 +95,17 @@ echo "building fwai_app v${version}"
 for target in "${targets[@]}"; do
   echo "── ${target} (notarization adds a few minutes) ─────────────────────"
   pnpm tauri build --target "$target"
+done
+
+# The updater archive is named after the product only (fwai_app.app.tar.gz),
+# so the two architectures would collide on the release. Give it the same
+# version + arch naming as the dmg. The .sig signs the bytes, not the name.
+for target in "${targets[@]}"; do
+  case "$target" in aarch64-*) arch=aarch64 ;; *) arch=x64 ;; esac
+  dir="src-tauri/target/${target}/release/bundle/macos"
+  for ext in app.tar.gz app.tar.gz.sig; do
+    mv -f "$dir/fwai_app.$ext" "$dir/fwai_app_${version}_${arch}.$ext"
+  done
 done
 
 # Tauri notarizes and staples the .app, then builds the dmg around it and signs
@@ -116,5 +144,13 @@ for target in "${targets[@]}"; do
     fi
     echo "   $f"
   done
+  case "$target" in aarch64-*) arch=aarch64 ;; *) arch=x64 ;; esac
+  sig="src-tauri/target/${target}/release/bundle/macos/fwai_app_${version}_${arch}.app.tar.gz.sig"
+  if [[ -s "$sig" ]]; then
+    echo "   updater archive: signed ✓"
+  else
+    echo "   updater archive: missing signature ✗" >&2
+    status=1
+  fi
 done
 exit "$status"
