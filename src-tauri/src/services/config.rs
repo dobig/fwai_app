@@ -121,6 +121,8 @@ impl ConfigService {
         match app_type {
             AppType::Codex => Self::sync_codex_live(config, &current_id, &provider)?,
             AppType::Claude => Self::sync_claude_live(config, &current_id, &provider)?,
+            // 这是旧 config.json 的迁移路径，那个版本还没有 Desktop，不会有它的条目。
+            AppType::ClaudeDesktop => {}
             AppType::Gemini => Self::sync_gemini_live(config, &current_id, &provider)?,
         }
 

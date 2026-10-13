@@ -54,6 +54,13 @@ pub struct ForwardingBackup {
     /// 转发前生效的供应商条目 id，结束转发时把「当前供应商」指回去。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_provider_id: Option<String>,
+    /// Claude Desktop 动手前的状态（deploymentMode / appliedId）。
+    ///
+    /// Desktop 不像 CLI 那样只有两个字段要还原：它的 `deploymentMode` 原值可能是
+    /// `1p`、`3p`，也可能根本没有这个键，而 `appliedId` 可能指着用户自己的 profile。
+    /// 一律按 1p 还原会误伤那些本来就在用 3P 的人。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<crate::claude_desktop_config::DesktopSnapshot>,
     /// Claude: `env.ANTHROPIC_AUTH_TOKEN`；Codex: auth.json 的 `OPENAI_API_KEY`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
@@ -337,14 +344,47 @@ fn capture_live(app_type: &AppType, backup: &mut ForwardingBackup) -> Result<(),
     match app_type {
         AppType::Claude => capture_claude(backup),
         AppType::Codex => capture_codex(backup),
+        AppType::ClaudeDesktop => {
+            backup.desktop = Some(crate::claude_desktop_config::capture_snapshot()?);
+            Ok(())
+        }
         AppType::Gemini => Ok(()),
     }
 }
 
-fn apply_live(app_type: &AppType, token: &str, base_url: &str) -> Result<(), AppError> {
+/// Desktop 的 live 写入:凭据用网关面板给的(可能刚轮换),模型清单取自当前条目。
+///
+/// 条目还不存在时不写:面板会先把条目建好再调过来,真没有就等下一次。凭空写一份
+/// 没有模型清单的 profile 会让 Desktop 的模型菜单空着。
+fn apply_claude_desktop(db: &Database, token: &str, base_url: &str) -> Result<(), AppError> {
+    let app_type = AppType::ClaudeDesktop;
+    let Some(current_id) = crate::settings::get_effective_current_provider(db, &app_type)? else {
+        return Ok(());
+    };
+    let providers = db.get_all_providers(app_type.as_str())?;
+    let Some(provider) = providers.get(&current_id) else {
+        return Ok(());
+    };
+    let credentials = crate::claude_desktop_config::GatewayCredentials {
+        base_url: base_url.to_string(),
+        api_key: token.to_string(),
+    };
+    crate::claude_desktop_config::apply_with_credentials(provider, &credentials)
+}
+
+fn apply_live(
+    db: &Database,
+    app_type: &AppType,
+    token: &str,
+    base_url: &str,
+) -> Result<(), AppError> {
     match app_type {
         AppType::Claude => apply_claude(token, base_url),
         AppType::Codex => apply_codex(token, base_url),
+        // Desktop 的「只改关键字段」由 profile 的 floor/seed 保证，不需要
+        // apply_claude 那种手工字段覆盖；但模型清单只存在条目的 meta 里，
+        // 所以要把当前条目取出来一起写。
+        AppType::ClaudeDesktop => apply_claude_desktop(db, token, base_url),
         AppType::Gemini => Ok(()),
     }
 }
@@ -353,6 +393,11 @@ fn restore_live(app_type: &AppType, backup: &ForwardingBackup) -> Result<(), App
     match app_type {
         AppType::Claude => restore_claude(backup),
         AppType::Codex => restore_codex(backup),
+        AppType::ClaudeDesktop => match backup.desktop.as_ref() {
+            Some(snapshot) => crate::claude_desktop_config::restore_snapshot(snapshot),
+            // 老备份没有这个字段：按交还 1P 兜底，别什么都不做留着网关配置。
+            None => crate::claude_desktop_config::restore_official(),
+        },
         AppType::Gemini => Ok(()),
     }
 }
@@ -391,6 +436,18 @@ fn credentials_from_provider(app_type: &AppType, provider: &Provider) -> Option<
                 .get("base_url")?
                 .as_str()?;
             let base_url = raw.trim_end_matches('/').trim_end_matches("/v1");
+            Some((token.to_string(), base_url.to_string()))
+        }
+        // Desktop 和 Claude 读同一组 env 字段，同一个网关条目两边都能用。
+        AppType::ClaudeDesktop => {
+            let token = provider
+                .settings_config
+                .pointer("/env/ANTHROPIC_AUTH_TOKEN")?
+                .as_str()?;
+            let base_url = provider
+                .settings_config
+                .pointer("/env/ANTHROPIC_BASE_URL")?
+                .as_str()?;
             Some((token.to_string(), base_url.to_string()))
         }
         AppType::Gemini => None,
@@ -453,7 +510,7 @@ pub(crate) fn intercept_live_write(
             Ok(LiveWriteDecision::ProceedWithPinnedCredentials { token, base_url })
         }
         LiveWriteIntent::BackgroundSync => {
-            apply_live(app_type, &token, &base_url)?;
+            apply_live(db, app_type, &token, &base_url)?;
             Ok(LiveWriteDecision::Handled)
         }
     }
@@ -517,6 +574,10 @@ pub(crate) fn pin_gateway_credentials(
             obj.insert("config".to_string(), Value::String(doc.to_string()));
             Ok(())
         }
+        // Desktop 的条目和 Claude 同形（env 里两个键），走同一套钉值逻辑。
+        AppType::ClaudeDesktop => {
+            pin_gateway_credentials(&AppType::Claude, settings, token, base_url)
+        }
         AppType::Gemini => Ok(()),
     }
 }
@@ -578,7 +639,7 @@ pub fn start_forwarding(
         .db
         .set_current_provider(app_type.as_str(), &provider.id)?;
 
-    apply_live(app_type, token, base_url)
+    apply_live(state.db.as_ref(), app_type, token, base_url)
 }
 
 /// token 轮换：只把新凭据覆盖到 live，别的一个字节都不碰。
@@ -601,7 +662,7 @@ pub fn refresh_credentials(
     backup.gateway_base_url = Some(base_url.to_string());
     store_backup(state.db.as_ref(), app_type, &backup)?;
 
-    apply_live(app_type, token, base_url)
+    apply_live(state.db.as_ref(), app_type, token, base_url)
 }
 
 /// 结束转发：只把 endpoint/key 还原，转发期间的其它修改一律保留。

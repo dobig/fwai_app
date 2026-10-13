@@ -1779,7 +1779,12 @@ describe("LlmGatewaySubscriptionDock token 刷新", () => {
         expect.any(String),
       ),
     );
-    expect(providersApi.update).not.toHaveBeenCalled();
+    // 断言限定在被转发的那个 app：Claude Desktop 不走转发（它写的是 Desktop 自己
+    // 的 3P profile），刷新 token 时用普通 update 同步它的条目是预期行为。
+    expect(providersApi.update).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "claude",
+    );
   });
 
   it("转发没开时仍走普通 update", async () => {
@@ -2338,5 +2343,90 @@ describe("LlmGatewaySubscriptionDock 加量包规则", () => {
     expect(input).toHaveValue(57);
     expect(screen.queryByRole("button", { name: "80" })).toBeNull();
     expect(screen.getByText(/^下一步/).closest("button")).toBeEnabled();
+  });
+});
+
+describe("LlmGatewaySubscriptionDock Claude Desktop", () => {
+  it("和 Claude / Codex 一样是一个转发开关", async () => {
+    // Desktop 的「live」是它自己的 3P profile 而不是 settings.json，但对用户来说
+    // 没区别：面板上一个开关。早先把它排除出 FORWARDABLE_APPS，面板就只会显示
+    // 「暂不支持转发」，等于告诉用户功能没做。
+    seedActivePlan();
+    renderDock("claude-desktop");
+
+    expect(
+      await screen.findByText(/^开启转发（Claude App）/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/暂不支持转发/)).toBeNull();
+  });
+
+  it("开启转发后提示要重启 Desktop，5 秒后自己消失", async () => {
+    // Desktop 只在启动时读 profile。这句话做成提示框而不是常驻在按钮下面——
+    // 常驻的话 90% 的时间都是噪音。
+    seedActivePlan();
+    renderDock("claude-desktop");
+
+    await userEvent.click(await screen.findByText(/^开启转发/));
+
+    await waitFor(() =>
+      expect(toasts.success).toHaveBeenCalledWith(
+        expect.stringContaining("已开启转发"),
+        expect.objectContaining({
+          description: "需要重启 Claude App 才生效",
+          duration: 5000,
+        }),
+      ),
+    );
+  });
+
+  it("结束转发后同样提示重启", async () => {
+    // 撤掉网关配置一样要重启才生效。
+    seedActivePlan();
+    vi.mocked(providersApi.isForwarding).mockResolvedValue(true);
+    renderDock("claude-desktop");
+
+    await userEvent.click(await screen.findByText(/^结束转发/));
+
+    await waitFor(() =>
+      expect(toasts.success).toHaveBeenCalledWith(
+        expect.stringContaining("已结束转发"),
+        expect.objectContaining({
+          description: "需要重启 Claude App 才生效",
+          duration: 5000,
+        }),
+      ),
+    );
+  });
+
+  it("按钮下面不再常驻那句重启说明", async () => {
+    seedActivePlan();
+    renderDock("claude-desktop");
+    await screen.findByText(/^开启转发（Claude App）/);
+    expect(screen.queryByText(/需要重启 Claude App 才生效/)).toBeNull();
+  });
+
+  it("Claude 的转发提示里没有 Desktop 的重启说明", async () => {
+    seedActivePlan();
+    renderDock("claude");
+
+    await userEvent.click(await screen.findByText(/^开启转发/));
+
+    await waitFor(() => expect(toasts.success).toHaveBeenCalled());
+    const [, options] = toasts.success.mock.calls.at(-1)!;
+    expect(options?.description).toBeUndefined();
+  });
+
+  it("其它不可转发的 app 仍然说「暂不支持转发」", async () => {
+    seedActivePlan();
+    renderDock("gemini");
+    expect(await screen.findByText(/暂不支持转发/)).toBeInTheDocument();
+  });
+
+  it("不再有「只改 X 的配置」那行", async () => {
+    // 每个 tab 下面那句说明已按要求去掉。
+    seedActivePlan();
+    renderDock("claude");
+    await screen.findByText(/^开启转发（Claude Code）/);
+    expect(screen.queryByText(/其它 CLI 不受影响/)).toBeNull();
   });
 });

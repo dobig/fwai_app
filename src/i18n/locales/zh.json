@@ -102,6 +102,7 @@
     "tabUniversal": "统一供应商",
     "noProviders": "还没有添加任何供应商",
     "noProvidersDescription": "如果你已有配置，请点击\"导入当前配置\"，所有数据将安全保存在 default 供应商中",
+    "noProvidersDescriptionClaudeDesktop": "点击「添加供应商」。端点和 API Key 会用当前登录的网关凭据预填；切换后需要重启 Claude App 才生效。",
     "noProvidersDescriptionSnippet": "除 Key 和请求地址外的数据（如插件配置）会被保存到通用配置片段，用于在不同供应商之间共享",
     "importCurrent": "导入当前配置",
     "importFromClaude": "将 Claude Code 中已有的供应商导入",

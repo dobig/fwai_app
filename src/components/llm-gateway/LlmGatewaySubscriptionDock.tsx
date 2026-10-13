@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { toast } from "sonner";
+import { GATEWAY_PROVIDER_ID } from "@/config/constants";
+import {
+  DEFAULT_DESKTOP_MODEL_ROWS,
+  rowsToMeta,
+} from "@/lib/claudeDesktopModels";
 import {
   ArrowLeft,
   ChevronDown,
@@ -247,7 +252,6 @@ function perUnitLabel(price: GatewayPeriodPrice): string {
   return `${formatMicrosUSD(price.per_unit_micros)}/${price.per_unit === "week" ? "周" : "月"}`;
 }
 
-const GATEWAY_PROVIDER_ID = "llm-gateway-local";
 const DOCK_OPEN_KEY = "llm-gateway-dock-open";
 
 function initials(name: string): string {
@@ -578,6 +582,29 @@ export function LlmGatewaySubscriptionDock() {
   function buildGatewayProvider(app: ForwardableApp): Provider {
     const token = gatewayOAuthAccessToken();
     const base = getGatewayBaseURL().replace(/\/+$/, "");
+    if (app === "claude-desktop") {
+      // Desktop 读的是自己的 3P profile，但条目形状和 Claude 一样（env 里两个
+      // 键）。额外带一份模型清单：Desktop 的模型菜单按它渲染，留空的话菜单要靠
+      // Desktop 自己去读 /v1/models。只放 Claude 系——直连不改写模型名。
+      return {
+        id: GATEWAY_PROVIDER_ID,
+        name: "LLM Gateway",
+        category: "custom",
+        websiteUrl: base,
+        settingsConfig: {
+          env: {
+            ANTHROPIC_AUTH_TOKEN: token,
+            ANTHROPIC_BASE_URL: base,
+          },
+        },
+        meta: {
+          claudeDesktopMode: "direct",
+          claudeDesktopModelRoutes: rowsToMeta(DEFAULT_DESKTOP_MODEL_ROWS),
+        },
+        notes: `Endpoint: ${base}/v1/messages`,
+        createdAt: Date.now(),
+      };
+    }
     if (app === "claude") {
       return {
         id: GATEWAY_PROVIDER_ID,
@@ -665,6 +692,21 @@ requires_openai_auth = true`,
     }
   }
 
+  /// token 刷新后同步网关条目。
+  ///
+  /// 除了当前选中的那个 app，还要点名同步 Claude Desktop：它的转发可以在用户停留
+  /// 在 Claude 页时开着，而 Desktop 只在启动时读 profile，陈旧的 Key 会一直 401。
+  /// `syncGatewayProviderEntry` 对没有条目或没开转发的 app 自己会早退，白调不要钱。
+  async function syncGatewayEntries(
+    active: ForwardableApp | null,
+  ): Promise<void> {
+    const apps = new Set<ForwardableApp>(["claude-desktop"]);
+    if (active) apps.add(active);
+    for (const app of apps) {
+      await syncGatewayProviderEntry(app);
+    }
+  }
+
   // 仅登出时使用：清掉条目与（若正在启用的）live 配置。规则 1 会在下次
   // 打开 app 时重新补条目，但登出后的机器上不应留下带凭据的供应商。
   async function removeGatewayProvider(): Promise<void> {
@@ -678,6 +720,24 @@ requires_openai_auth = true`,
     } catch {
       // Same idempotency for the codex side.
     }
+    try {
+      // Desktop 这边顺带把 deploymentMode 交还 1p：留着一个 token 已作废的
+      // profile，Desktop 会一直 401，而用户在界面上看不出原因。
+      await providersApi.removeManaged(GATEWAY_PROVIDER_ID, "claude-desktop");
+    } catch {
+      // 同样保持幂等：条目可能从来没建过。
+    }
+  }
+
+  /// Desktop 只在启动时读 profile:开关动完得重启才生效,不说用户会以为没生效。
+  /// 作为同一个提示框的副标题,而不是常驻在按钮下面——那句话 90% 的时间都是噪音。
+  /// 比默认 2 秒长一些,这条比「已开启转发」更需要被看见。
+  function desktopRestartNotice(app: ForwardableApp) {
+    if (app !== "claude-desktop") return undefined;
+    return {
+      description: "需要重启 Claude App 才生效",
+      duration: 5000,
+    };
   }
 
   async function startForwarding(app: ForwardableApp): Promise<void> {
@@ -735,7 +795,10 @@ requires_openai_auth = true`,
         return;
       }
       localStorage.setItem(forwardingFlagKey(app), "1");
-      toast.success(`已开启转发，${name} 配置已更新`);
+      toast.success(
+        `已开启转发，${name} 配置已更新`,
+        desktopRestartNotice(app),
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "开启转发失败");
     } finally {
@@ -754,7 +817,10 @@ requires_openai_auth = true`,
       // 转发前本就没配过凭据的话就直接删掉，不留网关的值。
       await providersApi.stopForwarding(app);
       localStorage.removeItem(forwardingFlagKey(app));
-      toast.success(`已结束转发，${APP_DISPLAY_NAME[app]} 原有配置已还原`);
+      toast.success(
+        `已结束转发，${APP_DISPLAY_NAME[app]} 原有配置已还原`,
+        desktopRestartNotice(app),
+      );
     } catch (error) {
       console.error(`[forwarding] ${app} 配置还原失败`, error);
       toast.error(error instanceof Error ? error.message : "结束转发失败");
@@ -866,8 +932,8 @@ requires_openai_auth = true`,
     // 规则 1 + 凭据就绪：确保条目在列表里，并把最新 token 写进条目数据。
     if (target) {
       await ensureGatewayProviderListed(target);
-      await syncGatewayProviderEntry(target);
     }
+    await syncGatewayEntries(target);
     toast.success(justRegistered ? "注册成功，请验证邮箱" : "登录成功");
   }
 
@@ -1182,7 +1248,7 @@ requires_openai_auth = true`,
       await refreshGatewayToken();
       // 刷新即轮换，旧 token 全部作废。用标准 update 同步条目：live 仅在
       // 该条目正被启用时随之更新（转发 + 启用的合取由列表守卫保证）。
-      if (target) await syncGatewayProviderEntry(target);
+      await syncGatewayEntries(target);
       toast.success("Auth Token 已刷新");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "刷新失败");
@@ -1949,12 +2015,6 @@ requires_openai_auth = true`,
                   ? `结束转发（${activeAppName}）`
                   : `开启转发（${activeAppName}）`}
             </button>
-            {target && (
-              // 说清楚作用范围：用户要能确信别的 CLI 没被碰过。
-              <p className="mt-1.5 text-center text-xs text-muted-foreground">
-                只改 {activeAppName} 的配置，其它 CLI 不受影响
-              </p>
-            )}
 
             {/* 版本过旧提示。挡的只有购买 —— 上面的转发开关照常可用，说清楚
                 这一点，不然人会以为整个客户端废了。 */}

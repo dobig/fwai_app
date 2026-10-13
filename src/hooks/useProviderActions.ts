@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { providersApi, settingsApi, type AppId } from "@/lib/api";
 import { forwardingFlagKey } from "@/lib/apps";
+import { GATEWAY_PROVIDER_ID } from "@/config/constants";
 import type { Provider } from "@/types";
 import {
   useAddProviderMutation,
@@ -87,7 +88,7 @@ export function useProviderActions(activeApp: AppId) {
       // 读全局标志的话 Claude 开着转发时去 Codex 点这个条目也会被放行。问后端
       // 还顺带修掉「用户已经手动切走、备份早已作废，标志却还留着」那个洞——那
       // 时候放行等于触发一次整份写盘。
-      if (provider.id === "llm-gateway-local") {
+      if (provider.id === GATEWAY_PROVIDER_ID) {
         let forwardingOn: boolean;
         try {
           forwardingOn = await providersApi.isForwarding(activeApp);
@@ -119,6 +120,14 @@ export function useProviderActions(activeApp: AppId) {
           t("notifications.switchSuccess", { defaultValue: "切换成功！" }),
           {
             closeButton: true,
+            // Desktop 只在启动时读 profile，不提示的话用户会以为切换没生效。
+            // 和面板上转发开关用同一句话，同一件事别两种说法。
+            ...(activeApp === "claude-desktop"
+              ? {
+                  description: "需要重启 Claude App 才生效",
+                  duration: 5000,
+                }
+              : {}),
           },
         );
       } catch {

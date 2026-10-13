@@ -5,7 +5,9 @@ import { homeDir, join } from "@tauri-apps/api/path";
 import { settingsApi, type AppId } from "@/lib/api";
 import type { SettingsFormState } from "./useSettingsForm";
 
-export type DirectoryAppId = AppId;
+/// Desktop 不在里面：它的配置目录由 Desktop 自己定（见 claude_desktop_config.rs
+/// 的路径解析），没有可供用户覆盖的「配置目录」。
+export type DirectoryAppId = Exclude<AppId, "claude-desktop">;
 type AppDirectoryKey = "claude" | "codex" | "gemini";
 type DirectoryKey = "appConfig" | AppDirectoryKey;
 
