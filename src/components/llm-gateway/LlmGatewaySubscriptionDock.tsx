@@ -827,7 +827,11 @@ requires_openai_auth = true`,
   async function handleToggleForwarding() {
     if (fwdBusy) return;
     if (!target) {
-      toast.info(`${activeAppName} 暂不支持转发`);
+      toast.info(
+        activeApp === "claude-desktop"
+          ? "Claude Desktop 到它自己的页里启用 LLM Gateway"
+          : `${activeAppName} 暂不支持转发`,
+      );
       return;
     }
     if (forwarding) {
@@ -1990,17 +1994,27 @@ requires_openai_auth = true`,
                 <Plug className="h-4 w-4" />
               )}
               {!target
-                ? `${activeAppName} 暂不支持转发`
+                ? activeApp === "claude-desktop"
+                  ? "Claude Desktop 在它自己的页里启用"
+                  : `${activeAppName} 暂不支持转发`
                 : forwarding
                   ? `结束转发（${activeAppName}）`
                   : `开启转发（${activeAppName}）`}
             </button>
-            {target && (
+            {target ? (
               // 说清楚作用范围：用户要能确信别的 CLI 没被碰过。
               <p className="mt-1.5 text-center text-xs text-muted-foreground">
                 只改 {activeAppName} 的配置，其它 CLI 不受影响
               </p>
-            )}
+            ) : activeApp === "claude-desktop" ? (
+              // Desktop 确实支持走网关，只是不经这个开关：它写的是 Desktop 自己的
+              // 3P profile，入口在它那一页的供应商列表里。这里不说清楚，用户会以为
+              // 功能没做。
+              <p className="mt-1.5 text-center text-xs text-muted-foreground">
+                到「Claude Desktop」页启用 LLM Gateway 即可；改完需要重启 Claude
+                Desktop
+              </p>
+            ) : null}
 
             {/* 版本过旧提示。挡的只有购买 —— 上面的转发开关照常可用，说清楚
                 这一点，不然人会以为整个客户端废了。 */}

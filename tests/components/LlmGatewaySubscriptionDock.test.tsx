@@ -2345,3 +2345,27 @@ describe("LlmGatewaySubscriptionDock 加量包规则", () => {
     expect(screen.getByText(/^下一步/).closest("button")).toBeEnabled();
   });
 });
+
+describe("LlmGatewaySubscriptionDock Claude Desktop 页", () => {
+  // Desktop 不在 FORWARDABLE_APPS 里，但它**支持**走网关——只是不经这个开关
+  // （它写的是 Desktop 自己的 3P profile，入口在那一页的供应商列表）。
+  // 原来的 `!target` 分支会一律显示「暂不支持转发」，等于告诉用户功能没做。
+  it("不说「暂不支持转发」，而是指向 Claude Desktop 页", async () => {
+    seedActivePlan();
+    renderDock("claude-desktop");
+
+    expect(
+      await screen.findByText("Claude Desktop 在它自己的页里启用"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/暂不支持转发/)).toBeNull();
+    expect(
+      screen.getByText(/到「Claude Desktop」页启用 LLM Gateway/),
+    ).toBeInTheDocument();
+  });
+
+  it("其它不可转发的 app 仍然说「暂不支持转发」", async () => {
+    seedActivePlan();
+    renderDock("gemini");
+    expect(await screen.findByText(/暂不支持转发/)).toBeInTheDocument();
+  });
+});
