@@ -116,24 +116,20 @@ export function useProviderActions(activeApp: AppId) {
           );
         }
 
-        if (activeApp === "claude-desktop") {
-          // Desktop 只在启动时读 profile：不提示的话用户会以为切换没生效。
-          // macOS 上只关窗口不算退出，必须说清楚。
-          toast.success(
-            "切换成功，重启 Claude Desktop 后生效（macOS 上按 ⌘Q 彻底退出）",
-            {
-              closeButton: true,
-              duration: 8000,
-            },
-          );
-        } else {
-          toast.success(
-            t("notifications.switchSuccess", { defaultValue: "切换成功！" }),
-            {
-              closeButton: true,
-            },
-          );
-        }
+        toast.success(
+          t("notifications.switchSuccess", { defaultValue: "切换成功！" }),
+          {
+            closeButton: true,
+            // Desktop 只在启动时读 profile，不提示的话用户会以为切换没生效。
+            // 和面板上转发开关用同一句话，同一件事别两种说法。
+            ...(activeApp === "claude-desktop"
+              ? {
+                  description: "需要重启 Claude App 才生效",
+                  duration: 5000,
+                }
+              : {}),
+          },
+        );
       } catch {
         // 错误提示由 mutation 处理
       }

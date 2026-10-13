@@ -117,7 +117,7 @@ describe("ClaudeDesktopProviderForm", () => {
 
   it("tells the user Desktop needs a restart", () => {
     renderForm();
-    expect(screen.getByText(/重启 Claude Desktop/)).toBeInTheDocument();
+    expect(screen.getByText(/重启 Claude App/)).toBeInTheDocument();
   });
 
   it("keeps an existing model selection when editing", () => {

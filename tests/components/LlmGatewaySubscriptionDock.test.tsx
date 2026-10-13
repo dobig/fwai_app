@@ -2355,18 +2355,65 @@ describe("LlmGatewaySubscriptionDock Claude Desktop", () => {
     renderDock("claude-desktop");
 
     expect(
-      await screen.findByText(/^开启转发（Claude Desktop）/),
+      await screen.findByText(/^开启转发（Claude App）/),
     ).toBeInTheDocument();
     expect(screen.queryByText(/暂不支持转发/)).toBeNull();
   });
 
-  it("提示要重启 Desktop 才生效", async () => {
-    // Desktop 只在启动时读 profile，不说这句用户会以为开关没生效。
+  it("开启转发后提示要重启 Desktop，5 秒后自己消失", async () => {
+    // Desktop 只在启动时读 profile。这句话做成提示框而不是常驻在按钮下面——
+    // 常驻的话 90% 的时间都是噪音。
     seedActivePlan();
     renderDock("claude-desktop");
-    expect(
-      await screen.findByText(/需要重启 Claude Desktop 才生效/),
-    ).toBeInTheDocument();
+
+    await userEvent.click(await screen.findByText(/^开启转发/));
+
+    await waitFor(() =>
+      expect(toasts.success).toHaveBeenCalledWith(
+        expect.stringContaining("已开启转发"),
+        expect.objectContaining({
+          description: "需要重启 Claude App 才生效",
+          duration: 5000,
+        }),
+      ),
+    );
+  });
+
+  it("结束转发后同样提示重启", async () => {
+    // 撤掉网关配置一样要重启才生效。
+    seedActivePlan();
+    vi.mocked(providersApi.isForwarding).mockResolvedValue(true);
+    renderDock("claude-desktop");
+
+    await userEvent.click(await screen.findByText(/^结束转发/));
+
+    await waitFor(() =>
+      expect(toasts.success).toHaveBeenCalledWith(
+        expect.stringContaining("已结束转发"),
+        expect.objectContaining({
+          description: "需要重启 Claude App 才生效",
+          duration: 5000,
+        }),
+      ),
+    );
+  });
+
+  it("按钮下面不再常驻那句重启说明", async () => {
+    seedActivePlan();
+    renderDock("claude-desktop");
+    await screen.findByText(/^开启转发（Claude App）/);
+    expect(screen.queryByText(/需要重启 Claude App 才生效/)).toBeNull();
+  });
+
+  it("Claude 的转发提示里没有 Desktop 的重启说明", async () => {
+    seedActivePlan();
+    renderDock("claude");
+
+    await userEvent.click(await screen.findByText(/^开启转发/));
+
+    await waitFor(() => expect(toasts.success).toHaveBeenCalled());
+    const [, options] = toasts.success.mock.calls.at(-1)!;
+    expect(options?.description).toBeUndefined();
   });
 
   it("其它不可转发的 app 仍然说「暂不支持转发」", async () => {

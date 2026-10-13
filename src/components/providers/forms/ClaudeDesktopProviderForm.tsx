@@ -45,7 +45,7 @@ function readEnv(
 }
 
 /**
- * Claude Desktop 的供应商表单。
+ * Claude App（Claude Desktop）的供应商表单。
  *
  * 刻意不复用 `ProviderForm`:那里有十几处 `appId === "claude"` 的分支(预设、模板
  * 变量、通用配置片段、API Key 链接),对 Desktop 一个都不适用。Desktop 只需要
@@ -171,7 +171,7 @@ export function ClaudeDesktopProviderForm({
         <div className="space-y-1">
           <Label>模型清单</Label>
           <p className="text-xs text-muted-foreground">
-            勾选要在 Claude Desktop 模型菜单里出现的档位。全不勾则由 Desktop
+            勾选要在 Claude App 模型菜单里出现的档位。全不勾则由 Claude App
             自己去读网关的 /v1/models。
           </p>
           <p className="text-xs text-muted-foreground">
@@ -232,7 +232,7 @@ export function ClaudeDesktopProviderForm({
       </div>
 
       <p className="text-xs text-muted-foreground">
-        切换后需要重启 Claude Desktop 才生效(macOS 上要按 ⌘Q
+        切换后需要重启 Claude App 才生效(macOS 上要按 ⌘Q
         彻底退出,只关窗口不行)。
       </p>
 

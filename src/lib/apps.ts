@@ -44,7 +44,7 @@ export const DEFAULT_VISIBLE_APPS: VisibleApps = {
 
 export const APP_DISPLAY_NAME: Record<AppId, string> = {
   claude: "Claude Code",
-  "claude-desktop": "Claude Desktop",
+  "claude-desktop": "Claude App",
   codex: "Codex",
   gemini: "Gemini",
 };

@@ -123,7 +123,7 @@ export function validateDesktopForm(input: {
     const model = row.model.trim();
     if (!model) return `${row.role} 勾选了但没填模型名`;
     if (!isClaudeSafeModelId(model)) {
-      return `「${model}」不是 Claude Desktop 能识别的模型名，只支持 claude-* 的 Sonnet / Opus / Haiku / Fable`;
+      return `「${model}」不是 Claude App 能识别的模型名，只支持 claude-* 的 Sonnet / Opus / Haiku / Fable`;
     }
   }
   return null;

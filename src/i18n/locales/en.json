@@ -102,7 +102,7 @@
     "tabUniversal": "Universal",
     "noProviders": "No providers added yet",
     "noProvidersDescription": "If you already have a config, click \"Import Current Config\" — all data will be safely saved in a default provider",
-    "noProvidersDescriptionClaudeDesktop": "Click “Add provider”. The endpoint and API key are prefilled from your current gateway login. Claude Desktop must be restarted for a switch to take effect.",
+    "noProvidersDescriptionClaudeDesktop": "Click “Add provider”. The endpoint and API key are prefilled from your current gateway login. Claude App must be restarted for a switch to take effect.",
     "noProvidersDescriptionSnippet": "Settings other than API key and endpoint (e.g. plugins) will be saved to a common config snippet for sharing across providers",
     "importCurrent": "Import Current Config",
     "importFromClaude": "Import existing providers from Claude Code",

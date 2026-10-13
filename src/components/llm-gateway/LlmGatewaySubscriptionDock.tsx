@@ -729,6 +729,17 @@ requires_openai_auth = true`,
     }
   }
 
+  /// Desktop 只在启动时读 profile:开关动完得重启才生效,不说用户会以为没生效。
+  /// 作为同一个提示框的副标题,而不是常驻在按钮下面——那句话 90% 的时间都是噪音。
+  /// 比默认 2 秒长一些,这条比「已开启转发」更需要被看见。
+  function desktopRestartNotice(app: ForwardableApp) {
+    if (app !== "claude-desktop") return undefined;
+    return {
+      description: "需要重启 Claude App 才生效",
+      duration: 5000,
+    };
+  }
+
   async function startForwarding(app: ForwardableApp): Promise<void> {
     const token = gatewayOAuthAccessToken();
     // 规则 2：没登录不能开启转发。
@@ -784,7 +795,10 @@ requires_openai_auth = true`,
         return;
       }
       localStorage.setItem(forwardingFlagKey(app), "1");
-      toast.success(`已开启转发，${name} 配置已更新`);
+      toast.success(
+        `已开启转发，${name} 配置已更新`,
+        desktopRestartNotice(app),
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "开启转发失败");
     } finally {
@@ -803,7 +817,10 @@ requires_openai_auth = true`,
       // 转发前本就没配过凭据的话就直接删掉，不留网关的值。
       await providersApi.stopForwarding(app);
       localStorage.removeItem(forwardingFlagKey(app));
-      toast.success(`已结束转发，${APP_DISPLAY_NAME[app]} 原有配置已还原`);
+      toast.success(
+        `已结束转发，${APP_DISPLAY_NAME[app]} 原有配置已还原`,
+        desktopRestartNotice(app),
+      );
     } catch (error) {
       console.error(`[forwarding] ${app} 配置还原失败`, error);
       toast.error(error instanceof Error ? error.message : "结束转发失败");
@@ -1998,12 +2015,6 @@ requires_openai_auth = true`,
                   ? `结束转发（${activeAppName}）`
                   : `开启转发（${activeAppName}）`}
             </button>
-            {activeApp === "claude-desktop" && (
-              // Desktop 只在启动时读 profile，不说这句用户会以为开关没生效。
-              <p className="mt-1.5 text-center text-xs text-muted-foreground">
-                需要重启 Claude Desktop 才生效（macOS 上按 ⌘Q 彻底退出）
-              </p>
-            )}
 
             {/* 版本过旧提示。挡的只有购买 —— 上面的转发开关照常可用，说清楚
                 这一点，不然人会以为整个客户端废了。 */}
