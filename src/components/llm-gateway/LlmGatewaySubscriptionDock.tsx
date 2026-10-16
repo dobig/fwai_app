@@ -503,11 +503,6 @@ export function LlmGatewaySubscriptionDock() {
   const [org, setOrg] = useState<GatewayOrganization | null>(
     () => loadGatewayOrgCache()?.org ?? null,
   );
-  const [orgFetchedAt, setOrgFetchedAt] = useState<number | null>(
-    () => loadGatewayOrgCache()?.fetchedAt ?? null,
-  );
-  const orgIsStale =
-    orgFetchedAt != null && Date.now() - orgFetchedAt > 10 * 60 * 1000;
   const isOrgMember = Boolean(login && org);
   const currentProject = org ? currentOrgProject(org) : null;
   // 当前项目用不了：没有项目，或者项目没给这个人分额度。
@@ -938,10 +933,8 @@ requires_openai_auth = true`,
       await stopForwarding(target);
       return;
     }
-    // 组织成员没有个人套餐，额度来自项目 —— 下面那道「请先购买会员」对他们
-    // 永远是错的。没项目、没额度时账号屏已经有提示，CLI 被网关拒绝时也会看到
-    // 原因，这里不拦。
-    if (isActive || isOrgMember) {
+    // 组织成员的 active 由服务端按当前项目算：当前项目有额度才为 true。
+    if (isActive) {
       await startForwarding(target);
       return;
     }
@@ -963,6 +956,21 @@ requires_openai_auth = true`,
       // 没问到答案。这里不能说「请先购买会员」——断网时那句话是假的，会把人
       // 推去重复下单。
       toast.error("无法确认套餐状态，请检查网络后重试");
+      return;
+    }
+    // 服务端确认了没有额度。先看是不是组织成员：组织成员不能自己购买（下单
+    // 会被 409 organization_member 打回），该做的是换项目或找管理员。缓存可能
+    // 还停在「不是组织成员」，所以这里重读一次；没问到就退回看缓存。
+    setFwdBusy(true);
+    let orgNow: GatewayOrganization | null | undefined;
+    try {
+      orgNow = await reloadOrg();
+    } finally {
+      setFwdBusy(false);
+    }
+    const memberOrg = orgNow === undefined ? org : orgNow;
+    if (login && memberOrg) {
+      promptNoProjectAllowance(memberOrg);
       return;
     }
     // 服务端确认了确实没开通。未验证邮箱的话连购买屏都进不去，goToPurchase 会
@@ -1261,7 +1269,6 @@ requires_openai_auth = true`,
       setUsage(null);
       setUsageFetchedAt(null);
       setOrg(null);
-      setOrgFetchedAt(null);
       setResetCode("");
       setResetPasswordInput("");
       setResetRequested(false);
@@ -1312,7 +1319,6 @@ requires_openai_auth = true`,
       setUsage(null);
       setUsageFetchedAt(null);
       setOrg(null);
-      setOrgFetchedAt(null);
       setLogin(null);
       setScreen("auth");
       setAuthMode("login");
@@ -1351,29 +1357,55 @@ requires_openai_auth = true`,
   // ---- organization projects ------------------------------------------------
 
   // 重读组织信息并写回缓存。404 = 不是组织成员（含老网关），落成 null；网络
-  // 错误保留上一份，用 orgFetchedAt 标陈旧 —— 不能因为一次断网就把组织成员
+  // 错误保留上一份 —— 不能因为一次断网就把组织成员
   // 当成个人用户、给他看「购买套餐」。401 先换 token 再试一次，同用量那边。
   // 登录过期的提示交给用量刷新去说，这里不重复弹。
-  async function reloadOrg(): Promise<void> {
+  //
+  // 返回读到的结果；没问到（网络错误、登录过期、期间已登出）返回 undefined，
+  // 调用方据此决定要不要退回看缓存。
+  async function reloadOrg(): Promise<GatewayOrganization | null | undefined> {
     const read = async () => {
       const next = await fetchGatewayOrganization();
       // 请求在路上时用户登出了：不要把上一个账号的组织写回去。
-      if (!loadGatewayTokens()) return;
+      if (!loadGatewayTokens()) return undefined;
       saveGatewayOrgCache(next);
       setOrg(next);
-      setOrgFetchedAt(Date.now());
+      return next;
     };
     try {
-      await read();
+      return await read();
     } catch (error) {
-      if (gatewayErrorStatus(error) !== 401) return;
+      if (gatewayErrorStatus(error) !== 401) return undefined;
       try {
         await refreshGatewayToken();
-        await read();
+        return await read();
       } catch {
         // 留给用量刷新提示「登录已过期」。
+        return undefined;
       }
     }
+  }
+
+  // 组织成员当前项目用不了时的去处：有项目就带去切换屏，没有就只能找管理员。
+  // 绝不提「购买」—— 组织成员买不了。
+  function promptNoProjectAllowance(memberOrg: GatewayOrganization) {
+    if (memberOrg.projects.length === 0 || !memberOrg.current_project_id) {
+      toast.info("还没有加入项目，请联系组织管理员");
+      setScreen("account");
+      return;
+    }
+    toast.info("当前项目没有额度，请切换到其他项目或联系组织管理员");
+    openProjects();
+  }
+
+  // 下单 / 报价被 409 organization_member 打回：本地缓存还以为这是个人用户
+  // （组织成员看不到购买入口）。重读组织信息，回账号屏换成项目界面。
+  function handleOrgMemberPurchaseBlocked(error: unknown): boolean {
+    if (gatewayErrorCode(error) !== "organization_member") return false;
+    toast.info("组织成员的额度由组织分配，不能自己购买");
+    void reloadOrg();
+    setScreen("account");
+    return true;
   }
 
   function openProjects() {
@@ -1382,7 +1414,7 @@ requires_openai_auth = true`,
   }
 
   // 切换当前项目。不做乐观更新：当前项目对所有设备生效，界面只跟服务端确认
-  // 过的结果走。成功后回账号屏 —— 那边的刷新会顺带拉到新项目的百分比。
+  // 过的结果走。
   async function handlePickProject(project: GatewayOrgProject) {
     if (switchingProjectId || !org) return;
     setSwitchingProjectId(project.id);
@@ -1399,7 +1431,17 @@ requires_openai_auth = true`,
       const next = { ...org, current_project_id: res.current_project_id };
       saveGatewayOrgCache(next);
       setOrg(next);
-      setOrgFetchedAt(Date.now());
+      // /v1/subscription 和 /api/oauth/usage 都按当前项目算。先把两份都换成
+      // 新项目的再回账号屏：否则用量卡会顶着新项目的名字显示旧项目的数字，
+      // 转发判断用的 active 也还是旧项目的。读失败不挡切换 —— 服务端已经切了。
+      await Promise.allSettled([
+        refreshSubscription(),
+        fetchGatewayUsage().then((u) => {
+          saveGatewayUsageCache(u);
+          setUsage(u);
+          setUsageFetchedAt(Date.now());
+        }),
+      ]);
       toast.success(
         project.has_allowance
           ? `已切换到「${project.name}」`
@@ -1682,6 +1724,7 @@ requires_openai_auth = true`,
         goToVerifyEmail();
         return;
       }
+      if (handleOrgMemberPurchaseBlocked(error)) return;
       setQuoteError(
         (asExtra ? extraPurchaseErrorMessage(error) : null) ??
           (error instanceof Error ? error.message : "获取报价失败，请重试"),
@@ -1776,6 +1819,7 @@ requires_openai_auth = true`,
         goToVerifyEmail();
         return;
       }
+      if (handleOrgMemberPurchaseBlocked(error)) return;
       toast.error(
         (asExtra ? extraPurchaseErrorMessage(error) : null) ??
           (error instanceof Error ? error.message : "购买失败"),
@@ -2088,9 +2132,15 @@ requires_openai_auth = true`,
                   )}
                 </div>
               </div>
-              {isOrgMember ? (
-                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-semibold text-primary">
-                  组织
+              {/* 组织成员的套餐名是「组织名 · 当前项目名」，不是 tier（服务端
+                  暂时回 enterprise，对用户没有意义）。 */}
+              {isOrgMember && org ? (
+                <span
+                  className="max-w-[60%] flex-none truncate rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-semibold text-primary"
+                  title={`${org.organization.name} · ${currentProject?.name ?? "未加入项目"}`}
+                >
+                  {org.organization.name} ·{" "}
+                  {currentProject?.name ?? "未加入项目"}
                 </span>
               ) : (
                 <span
@@ -2175,59 +2225,25 @@ requires_openai_auth = true`,
                 )}
               </div>
             )}
-            {/* 组织成员的用量就是当前项目的，和切换屏同一份数据 —— 切换前后
-                两边的数字必然对得上。 */}
-            {isOrgMember &&
-              currentProject?.has_allowance &&
-              (currentProject.five_hour || currentProject.week) && (
-                <div
-                  className={`mb-3.5 space-y-2.5 rounded-xl border border-border bg-muted/40 p-3 ${orgIsStale ? "opacity-70" : ""}`}
-                >
-                  <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">
-                    <span className="truncate">
-                      用量 · {currentProject.name}
-                    </span>
-                    {orgIsStale && orgFetchedAt && (
-                      <span
-                        className="flex-none"
-                        title="当前显示的是最近一次成功获取的数据"
-                      >
-                        更新于 {formatStaleAge(orgFetchedAt)}
-                      </span>
-                    )}
-                  </div>
-                  {currentProject.five_hour && (
-                    <UsageBar
-                      label="5 小时"
-                      window={{
-                        utilization: currentProject.five_hour.used_percent,
-                        resets_at: currentProject.five_hour.resets_at,
-                      }}
-                    />
-                  )}
-                  {currentProject.week && (
-                    <UsageBar
-                      label="7 天"
-                      window={{
-                        utilization: currentProject.week.used_percent,
-                        resets_at: currentProject.week.resets_at,
-                      }}
-                    />
-                  )}
-                </div>
-              )}
-
-            {!isOrgMember &&
-              isActive &&
+            {/* 组织成员的 /api/oauth/usage（含按模型拆分）由服务端按当前项目算，
+                同一张卡，标题带上项目名。项目没额度时上面的提示代替这张卡。 */}
+            {(isOrgMember ? currentProject?.has_allowance : isActive) &&
               usage &&
               (usage.five_hour || usage.seven_day) && (
                 <div
                   className={`mb-3.5 space-y-2.5 rounded-xl border border-border bg-muted/40 p-3 ${usageIsStale ? "opacity-70" : ""}`}
                 >
-                  <div className="flex items-center justify-between text-[11px] font-medium text-muted-foreground">
-                    <span>用量</span>
+                  <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">
+                    <span className="truncate">
+                      {isOrgMember && currentProject
+                        ? `用量 · ${currentProject.name}`
+                        : "用量"}
+                    </span>
                     {usageIsStale && usageFetchedAt && (
-                      <span title="当前显示的是最近一次成功获取的数据">
+                      <span
+                        className="flex-none"
+                        title="当前显示的是最近一次成功获取的数据"
+                      >
                         更新于 {formatStaleAge(usageFetchedAt)}
                       </span>
                     )}
