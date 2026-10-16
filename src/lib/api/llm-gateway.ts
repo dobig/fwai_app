@@ -928,6 +928,98 @@ export async function fetchGatewayUsage(): Promise<GatewayUsage> {
   );
 }
 
+// --- Organization projects ----------------------------------------------------
+//
+// 组织成员可以属于多个项目，每个项目一份额度，请求只扣**当前项目**的。当前项目
+// 存在服务端，对该用户所有设备生效。**只有百分比，没有金额** —— 和个人套餐的
+// 用量条同一个理由。不是组织成员的用户完全不碰这一块。
+
+export interface GatewayProjectWindow {
+  used_percent: number;
+  resets_at?: string;
+}
+
+export interface GatewayOrgProject {
+  id: string;
+  name: string;
+  // false：这个项目没有给该成员分配额度。窗口此时可能为 null。
+  has_allowance: boolean;
+  five_hour: GatewayProjectWindow | null;
+  week: GatewayProjectWindow | null;
+}
+
+export interface GatewayOrganization {
+  organization: { name: string };
+  // null：组织成员还没有被加入任何项目。
+  current_project_id: string | null;
+  projects: GatewayOrgProject[];
+}
+
+// fetchGatewayOrganization 读当前用户的组织与项目。不是组织成员返回 null。
+//
+// 404 一律当「不是组织成员」：服务端明确说 not_org_member 是 404，老网关根本
+// 没有这个接口也是 404 —— 两种情况 app 都该和今天一模一样。其它错误照常抛，
+// 调用方据此保留上一次的缓存，而不是把组织成员误当成个人用户。
+export async function fetchGatewayOrganization(): Promise<GatewayOrganization | null> {
+  try {
+    return await gatewayRequest<GatewayOrganization>(
+      "/v1/me/organization",
+      { method: "GET" },
+      true,
+    );
+  } catch (error) {
+    if (error instanceof GatewayApiError && error.status === 404) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+// switchGatewayProject 切换当前项目。不是该用户所在的项目时服务端回 403
+// project_forbidden（多半是刚被移出），由调用方提示并重拉列表。
+export async function switchGatewayProject(
+  projectId: string,
+): Promise<{ current_project_id: string }> {
+  return gatewayRequest<{ current_project_id: string }>(
+    "/v1/me/organization/project",
+    { method: "PUT", body: JSON.stringify({ project_id: projectId }) },
+    true,
+  );
+}
+
+// 组织信息的本地缓存。启动时先用它渲染，组织成员打开面板就不会先闪一下个人
+// 账号的界面（「我的套餐」「购买套餐」）再跳成项目界面。
+const ORG_CACHE_KEY = "llm-gateway-org-cache";
+
+export interface CachedGatewayOrganization {
+  org: GatewayOrganization | null;
+  fetchedAt: number; // epoch ms
+}
+
+export function saveGatewayOrgCache(org: GatewayOrganization | null): void {
+  localStorage.setItem(
+    ORG_CACHE_KEY,
+    JSON.stringify({
+      org,
+      fetchedAt: Date.now(),
+    } satisfies CachedGatewayOrganization),
+  );
+}
+
+export function loadGatewayOrgCache(): CachedGatewayOrganization | null {
+  const raw = localStorage.getItem(ORG_CACHE_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as CachedGatewayOrganization;
+  } catch {
+    return null;
+  }
+}
+
+export function clearGatewayOrgCache(): void {
+  localStorage.removeItem(ORG_CACHE_KEY);
+}
+
 // setSecretRedaction 开关「发送前隐藏密钥」。返回刷新后的个人资料，里面的
 // redact_secrets 就是服务端生效的值 —— 以它为准，不用本地的开关状态。
 export async function setSecretRedaction(
