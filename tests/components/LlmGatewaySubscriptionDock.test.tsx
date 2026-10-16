@@ -211,6 +211,8 @@ beforeEach(() => {
     five_hour: null,
     seven_day: null,
   });
+  // 默认不是组织成员（404 → null），界面和以前一样。组织成员的 case 自己覆盖。
+  vi.spyOn(gateway, "fetchGatewayOrganization").mockResolvedValue(null);
   vi.spyOn(providersApi, "isForwarding").mockResolvedValue(false);
   vi.spyOn(providersApi, "getAll").mockResolvedValue({});
   vi.spyOn(providersApi, "add").mockResolvedValue(undefined as never);
@@ -2428,5 +2430,248 @@ describe("LlmGatewaySubscriptionDock Claude Desktop", () => {
     renderDock("claude");
     await screen.findByText(/^开启转发（Claude Code）/);
     expect(screen.queryByText(/其它 CLI 不受影响/)).toBeNull();
+  });
+});
+
+// 组织成员：额度来自项目，请求只扣当前项目的。盯的是几件事：
+// 1. 不是组织成员时界面和以前一模一样；
+// 2. 组织成员看不到个人套餐、购买、兑换码，界面上没有金额；
+// 3. 切换只跟服务端确认过的结果走，失败时说清楚、不乱改当前项目；
+// 4. 组织成员开转发不会被「请先购买会员」挡住。
+function orgFixture(
+  patch: Partial<gateway.GatewayOrganization> = {},
+): gateway.GatewayOrganization {
+  return {
+    organization: { name: "Acme AI 研发中心" },
+    current_project_id: "prj_core",
+    projects: [
+      {
+        id: "prj_core",
+        name: "核心模型",
+        has_allowance: true,
+        five_hour: { used_percent: 41, resets_at: "2026-10-16T10:00:00Z" },
+        week: { used_percent: 8, resets_at: "2026-10-20T13:15:00Z" },
+      },
+      {
+        id: "prj_app",
+        name: "应用平台",
+        has_allowance: true,
+        five_hour: { used_percent: 93, resets_at: "2026-10-16T08:00:00Z" },
+        week: { used_percent: 62, resets_at: "2026-10-18T13:15:00Z" },
+      },
+      {
+        id: "prj_design",
+        name: "设计稿生成",
+        has_allowance: false,
+        five_hour: null,
+        week: null,
+      },
+    ],
+    ...patch,
+  };
+}
+
+function mockOrg(org: gateway.GatewayOrganization | null = orgFixture()) {
+  return vi.spyOn(gateway, "fetchGatewayOrganization").mockResolvedValue(org);
+}
+
+const projectRow = () =>
+  screen.findByRole("button", { name: /Acme AI 研发中心/ });
+
+describe("LlmGatewaySubscriptionDock 组织项目", () => {
+  it("不是组织成员：没有项目界面，套餐和购买照旧", async () => {
+    seedActivePlan();
+    renderDock();
+
+    expect(await screen.findByText("购买套餐")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(gateway.fetchGatewayOrganization).toHaveBeenCalled(),
+    );
+    expect(screen.queryByText("组织项目")).toBeNull();
+    expect(screen.getByText("使用兑换码")).toBeInTheDocument();
+  });
+
+  it("组织成员：显示组织和当前项目的用量，不出现套餐、购买和金额", async () => {
+    seedActivePlan();
+    mockOrg();
+    renderDock();
+
+    expect(await projectRow()).toHaveTextContent("核心模型");
+    expect(await screen.findByText("用量 · 核心模型")).toBeInTheDocument();
+    expect(screen.getByText("41.0%")).toBeInTheDocument();
+    expect(screen.getByText("组织")).toBeInTheDocument();
+    expect(screen.queryByText("购买套餐")).toBeNull();
+    expect(screen.queryByText("使用兑换码")).toBeNull();
+    expect(screen.queryByText("我的套餐")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/\$/);
+  });
+
+  it("缓存里是组织成员时，首屏就是项目界面", async () => {
+    seedActivePlan();
+    gateway.saveGatewayOrgCache(orgFixture());
+    // 请求还没回来。
+    vi.spyOn(gateway, "fetchGatewayOrganization").mockReturnValue(
+      new Promise(() => {}),
+    );
+    renderDock();
+
+    expect(await projectRow()).toHaveTextContent("核心模型");
+    expect(screen.queryByText("购买套餐")).toBeNull();
+  });
+
+  it("网络错误时保留缓存，不把组织成员当成个人用户", async () => {
+    seedActivePlan();
+    gateway.saveGatewayOrgCache(orgFixture());
+    vi.spyOn(gateway, "fetchGatewayOrganization").mockRejectedValue(
+      new TypeError("Failed to fetch"),
+    );
+    renderDock();
+
+    await waitFor(() =>
+      expect(gateway.fetchGatewayOrganization).toHaveBeenCalled(),
+    );
+    expect(await projectRow()).toHaveTextContent("核心模型");
+    expect(screen.queryByText("购买套餐")).toBeNull();
+  });
+
+  it("切换项目：PUT 成功后回账号屏，用量变成新项目的", async () => {
+    seedActivePlan();
+    mockOrg();
+    const put = vi
+      .spyOn(gateway, "switchGatewayProject")
+      .mockResolvedValue({ current_project_id: "prj_app" });
+    renderDock();
+
+    await userEvent.click(await projectRow());
+    expect(await screen.findByText("切换项目")).toBeInTheDocument();
+    // 列表里是全部项目及各自的百分比。
+    expect(screen.getByText("93%")).toBeInTheDocument();
+    expect(screen.getByText("这个项目没有给你分配额度")).toBeInTheDocument();
+
+    // 服务端此后返回新的当前项目。
+    mockOrg(orgFixture({ current_project_id: "prj_app" }));
+    await userEvent.click(screen.getByRole("button", { name: /应用平台/ }));
+
+    await waitFor(() => expect(put).toHaveBeenCalledWith("prj_app"));
+    expect(toasts.success).toHaveBeenCalledWith("已切换到「应用平台」");
+    expect(await screen.findByText("用量 · 应用平台")).toBeInTheDocument();
+    expect(screen.getByText("93.0%")).toBeInTheDocument();
+  });
+
+  it("切换 403：提示已不在该项目，并重拉列表", async () => {
+    seedActivePlan();
+    const fetchOrg = mockOrg();
+    vi.spyOn(gateway, "switchGatewayProject").mockRejectedValue(
+      new GatewayApiError(403, "project_forbidden"),
+    );
+    renderDock();
+
+    await userEvent.click(await projectRow());
+    await screen.findByText("切换项目");
+    const callsBefore = fetchOrg.mock.calls.length;
+    await userEvent.click(screen.getByRole("button", { name: /应用平台/ }));
+
+    expect(
+      await screen.findByText("你已不在「应用平台」这个项目里，列表已刷新"),
+    ).toBeInTheDocument();
+    expect(toasts.error).toHaveBeenCalledWith("切换失败：没有这个项目的权限");
+    await waitFor(() =>
+      expect(fetchOrg.mock.calls.length).toBeGreaterThan(callsBefore),
+    );
+    // 还停在切换屏，当前项目没变。
+    expect(screen.getByText("切换项目")).toBeInTheDocument();
+  });
+
+  it("切换网络错误：提示重试，当前项目不变", async () => {
+    seedActivePlan();
+    mockOrg();
+    vi.spyOn(gateway, "switchGatewayProject").mockRejectedValue(
+      new TypeError("Failed to fetch"),
+    );
+    renderDock();
+
+    await userEvent.click(await projectRow());
+    await screen.findByText("切换项目");
+    await userEvent.click(screen.getByRole("button", { name: /应用平台/ }));
+
+    expect(
+      await screen.findByText("切换失败，请检查网络后重试；当前项目没有变化"),
+    ).toBeInTheDocument();
+    expect(toasts.success).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /核心模型/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+  });
+
+  it("当前项目没有额度：提示切换，点按钮进切换屏", async () => {
+    seedActivePlan();
+    mockOrg(orgFixture({ current_project_id: "prj_design" }));
+    renderDock();
+
+    expect(
+      await screen.findByText(
+        "「设计稿生成」这个项目没有给你分配额度，可以切换到其他项目。",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^用量/)).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "切换项目" }));
+    expect(
+      await screen.findByText(/切换后，之后的请求从所选项目的额度里扣/),
+    ).toBeInTheDocument();
+  });
+
+  it("还没有加入项目：提示联系管理员", async () => {
+    seedActivePlan();
+    mockOrg(orgFixture({ current_project_id: null, projects: [] }));
+    renderDock();
+
+    expect(
+      await screen.findByText(/还没有加入项目，请联系组织管理员/),
+    ).toBeInTheDocument();
+    expect(await projectRow()).toBeDisabled();
+  });
+
+  it("组织成员开启转发不走购买拦截", async () => {
+    seedLoggedOutOfPlan();
+    mockOrg();
+    const fetchSub = vi.spyOn(gateway, "fetchGatewaySubscription");
+    renderDock();
+
+    await projectRow();
+    await userEvent.click(await startButton());
+
+    await waitFor(() =>
+      expect(providersApi.startForwarding).toHaveBeenCalled(),
+    );
+    expect(fetchSub).not.toHaveBeenCalled();
+    expect(toasts.info).not.toHaveBeenCalledWith("请先购买会员再开启转发");
+  });
+
+  it("窗口回到前台时重读组织信息", async () => {
+    seedActivePlan();
+    const fetchOrg = mockOrg();
+    renderDock();
+
+    await projectRow();
+    const callsBefore = fetchOrg.mock.calls.length;
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() =>
+      expect(fetchOrg.mock.calls.length).toBeGreaterThan(callsBefore),
+    );
+  });
+
+  it("登出清掉组织缓存", async () => {
+    seedActivePlan();
+    mockOrg();
+    renderDock();
+
+    await projectRow();
+    expect(gateway.loadGatewayOrgCache()?.org).not.toBeNull();
+    await userEvent.click(await screen.findByText("登出"));
+
+    await waitFor(() => expect(gateway.loadGatewayOrgCache()).toBeNull());
   });
 });
