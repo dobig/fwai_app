@@ -2680,17 +2680,96 @@ describe("LlmGatewaySubscriptionDock 组织项目", () => {
     expect(await projectRow()).toBeDisabled();
   });
 
-  it("组织成员当前项目有额度（active=true）：直接开启转发", async () => {
+  it("组织成员当前项目有额度（active=true）：直接开启转发，不额外请求组织信息", async () => {
     seedActivePlan();
-    mockOrg();
+    const fetchOrg = mockOrg();
+    renderDock();
+
+    await projectRow();
+    await waitFor(() => expect(fetchOrg).toHaveBeenCalled());
+    const callsBefore = fetchOrg.mock.calls.length;
+    await userEvent.click(await startButton());
+
+    await waitFor(() =>
+      expect(providersApi.startForwarding).toHaveBeenCalled(),
+    );
+    expect(fetchOrg.mock.calls.length).toBe(callsBefore);
+  });
+
+  it("组织成员所有项目都没额度：提示联系管理员，停在账号屏", async () => {
+    seedLoggedOutOfPlan();
+    mockOrg(
+      orgFixture({
+        current_project_id: "prj_design",
+        projects: orgFixture().projects.map((p) => ({
+          ...p,
+          has_allowance: false,
+        })),
+      }),
+    );
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue({
+      subscription: { active: false, tier: "enterprise" },
+    });
+    renderDock();
+
+    expect(
+      await screen.findByText("你所在的项目都没有额度，请联系组织管理员。"),
+    ).toBeInTheDocument();
+    // 没有可换的项目，提示里不给「切换项目」按钮。
+    expect(screen.queryByRole("button", { name: "切换项目" })).toBeNull();
+    await userEvent.click(await startButton());
+
+    await waitFor(() =>
+      expect(toasts.info).toHaveBeenCalledWith(
+        "你所在的项目都没有额度，请联系组织管理员",
+      ),
+    );
+    expect(
+      screen.queryByText(/切换后，之后的请求从所选项目的额度里扣/),
+    ).toBeNull();
+    expect(screen.getByText("我的账号")).toBeInTheDocument();
+    expect(providersApi.startForwarding).not.toHaveBeenCalled();
+    expect(toasts.info).not.toHaveBeenCalledWith("请先购买会员再开启转发");
+  });
+
+  it("组织成员 current_project_id=null：提示还没有加入项目", async () => {
+    seedLoggedOutOfPlan();
+    mockOrg(orgFixture({ current_project_id: null }));
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue({
+      subscription: { active: false, tier: "enterprise" },
+    });
     renderDock();
 
     await projectRow();
     await userEvent.click(await startButton());
 
     await waitFor(() =>
-      expect(providersApi.startForwarding).toHaveBeenCalled(),
+      expect(toasts.info).toHaveBeenCalledWith(
+        "还没有加入项目，请联系组织管理员",
+      ),
     );
+    expect(providersApi.startForwarding).not.toHaveBeenCalled();
+    expect(gateway.fetchPlanCatalog).not.toHaveBeenCalled();
+  });
+
+  it("组织成员 /v1/subscription 网络失败：提示网络错误，不提购买", async () => {
+    seedLoggedOutOfPlan();
+    mockOrg();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockRejectedValue(
+      new TypeError("Failed to fetch"),
+    );
+    renderDock();
+
+    await projectRow();
+    await userEvent.click(await startButton());
+
+    await waitFor(() =>
+      expect(toasts.error).toHaveBeenCalledWith(
+        "无法确认套餐状态，请检查网络后重试",
+      ),
+    );
+    expect(toasts.info).not.toHaveBeenCalledWith("请先购买会员再开启转发");
+    expect(providersApi.startForwarding).not.toHaveBeenCalled();
   });
 
   it("组织成员 active=false：提示切换项目并打开切换屏，不提购买", async () => {
@@ -2746,6 +2825,57 @@ describe("LlmGatewaySubscriptionDock 组织项目", () => {
     // 没进购买屏：进购买屏会拉一次目录。
     expect(gateway.fetchPlanCatalog).not.toHaveBeenCalled();
     expect(providersApi.startForwarding).not.toHaveBeenCalled();
+  });
+
+  it("下单被 409 organization_member 打回：提示不能自己购买，回账号屏并重读组织信息", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    vi.spyOn(gateway, "createPlanOrder").mockRejectedValue(
+      new GatewayApiError(409, "organization_member"),
+    );
+    renderDock();
+
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("$100"));
+    mockQuote({ action: "upgrade_now" });
+    await userEvent.click(await screen.findByText(/^下一步/));
+    const fetchOrg = mockOrg();
+    await userEvent.click(await screen.findByText(/^微信支付/));
+
+    await waitFor(() =>
+      expect(toasts.info).toHaveBeenCalledWith(
+        "组织成员的额度由组织分配，不能自己购买",
+      ),
+    );
+    await waitFor(() => expect(fetchOrg).toHaveBeenCalled());
+    expect(await projectRow()).toHaveTextContent("核心模型");
+    expect(toasts.error).not.toHaveBeenCalled();
+  });
+
+  it("兑换被 409 organization_member 打回：提示不能使用兑换码，回账号屏", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "redeemPromoCode").mockRejectedValue(
+      new GatewayApiError(409, "organization_member"),
+    );
+    renderDock();
+
+    await userEvent.click(await screen.findByText("使用兑换码"));
+    await userEvent.type(
+      await screen.findByPlaceholderText("ABCDE-FGHJK"),
+      "ABCDE-FGHJK",
+    );
+    const fetchOrg = mockOrg();
+    await userEvent.click(screen.getByRole("button", { name: "兑换" }));
+
+    await waitFor(() =>
+      expect(toasts.info).toHaveBeenCalledWith("组织成员不能使用兑换码"),
+    );
+    await waitFor(() => expect(fetchOrg).toHaveBeenCalled());
+    expect(await projectRow()).toHaveTextContent("核心模型");
+    // 不把原始错误码弹给用户。
+    expect(toasts.error).not.toHaveBeenCalled();
   });
 
   it("报价被 409 organization_member 打回：提示不能自己购买，回账号屏", async () => {

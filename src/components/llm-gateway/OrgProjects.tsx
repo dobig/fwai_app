@@ -96,7 +96,7 @@ function ProjectWindowBar({
 }: {
   label: string;
   window: GatewayProjectWindow;
-  formatReset: (iso?: string) => string;
+  formatReset: (iso?: string | null) => string;
 }) {
   const pct = clampPct(w.used_percent);
   const near = isNear(pct);
@@ -140,7 +140,7 @@ export function ProjectPicker({
   error: string | null;
   onPick: (project: GatewayOrgProject) => void;
   onBack: () => void;
-  formatReset: (iso?: string) => string;
+  formatReset: (iso?: string | null) => string;
 }) {
   const busy = switchingId != null;
   return (

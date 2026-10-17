@@ -935,8 +935,10 @@ export async function fetchGatewayUsage(): Promise<GatewayUsage> {
 // 用量条同一个理由。不是组织成员的用户完全不碰这一块。
 
 export interface GatewayProjectWindow {
+  // 一位小数，如 41.5。没有额度的项目是 0（不是 100），以 has_allowance 判断。
   used_percent: number;
-  resets_at?: string;
+  // null：窗口还没开始（这个 5 小时块里还没有请求）。
+  resets_at?: string | null;
 }
 
 export interface GatewayOrgProject {

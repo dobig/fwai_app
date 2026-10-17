@@ -277,7 +277,7 @@ function formatStaleAge(fetchedAt: number): string {
 }
 
 // Short local time for a usage window's reset instant, e.g. "7月19 15:00".
-function formatReset(iso?: string): string {
+function formatReset(iso?: string | null): string {
   if (!iso) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
@@ -1394,15 +1394,25 @@ requires_openai_auth = true`,
       setScreen("account");
       return;
     }
+    // 一个有额度的项目都没有（比如组织席位到期）：切换屏里全是「无额度」，
+    // 带过去也换不出额度，只能找管理员。
+    if (!memberOrg.projects.some((p) => p.has_allowance)) {
+      toast.info("你所在的项目都没有额度，请联系组织管理员");
+      setScreen("account");
+      return;
+    }
     toast.info("当前项目没有额度，请切换到其他项目或联系组织管理员");
     openProjects();
   }
 
-  // 下单 / 报价被 409 organization_member 打回：本地缓存还以为这是个人用户
-  // （组织成员看不到购买入口）。重读组织信息，回账号屏换成项目界面。
-  function handleOrgMemberPurchaseBlocked(error: unknown): boolean {
+  // 报价 / 下单 / 兑换被 409 organization_member 打回：本地缓存还以为这是个人
+  // 用户（组织成员看不到这些入口）。重读组织信息，回账号屏换成项目界面。
+  function handleOrgMemberPurchaseBlocked(
+    error: unknown,
+    message = "组织成员的额度由组织分配，不能自己购买",
+  ): boolean {
     if (gatewayErrorCode(error) !== "organization_member") return false;
-    toast.info("组织成员的额度由组织分配，不能自己购买");
+    toast.info(message);
     void reloadOrg();
     setScreen("account");
     return true;
@@ -1670,6 +1680,9 @@ requires_openai_auth = true`,
       if (code === "email_not_verified") {
         toast.info(messages[code]);
         goToVerifyEmail();
+        return;
+      }
+      if (handleOrgMemberPurchaseBlocked(error, "组织成员不能使用兑换码")) {
         return;
       }
       toast.error(
@@ -2209,8 +2222,9 @@ requires_openai_auth = true`,
             {isOrgMember && currentProject && !currentProject.has_allowance && (
               <div className="mb-3.5 flex items-center gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
                 <div className="min-w-0 flex-1 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
-                  「{currentProject.name}
-                  」这个项目没有给你分配额度，可以切换到其他项目。
+                  {org?.projects.some((p) => p.has_allowance)
+                    ? `「${currentProject.name}」这个项目没有给你分配额度，可以切换到其他项目。`
+                    : "你所在的项目都没有额度，请联系组织管理员。"}
                 </div>
                 {org?.projects.some(
                   (p) => p.id !== currentProject.id && p.has_allowance,
