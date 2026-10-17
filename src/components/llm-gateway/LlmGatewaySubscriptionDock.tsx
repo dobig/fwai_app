@@ -39,6 +39,11 @@ import {
   redeemPromoCode,
   fetchGatewaySubscription,
   fetchGatewayUsage,
+  fetchGatewayOrganization,
+  switchGatewayProject,
+  saveGatewayOrgCache,
+  loadGatewayOrgCache,
+  clearGatewayOrgCache,
   forgotPassword,
   gatewayOAuthAccessToken,
   GatewayApiError,
@@ -63,6 +68,8 @@ import {
   verifyEmail,
   type GatewayLoginChallenge,
   type GatewayLoginResult,
+  type GatewayOrganization,
+  type GatewayOrgProject,
   type GatewayPeriodPrice,
   type GatewayPlanCatalog,
   type GatewayPlanQuote,
@@ -76,6 +83,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PlanCheckout } from "./PlanCheckout";
 import { PlanSections } from "./PlanSections";
 import { ModelCapBar } from "./ModelCapBar";
+import { OrgProjectRow, ProjectPicker, currentOrgProject } from "./OrgProjects";
 import {
   TIERS,
   formatMicrosUSD,
@@ -105,6 +113,7 @@ import {
 type Screen =
   | "auth"
   | "account"
+  | "projects"
   | "purchase"
   | "redeem"
   | "verify-email"
@@ -268,7 +277,7 @@ function formatStaleAge(fetchedAt: number): string {
 }
 
 // Short local time for a usage window's reset instant, e.g. "7月19 15:00".
-function formatReset(iso?: string): string {
+function formatReset(iso?: string | null): string {
   if (!iso) return "";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
@@ -317,7 +326,13 @@ function UsageBar({
 }
 
 // Screen slides in from the right each time it mounts (keyed on screen name).
-function ScreenView({ children }: { children: React.ReactNode }) {
+function ScreenView({
+  children,
+  contentRef,
+}: {
+  children: React.ReactNode;
+  contentRef?: React.Ref<HTMLDivElement>;
+}) {
   const [shown, setShown] = useState(false);
   useEffect(() => {
     const r = requestAnimationFrame(() => setShown(true));
@@ -325,6 +340,7 @@ function ScreenView({ children }: { children: React.ReactNode }) {
   }, []);
   return (
     <div
+      ref={contentRef}
       className={`transition-all duration-300 ease-out ${
         shown ? "translate-x-0 opacity-100" : "translate-x-4 opacity-0"
       }`}
@@ -482,6 +498,27 @@ export function LlmGatewaySubscriptionDock() {
   const usageIsStale =
     usageFetchedAt != null && Date.now() - usageFetchedAt > 10 * 60 * 1000;
 
+  // 组织与项目（GET /v1/me/organization）。null = 不是组织成员，界面和以前
+  // 一模一样。从缓存起步，组织成员打开面板不会先闪一下个人账号的界面。
+  const [org, setOrg] = useState<GatewayOrganization | null>(
+    () => loadGatewayOrgCache()?.org ?? null,
+  );
+  const isOrgMember = Boolean(login && org);
+  const currentProject = org ? currentOrgProject(org) : null;
+  // 当前项目用不了：没有项目，或者项目没给这个人分额度。
+  const projectBlocked =
+    isOrgMember && (!currentProject || !currentProject.has_allowance);
+  const [switchingProjectId, setSwitchingProjectId] = useState<string | null>(
+    null,
+  );
+  const [projectSwitchError, setProjectSwitchError] = useState<string | null>(
+    null,
+  );
+  // 切换屏和账号屏等高：进切换屏时沿用账号屏的内容高度，列表在里面滚动，
+  // 来回切换面板不跳。
+  const accountContentRef = useRef<HTMLDivElement | null>(null);
+  const [accountHeight, setAccountHeight] = useState<number | null>(null);
+
   useEffect(() => {
     localStorage.setItem(DOCK_OPEN_KEY, open ? "1" : "0");
   }, [open]);
@@ -544,6 +581,46 @@ export function LlmGatewaySubscriptionDock() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, screen, login, isActive, target]);
+
+  // 组织信息和用量同一个时机刷新：面板开在账号屏时。切换项目成功后回到
+  // 账号屏，也就顺带重读了一次最新的百分比。
+  useEffect(() => {
+    if (!open || screen !== "account" || !login) return;
+    void reloadOrg();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, screen, login]);
+
+  // 窗口重新回到前台时也重读。当前项目存在服务端：别的设备上切了项目、管理员
+  // 把人移出了项目，这边都要跟上 —— CLI 的请求不经过 app，app 收不到
+  // no_project，只能靠自己来问。
+  useEffect(() => {
+    if (!login) return;
+    const onFocus = () => {
+      if (document.visibilityState === "hidden") return;
+      void reloadOrg();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [login]);
+
+  // 量账号屏内容的高度，给切换屏用。只记正数：账号屏卸载那一刻量到的 0 不算。
+  useEffect(() => {
+    const el = accountContentRef.current;
+    if (screen !== "account" || !el) return;
+    const measure = () => {
+      if (el.offsetHeight > 0) setAccountHeight(el.offsetHeight);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [screen, open, login]);
 
   // 面板每次打开重读一次转发状态：用户可能在供应商列表里手动切走，后端那边
   // 备份已经作废了，不重新读就会一直显示「结束转发」，点下去反而把陈旧的
@@ -856,6 +933,7 @@ requires_openai_auth = true`,
       await stopForwarding(target);
       return;
     }
+    // 组织成员的 active 由服务端按当前项目算：当前项目有额度才为 true。
     if (isActive) {
       await startForwarding(target);
       return;
@@ -878,6 +956,21 @@ requires_openai_auth = true`,
       // 没问到答案。这里不能说「请先购买会员」——断网时那句话是假的，会把人
       // 推去重复下单。
       toast.error("无法确认套餐状态，请检查网络后重试");
+      return;
+    }
+    // 服务端确认了没有额度。先看是不是组织成员：组织成员不能自己购买（下单
+    // 会被 409 organization_member 打回），该做的是换项目或找管理员。缓存可能
+    // 还停在「不是组织成员」，所以这里重读一次；没问到就退回看缓存。
+    setFwdBusy(true);
+    let orgNow: GatewayOrganization | null | undefined;
+    try {
+      orgNow = await reloadOrg();
+    } finally {
+      setFwdBusy(false);
+    }
+    const memberOrg = orgNow === undefined ? org : orgNow;
+    if (login && memberOrg) {
+      promptNoProjectAllowance(memberOrg);
       return;
     }
     // 服务端确认了确实没开通。未验证邮箱的话连购买屏都进不去，goToPurchase 会
@@ -1171,9 +1264,11 @@ requires_openai_auth = true`,
       }
       clearGatewayLogin();
       clearGatewayUsageCache();
+      clearGatewayOrgCache();
       setLogin(null);
       setUsage(null);
       setUsageFetchedAt(null);
+      setOrg(null);
       setResetCode("");
       setResetPasswordInput("");
       setResetRequested(false);
@@ -1220,8 +1315,10 @@ requires_openai_auth = true`,
     } finally {
       clearGatewayLogin();
       clearGatewayUsageCache();
+      clearGatewayOrgCache();
       setUsage(null);
       setUsageFetchedAt(null);
+      setOrg(null);
       setLogin(null);
       setScreen("auth");
       setAuthMode("login");
@@ -1254,6 +1351,127 @@ requires_openai_auth = true`,
       toast.error(error instanceof Error ? error.message : "刷新失败");
     } finally {
       setRefreshBusy(false);
+    }
+  }
+
+  // ---- organization projects ------------------------------------------------
+
+  // 重读组织信息并写回缓存。404 = 不是组织成员（含老网关），落成 null；网络
+  // 错误保留上一份 —— 不能因为一次断网就把组织成员
+  // 当成个人用户、给他看「购买套餐」。401 先换 token 再试一次，同用量那边。
+  // 登录过期的提示交给用量刷新去说，这里不重复弹。
+  //
+  // 返回读到的结果；没问到（网络错误、登录过期、期间已登出）返回 undefined，
+  // 调用方据此决定要不要退回看缓存。
+  async function reloadOrg(): Promise<GatewayOrganization | null | undefined> {
+    const read = async () => {
+      const next = await fetchGatewayOrganization();
+      // 请求在路上时用户登出了：不要把上一个账号的组织写回去。
+      if (!loadGatewayTokens()) return undefined;
+      saveGatewayOrgCache(next);
+      setOrg(next);
+      return next;
+    };
+    try {
+      return await read();
+    } catch (error) {
+      if (gatewayErrorStatus(error) !== 401) return undefined;
+      try {
+        await refreshGatewayToken();
+        return await read();
+      } catch {
+        // 留给用量刷新提示「登录已过期」。
+        return undefined;
+      }
+    }
+  }
+
+  // 组织成员当前项目用不了时的去处：有项目就带去切换屏，没有就只能找管理员。
+  // 绝不提「购买」—— 组织成员买不了。
+  function promptNoProjectAllowance(memberOrg: GatewayOrganization) {
+    if (memberOrg.projects.length === 0 || !memberOrg.current_project_id) {
+      toast.info("还没有加入项目，请联系组织管理员");
+      setScreen("account");
+      return;
+    }
+    // 一个有额度的项目都没有（比如组织席位到期）：切换屏里全是「无额度」，
+    // 带过去也换不出额度，只能找管理员。
+    if (!memberOrg.projects.some((p) => p.has_allowance)) {
+      toast.info("你所在的项目都没有额度，请联系组织管理员");
+      setScreen("account");
+      return;
+    }
+    toast.info("当前项目没有额度，请切换到其他项目或联系组织管理员");
+    openProjects();
+  }
+
+  // 报价 / 下单 / 兑换被 409 organization_member 打回：本地缓存还以为这是个人
+  // 用户（组织成员看不到这些入口）。重读组织信息，回账号屏换成项目界面。
+  function handleOrgMemberPurchaseBlocked(
+    error: unknown,
+    message = "组织成员的额度由组织分配，不能自己购买",
+  ): boolean {
+    if (gatewayErrorCode(error) !== "organization_member") return false;
+    toast.info(message);
+    void reloadOrg();
+    setScreen("account");
+    return true;
+  }
+
+  function openProjects() {
+    setProjectSwitchError(null);
+    setScreen("projects");
+  }
+
+  // 切换当前项目。不做乐观更新：当前项目对所有设备生效，界面只跟服务端确认
+  // 过的结果走。
+  async function handlePickProject(project: GatewayOrgProject) {
+    if (switchingProjectId || !org) return;
+    setSwitchingProjectId(project.id);
+    setProjectSwitchError(null);
+    try {
+      let res: { current_project_id: string };
+      try {
+        res = await switchGatewayProject(project.id);
+      } catch (error) {
+        if (gatewayErrorStatus(error) !== 401) throw error;
+        await refreshGatewayToken();
+        res = await switchGatewayProject(project.id);
+      }
+      const next = { ...org, current_project_id: res.current_project_id };
+      saveGatewayOrgCache(next);
+      setOrg(next);
+      // /v1/subscription 和 /api/oauth/usage 都按当前项目算。先把两份都换成
+      // 新项目的再回账号屏：否则用量卡会顶着新项目的名字显示旧项目的数字，
+      // 转发判断用的 active 也还是旧项目的。读失败不挡切换 —— 服务端已经切了。
+      await Promise.allSettled([
+        refreshSubscription(),
+        fetchGatewayUsage().then((u) => {
+          saveGatewayUsageCache(u);
+          setUsage(u);
+          setUsageFetchedAt(Date.now());
+        }),
+      ]);
+      toast.success(
+        project.has_allowance
+          ? `已切换到「${project.name}」`
+          : `已切换到「${project.name}」，但这个项目没有给你分配额度`,
+      );
+      setScreen("account");
+    } catch (error) {
+      if (gatewayErrorCode(error) === "project_forbidden") {
+        // 多半是刚被移出这个项目：重拉列表，让它从列表里消失。
+        setProjectSwitchError(
+          `你已不在「${project.name}」这个项目里，列表已刷新`,
+        );
+        toast.error("切换失败：没有这个项目的权限");
+        void reloadOrg();
+      } else {
+        setProjectSwitchError("切换失败，请检查网络后重试；当前项目没有变化");
+        toast.error("切换失败，请检查网络后重试");
+      }
+    } finally {
+      setSwitchingProjectId(null);
     }
   }
 
@@ -1464,6 +1682,9 @@ requires_openai_auth = true`,
         goToVerifyEmail();
         return;
       }
+      if (handleOrgMemberPurchaseBlocked(error, "组织成员不能使用兑换码")) {
+        return;
+      }
       toast.error(
         (code && messages[code]) ||
           (error instanceof Error ? error.message : "兑换失败"),
@@ -1516,6 +1737,7 @@ requires_openai_auth = true`,
         goToVerifyEmail();
         return;
       }
+      if (handleOrgMemberPurchaseBlocked(error)) return;
       setQuoteError(
         (asExtra ? extraPurchaseErrorMessage(error) : null) ??
           (error instanceof Error ? error.message : "获取报价失败，请重试"),
@@ -1610,6 +1832,7 @@ requires_openai_auth = true`,
         goToVerifyEmail();
         return;
       }
+      if (handleOrgMemberPurchaseBlocked(error)) return;
       toast.error(
         (asExtra ? extraPurchaseErrorMessage(error) : null) ??
           (error instanceof Error ? error.message : "购买失败"),
@@ -1666,33 +1889,40 @@ requires_openai_auth = true`,
       ? authMode === "register"
         ? "注册 llm_gateway"
         : "登录 llm_gateway"
-      : screen === "purchase"
-        ? "购买套餐"
-        : screen === "redeem"
-          ? "使用兑换码"
-          : screen === "verify-email"
-            ? "验证邮箱"
-            : screen === "forgot-password"
-              ? "找回密码"
-              : screen === "login-code"
-                ? "验证登录"
-                : "我的账号";
+      : screen === "projects"
+        ? "切换项目"
+        : screen === "purchase"
+          ? "购买套餐"
+          : screen === "redeem"
+            ? "使用兑换码"
+            : screen === "verify-email"
+              ? "验证邮箱"
+              : screen === "forgot-password"
+                ? "找回密码"
+                : screen === "login-code"
+                  ? "验证登录"
+                  : "我的账号";
   const headSub =
     screen === "auth"
       ? "登录后即可在 Claude Code 中使用"
-      : screen === "purchase"
-        ? "微信扫码支付，支付成功即时开通"
-        : screen === "redeem"
-          ? "兑换套餐或重置已用额度，即时生效"
-          : screen === "verify-email"
-            ? "验证后即可购买套餐"
-            : screen === "forgot-password"
-              ? "用注册邮箱收取验证码重设密码"
-              : screen === "login-code"
-                ? "输入邮箱收到的验证码完成登录"
-                : forwarding
-                  ? `转发中 · ${activeAppName} 正在走 llm_gateway`
-                  : "已登录 · 开启转发后即可使用";
+      : screen === "projects"
+        ? (org?.organization.name ?? "")
+        : screen === "purchase"
+          ? "微信扫码支付，支付成功即时开通"
+          : screen === "redeem"
+            ? "兑换套餐或重置已用额度，即时生效"
+            : screen === "verify-email"
+              ? "验证后即可购买套餐"
+              : screen === "forgot-password"
+                ? "用注册邮箱收取验证码重设密码"
+                : screen === "login-code"
+                  ? "输入邮箱收到的验证码完成登录"
+                  : (forwarding
+                      ? `转发中 · ${activeAppName} 正在走 llm_gateway`
+                      : "已登录 · 开启转发后即可使用") +
+                    (isOrgMember && currentProject
+                      ? ` · ${currentProject.name}`
+                      : "");
 
   const inputCls =
     "w-full rounded-lg border bg-muted/40 px-3 py-2 text-sm outline-none transition focus:border-primary focus:bg-background focus:ring-2 focus:ring-primary/20";
@@ -1710,12 +1940,21 @@ requires_openai_auth = true`,
         </span>
         <span>
           {forwarding ? "转发中" : login ? login.user.username : "llm_gateway"}
+          {/* 组织成员：不展开也知道请求在扣哪个项目 */}
+          {isOrgMember && (
+            <span className="font-normal text-muted-foreground">
+              {" · "}
+              {currentProject ? currentProject.name : "未加入项目"}
+            </span>
+          )}
         </span>
         <span
           className={`h-2 w-2 rounded-full ${
-            forwarding
-              ? "bg-green-500 ring-4 ring-green-500/20"
-              : "bg-muted-foreground/50"
+            projectBlocked
+              ? "bg-amber-500 ring-4 ring-amber-500/20"
+              : forwarding
+                ? "bg-green-500 ring-4 ring-green-500/20"
+                : "bg-muted-foreground/50"
           }`}
         />
       </button>
@@ -1887,7 +2126,7 @@ requires_openai_auth = true`,
         )}
 
         {screen === "account" && login && (
-          <ScreenView key="account">
+          <ScreenView key="account" contentRef={accountContentRef}>
             {/* account card */}
             <div className="mb-3.5 flex items-center gap-3 rounded-xl border border-border bg-muted/40 p-3.5">
               <span className="flex h-10 w-10 flex-none items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-indigo-500 text-base font-bold text-white">
@@ -1906,20 +2145,36 @@ requires_openai_auth = true`,
                   )}
                 </div>
               </div>
-              <span
-                className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                  isActive
-                    ? "bg-green-500/15 text-green-600 dark:text-green-400"
-                    : "bg-muted text-muted-foreground"
-                }`}
-              >
-                {isActive ? planLabel(subscription?.tier) : "未开通"}
-              </span>
+              {/* 组织成员的套餐名是「组织名 · 当前项目名」，不是 tier（服务端
+                  暂时回 enterprise，对用户没有意义）。 */}
+              {isOrgMember && org ? (
+                <span
+                  className="max-w-[60%] flex-none truncate rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-semibold text-primary"
+                  title={`${org.organization.name} · ${currentProject?.name ?? "未加入项目"}`}
+                >
+                  {org.organization.name} ·{" "}
+                  {currentProject?.name ?? "未加入项目"}
+                </span>
+              ) : (
+                <span
+                  className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                    isActive
+                      ? "bg-green-500/15 text-green-600 dark:text-green-400"
+                      : "bg-muted text-muted-foreground"
+                  }`}
+                >
+                  {isActive ? planLabel(subscription?.tier) : "未开通"}
+                </span>
+              )}
             </div>
 
             {/* 订阅层和加量包分开显示。平铺的话用户分不清哪张是「我的档位」、
                 哪张是临时补的量，点「换档」时不知道会换掉哪一个。 */}
-            {subscription && (
+            {/* 组织成员没有个人套餐：额度来自项目，套餐、购买、兑换码一概不显示，
+                界面上也就不会出现金额。 */}
+            {org && <OrgProjectRow org={org} onOpen={openProjects} />}
+
+            {!isOrgMember && subscription && (
               <PlanSections
                 subscription={subscription}
                 onSwitchPlan={
@@ -1942,7 +2197,7 @@ requires_openai_auth = true`,
 
             {/* 未验证提示。说清楚挡的是什么（下单），别只写「请验证邮箱」——
                 不然人不知道为什么要验，也不知道不验会怎样。 */}
-            {!emailVerified && (
+            {!isOrgMember && !emailVerified && (
               <div className="mb-3.5 flex items-center gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
                 <div className="min-w-0 flex-1 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
                   邮箱尚未验证，暂时无法购买套餐
@@ -1959,40 +2214,76 @@ requires_openai_auth = true`,
 
             {/* account usage — one total for our custom plan (5h + weekly),
                 sourced from the gateway; same figure the provider footer shows */}
-            {isActive && usage && (usage.five_hour || usage.seven_day) && (
-              <div
-                className={`mb-3.5 space-y-2.5 rounded-xl border border-border bg-muted/40 p-3 ${usageIsStale ? "opacity-70" : ""}`}
-              >
-                <div className="flex items-center justify-between text-[11px] font-medium text-muted-foreground">
-                  <span>用量</span>
-                  {usageIsStale && usageFetchedAt && (
-                    <span title="当前显示的是最近一次成功获取的数据">
-                      更新于 {formatStaleAge(usageFetchedAt)}
-                    </span>
-                  )}
-                </div>
-                {usage.five_hour && (
-                  <UsageBar label="5 小时" window={usage.five_hour} />
-                )}
-                {(usage.model_caps ?? []).map((cap) => (
-                  <ModelCapBar
-                    key={`5h-${cap.id}`}
-                    cap={cap}
-                    windowKey="five_hour"
-                  />
-                ))}
-                {usage.seven_day && (
-                  <UsageBar label="7 天" window={usage.seven_day} />
-                )}
-                {(usage.model_caps ?? []).map((cap) => (
-                  <ModelCapBar
-                    key={`7d-${cap.id}`}
-                    cap={cap}
-                    windowKey="seven_day"
-                  />
-                ))}
+            {isOrgMember && !currentProject && (
+              <div className="mb-3.5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+                还没有加入项目，请联系组织管理员。加入后这里会显示项目和用量。
               </div>
             )}
+            {isOrgMember && currentProject && !currentProject.has_allowance && (
+              <div className="mb-3.5 flex items-center gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
+                <div className="min-w-0 flex-1 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+                  {org?.projects.some((p) => p.has_allowance)
+                    ? `「${currentProject.name}」这个项目没有给你分配额度，可以切换到其他项目。`
+                    : "你所在的项目都没有额度，请联系组织管理员。"}
+                </div>
+                {org?.projects.some(
+                  (p) => p.id !== currentProject.id && p.has_allowance,
+                ) && (
+                  <button
+                    type="button"
+                    className="flex-none rounded-lg bg-amber-500 px-2.5 py-1.5 text-xs font-semibold text-white transition hover:brightness-105"
+                    onClick={openProjects}
+                  >
+                    切换项目
+                  </button>
+                )}
+              </div>
+            )}
+            {/* 组织成员的 /api/oauth/usage（含按模型拆分）由服务端按当前项目算，
+                同一张卡，标题带上项目名。项目没额度时上面的提示代替这张卡。 */}
+            {(isOrgMember ? currentProject?.has_allowance : isActive) &&
+              usage &&
+              (usage.five_hour || usage.seven_day) && (
+                <div
+                  className={`mb-3.5 space-y-2.5 rounded-xl border border-border bg-muted/40 p-3 ${usageIsStale ? "opacity-70" : ""}`}
+                >
+                  <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">
+                    <span className="truncate">
+                      {isOrgMember && currentProject
+                        ? `用量 · ${currentProject.name}`
+                        : "用量"}
+                    </span>
+                    {usageIsStale && usageFetchedAt && (
+                      <span
+                        className="flex-none"
+                        title="当前显示的是最近一次成功获取的数据"
+                      >
+                        更新于 {formatStaleAge(usageFetchedAt)}
+                      </span>
+                    )}
+                  </div>
+                  {usage.five_hour && (
+                    <UsageBar label="5 小时" window={usage.five_hour} />
+                  )}
+                  {(usage.model_caps ?? []).map((cap) => (
+                    <ModelCapBar
+                      key={`5h-${cap.id}`}
+                      cap={cap}
+                      windowKey="five_hour"
+                    />
+                  ))}
+                  {usage.seven_day && (
+                    <UsageBar label="7 天" window={usage.seven_day} />
+                  )}
+                  {(usage.model_caps ?? []).map((cap) => (
+                    <ModelCapBar
+                      key={`7d-${cap.id}`}
+                      cap={cap}
+                      windowKey="seven_day"
+                    />
+                  ))}
+                </div>
+              )}
 
             {/* forwarding toggle — 只作用于当前选中的那个 CLI */}
             <button
@@ -2018,7 +2309,7 @@ requires_openai_auth = true`,
 
             {/* 版本过旧提示。挡的只有购买 —— 上面的转发开关照常可用，说清楚
                 这一点，不然人会以为整个客户端废了。 */}
-            {upgradeRequired && (
+            {!isOrgMember && upgradeRequired && (
               <div className="mt-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
                 当前版本过旧，暂时无法购买套餐。请更新到最新版本后再试 ——
                 转发和其它功能不受影响。
@@ -2026,31 +2317,35 @@ requires_openai_auth = true`,
             )}
 
             {/* purchase */}
-            <button
-              className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-muted/40 py-2.5 font-medium transition hover:border-border/80 hover:bg-muted disabled:opacity-60"
-              disabled={busy || upgradeRequired}
-              onClick={() => void goToPurchase()}
-            >
-              {busy ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <ShoppingBag className="h-4 w-4" />
-              )}
-              购买套餐
-            </button>
+            {!isOrgMember && (
+              <>
+                <button
+                  className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-muted/40 py-2.5 font-medium transition hover:border-border/80 hover:bg-muted disabled:opacity-60"
+                  disabled={busy || upgradeRequired}
+                  onClick={() => void goToPurchase()}
+                >
+                  {busy ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ShoppingBag className="h-4 w-4" />
+                  )}
+                  购买套餐
+                </button>
 
-            {/* 兑换码入口。做成次要样式：绝大多数人没有码，它不该和购买抢
+                {/* 兑换码入口。做成次要样式：绝大多数人没有码，它不该和购买抢
                 注意力，但有码的人得找得到。 */}
-            <button
-              className="mt-2 w-full rounded-lg py-2 text-xs text-muted-foreground transition hover:text-foreground disabled:opacity-60"
-              disabled={busy}
-              onClick={() => {
-                setRedeemInput("");
-                setScreen("redeem");
-              }}
-            >
-              使用兑换码
-            </button>
+                <button
+                  className="mt-2 w-full rounded-lg py-2 text-xs text-muted-foreground transition hover:text-foreground disabled:opacity-60"
+                  disabled={busy}
+                  onClick={() => {
+                    setRedeemInput("");
+                    setScreen("redeem");
+                  }}
+                >
+                  使用兑换码
+                </button>
+              </>
+            )}
 
             {/* advanced */}
             <details className="mt-3.5 border-t border-border pt-1.5">
@@ -2086,6 +2381,24 @@ requires_openai_auth = true`,
                 <LogOut className="h-3.5 w-3.5" />
                 登出
               </button>
+            </div>
+          </ScreenView>
+        )}
+
+        {screen === "projects" && login && org && (
+          <ScreenView key="projects">
+            <div
+              className="flex flex-col"
+              style={accountHeight ? { height: accountHeight } : undefined}
+            >
+              <ProjectPicker
+                org={org}
+                switchingId={switchingProjectId}
+                error={projectSwitchError}
+                onPick={(p) => void handlePickProject(p)}
+                onBack={() => setScreen("account")}
+                formatReset={formatReset}
+              />
             </div>
           </ScreenView>
         )}
