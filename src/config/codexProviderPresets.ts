@@ -59,11 +59,7 @@ disable_response_storage = true
 name = "${cleanProviderName}"
 base_url = "${baseUrl}"
 wire_api = "responses"
-requires_openai_auth = true
-
-[desktop]
-conversationDetailMode = "STEPS_COMMANDS"
-ambient-suggestions-enabled = true`;
+requires_openai_auth = true`;
 }
 
 export const codexProviderPresets: CodexProviderPreset[] = [
@@ -132,11 +128,7 @@ base_url = "https://YOUR_RESOURCE_NAME.openai.azure.com/openai"
 env_key = "OPENAI_API_KEY"
 query_params = { "api-version" = "2025-04-01-preview" }
 wire_api = "responses"
-requires_openai_auth = true
-
-[desktop]
-conversationDetailMode = "STEPS_COMMANDS"
-ambient-suggestions-enabled = true`,
+requires_openai_auth = true`,
     endpointCandidates: ["https://YOUR_RESOURCE_NAME.openai.azure.com/openai"],
     theme: {
       icon: "codex",
@@ -469,11 +461,7 @@ base_url = "https://e-flowcode.cc/v1"
 wire_api = "responses"
 requires_openai_auth = true
 model_context_window = 1000000
-model_auto_compact_token_limit = 9000000
-
-[desktop]
-conversationDetailMode = "STEPS_COMMANDS"
-ambient-suggestions-enabled = true`,
+model_auto_compact_token_limit = 9000000`,
     category: "third_party",
     endpointCandidates: ["https://e-flowcode.cc/v1"],
     icon: "eflowcode",
@@ -511,11 +499,7 @@ disable_response_storage = true
 name = "custom"
 wire_api = "responses"
 requires_openai_auth = true
-base_url = "https://cc-api.pipellm.ai/v1"
-
-[desktop]
-conversationDetailMode = "STEPS_COMMANDS"
-ambient-suggestions-enabled = true`,
+base_url = "https://cc-api.pipellm.ai/v1"`,
     category: "aggregator",
     endpointCandidates: ["https://cc-api.pipellm.ai/v1"],
     icon: "pipellm",

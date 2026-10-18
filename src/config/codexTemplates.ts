@@ -21,11 +21,7 @@ disable_response_storage = true
 [model_providers.custom]
 name = "custom"
 wire_api = "responses"
-requires_openai_auth = true
-
-[desktop]
-conversationDetailMode = "STEPS_COMMANDS"
-ambient-suggestions-enabled = true`;
+requires_openai_auth = true`;
 
   return {
     auth: { OPENAI_API_KEY: "" },

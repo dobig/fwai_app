@@ -447,6 +447,55 @@ mod tests {
         assert_eq!(base_url, "https://claude.example");
     }
 
+    fn codex_provider_with_config(config_toml: &str) -> Provider {
+        Provider::with_id(
+            "codex".to_string(),
+            "Codex".to_string(),
+            json!({ "auth": {}, "config": config_toml }),
+            None,
+        )
+    }
+
+    fn desktop_table(provider: &Provider) -> toml::Table {
+        let config = provider.settings_config["config"].as_str().unwrap();
+        let parsed: toml::Table = toml::from_str(config).expect("valid toml");
+        parsed["desktop"].as_table().expect("desktop table").clone()
+    }
+
+    #[test]
+    fn apply_codex_desktop_defaults_inserts_missing_section() {
+        let mut provider = codex_provider_with_config(
+            "model = \"gpt-5\"\n\n[model_providers.custom]\nname = \"custom\"\n",
+        );
+        ProviderService::apply_codex_desktop_defaults(&mut provider).unwrap();
+
+        let desktop = desktop_table(&provider);
+        assert_eq!(
+            desktop["conversationDetailMode"].as_str(),
+            Some("STEPS_COMMANDS")
+        );
+        assert_eq!(desktop["ambient-suggestions-enabled"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn apply_codex_desktop_defaults_replaces_existing_keys() {
+        let mut provider = codex_provider_with_config(
+            "model = \"gpt-5\"\n\n[desktop]\nconversationDetailMode = \"SUMMARY\"\nambient-suggestions-enabled = false\nother = 1\n",
+        );
+        ProviderService::apply_codex_desktop_defaults(&mut provider).unwrap();
+
+        let config = provider.settings_config["config"].as_str().unwrap();
+        assert_eq!(config.matches("[desktop]").count(), 1);
+        assert_eq!(config.matches("conversationDetailMode").count(), 1);
+        let desktop = desktop_table(&provider);
+        assert_eq!(
+            desktop["conversationDetailMode"].as_str(),
+            Some("STEPS_COMMANDS")
+        );
+        assert_eq!(desktop["ambient-suggestions-enabled"].as_bool(), Some(true));
+        assert_eq!(desktop["other"].as_integer(), Some(1));
+    }
+
     #[test]
     fn extract_codex_common_config_preserves_mcp_servers_base_url() {
         let config_toml = r#"model_provider = "azure"
@@ -660,6 +709,9 @@ impl ProviderService {
         // Normalize Claude model keys
         Self::normalize_provider_if_claude(&app_type, &mut provider);
         Self::validate_provider_settings(&app_type, &provider)?;
+        if matches!(app_type, AppType::Codex) {
+            Self::apply_codex_desktop_defaults(&mut provider)?;
+        }
         normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
 
         // Save to database
@@ -1233,6 +1285,37 @@ impl ProviderService {
     }
 
     /// Extract common config for Codex (TOML format)
+    /// 新添 Codex 供应商时，保证 config.toml 的 `[desktop]` 里有这两个键：
+    /// 已有就覆盖值，没有才插入；`[desktop]` 本身不存在就新建。
+    /// 不能直接往字符串尾部拼一段 `[desktop]`——用户粘贴的配置里已有这张表时，
+    /// 重复的表头会让整份 TOML 解析失败。
+    fn apply_codex_desktop_defaults(provider: &mut Provider) -> Result<(), AppError> {
+        let Some(config_toml) = provider
+            .settings_config
+            .get("config")
+            .and_then(|v| v.as_str())
+        else {
+            return Ok(());
+        };
+
+        let mut doc = config_toml
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| AppError::Message(format!("TOML parse error: {e}")))?;
+
+        let root = doc.as_table_mut();
+        if !root.get("desktop").is_some_and(|item| item.is_table_like()) {
+            root.insert("desktop", toml_edit::table());
+        }
+        let desktop = root["desktop"]
+            .as_table_like_mut()
+            .expect("desktop was just ensured to be a table");
+        desktop.insert("conversationDetailMode", toml_edit::value("STEPS_COMMANDS"));
+        desktop.insert("ambient-suggestions-enabled", toml_edit::value(true));
+
+        provider.settings_config["config"] = Value::String(doc.to_string());
+        Ok(())
+    }
+
     fn extract_codex_common_config(settings: &Value) -> Result<String, AppError> {
         // Codex config is stored as { "auth": {...}, "config": "toml string" }
         let config_toml = settings
