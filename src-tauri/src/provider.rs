@@ -591,11 +591,7 @@ disable_response_storage = true
 name = "NewAPI"
 base_url = "{codex_base_url}"
 wire_api = "responses"
-requires_openai_auth = true
-
-[desktop]
-conversationDetailMode = "STEPS_COMMANDS"
-ambient-suggestions-enabled = true"#
+requires_openai_auth = true"#
         );
 
         let settings_config = serde_json::json!({
