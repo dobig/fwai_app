@@ -271,6 +271,8 @@ fn apply_codex(token: &str, base_url: &str) -> Result<(), AppError> {
 
     let mut doc = read_codex_doc()?.unwrap_or_default();
     point_codex_doc_at_gateway(&mut doc, base_url)?;
+    // 网关模式下 Codex Desktop 的显示偏好也一并钉上；停止转发时不还原。
+    crate::codex_config::upsert_codex_desktop_defaults(&mut doc);
     write_codex_doc(&doc)
 }
 
@@ -1322,6 +1324,55 @@ wire_api = "responses"
                 crate::config::read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())
                     .expect("read codex auth");
             assert_eq!(auth.get(CODEX_TOKEN_KEY), Some(&json!("sk-mine")));
+        });
+    }
+
+    /// 开启转发时 `[desktop]` 里已有的两个键要被替换成目标值，表里其它键保留，
+    /// 且不能出现第二个 `[desktop]` 表头。
+    #[test]
+    #[serial]
+    fn codex_forwarding_upserts_desktop_defaults() {
+        with_test_home(|state| {
+            let config_path = crate::codex_config::get_codex_config_path();
+            std::fs::create_dir_all(config_path.parent().expect("parent"))
+                .expect("create codex dir");
+            std::fs::write(
+                &config_path,
+                r#"notify = ["/path/to/SkyComputerUseClient", "turn-ended"]
+model_provider = "llm_gateway"
+
+[desktop]
+followUpQueueMode = "steer"
+conversationDetailMode = "STEPS_PROSE"
+sansFontSize = 14
+codeFontSize = 13
+ambient-suggestions-enabled = false
+"#,
+            )
+            .expect("write codex config");
+
+            let provider = gateway_provider("gw-token", "https://api.fwai.space");
+            start_forwarding(
+                state,
+                &AppType::Codex,
+                &provider,
+                "gw-token",
+                "https://api.fwai.space",
+            )
+            .expect("start codex forwarding");
+
+            let during = read_codex_text();
+            assert_eq!(during.matches("[desktop]").count(), 1);
+            let parsed: toml::Table = toml::from_str(&during).expect("valid toml");
+            let desktop = parsed["desktop"].as_table().expect("desktop table");
+            assert_eq!(
+                desktop["conversationDetailMode"].as_str(),
+                Some("STEPS_COMMANDS")
+            );
+            assert_eq!(desktop["ambient-suggestions-enabled"].as_bool(), Some(true));
+            assert_eq!(desktop["followUpQueueMode"].as_str(), Some("steer"));
+            assert_eq!(desktop["sansFontSize"].as_integer(), Some(14));
+            assert!(parsed.contains_key("notify"), "notify 必须保留");
         });
     }
 
