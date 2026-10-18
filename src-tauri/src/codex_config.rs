@@ -151,6 +151,21 @@ pub fn read_and_validate_codex_config_text() -> Result<String, AppError> {
     Ok(s)
 }
 
+/// 保证 `[desktop]` 里有我们要的两个键：已有就覆盖值，没有才插入；
+/// `[desktop]` 本身不存在（或不是表）就新建。表里其它键原样保留。
+/// 不能直接往文本尾部拼一段 `[desktop]`——已有这张表时重复表头会让 TOML 解析失败。
+pub fn upsert_codex_desktop_defaults(doc: &mut DocumentMut) {
+    let root = doc.as_table_mut();
+    if !root.get("desktop").is_some_and(|item| item.is_table_like()) {
+        root.insert("desktop", toml_edit::table());
+    }
+    let desktop = root["desktop"]
+        .as_table_like_mut()
+        .expect("desktop was just ensured to be a table");
+    desktop.insert("conversationDetailMode", toml_edit::value("STEPS_COMMANDS"));
+    desktop.insert("ambient-suggestions-enabled", toml_edit::value(true));
+}
+
 fn active_codex_model_provider_id(doc: &DocumentMut) -> Option<String> {
     doc.get("model_provider")
         .and_then(|item| item.as_str())

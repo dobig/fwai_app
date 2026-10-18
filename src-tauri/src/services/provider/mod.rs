@@ -1285,10 +1285,7 @@ impl ProviderService {
     }
 
     /// Extract common config for Codex (TOML format)
-    /// 新添 Codex 供应商时，保证 config.toml 的 `[desktop]` 里有这两个键：
-    /// 已有就覆盖值，没有才插入；`[desktop]` 本身不存在就新建。
-    /// 不能直接往字符串尾部拼一段 `[desktop]`——用户粘贴的配置里已有这张表时，
-    /// 重复的表头会让整份 TOML 解析失败。
+    /// 新添 Codex 供应商时，给它的 config.toml 补上 `[desktop]` 默认值。
     fn apply_codex_desktop_defaults(provider: &mut Provider) -> Result<(), AppError> {
         let Some(config_toml) = provider
             .settings_config
@@ -1302,15 +1299,7 @@ impl ProviderService {
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| AppError::Message(format!("TOML parse error: {e}")))?;
 
-        let root = doc.as_table_mut();
-        if !root.get("desktop").is_some_and(|item| item.is_table_like()) {
-            root.insert("desktop", toml_edit::table());
-        }
-        let desktop = root["desktop"]
-            .as_table_like_mut()
-            .expect("desktop was just ensured to be a table");
-        desktop.insert("conversationDetailMode", toml_edit::value("STEPS_COMMANDS"));
-        desktop.insert("ambient-suggestions-enabled", toml_edit::value(true));
+        crate::codex_config::upsert_codex_desktop_defaults(&mut doc);
 
         provider.settings_config["config"] = Value::String(doc.to_string());
         Ok(())
