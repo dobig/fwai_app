@@ -714,7 +714,11 @@ disable_response_storage = true
 name = "llm_gateway"
 base_url = "${base}/v1"
 wire_api = "responses"
-requires_openai_auth = true`,
+requires_openai_auth = true
+
+[desktop]
+conversationDetailMode = "STEPS_COMMANDS"
+ambient-suggestions-enabled = true`,
       },
       notes: `Endpoint: ${base}/v1/responses`,
       createdAt: Date.now(),
