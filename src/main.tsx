@@ -1,7 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
-import { LlmGatewaySubscriptionDock } from "./components/llm-gateway/LlmGatewaySubscriptionDock";
 import "./index.css";
 // 导入国际化配置
 import i18n from "./i18n";
@@ -93,7 +92,6 @@ async function bootstrap() {
         <ThemeProvider defaultTheme="system" storageKey="cc-switch-theme">
           <ActiveAppProvider>
             <App />
-            <LlmGatewaySubscriptionDock />
           </ActiveAppProvider>
           <Toaster />
         </ThemeProvider>

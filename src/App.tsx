@@ -6,6 +6,8 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Plus,
   Settings,
+  LayoutGrid,
+  Rows3,
   ArrowLeft,
   Minus,
   Maximize2,
@@ -15,7 +17,11 @@ import {
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Provider, VisibleApps } from "@/types";
 import type { EnvConflict } from "@/types/env";
-import { useProvidersQuery, useSettingsQuery } from "@/lib/query";
+import {
+  useProvidersQuery,
+  useSaveSettingsMutation,
+  useSettingsQuery,
+} from "@/lib/query";
 import {
   providersApi,
   settingsApi,
@@ -46,6 +52,10 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
+import { ForwardingAppCards } from "@/components/forwarding/ForwardingAppCards";
+import { Wordmark } from "@/components/Wordmark";
+import { LlmGatewaySubscriptionDock } from "@/components/llm-gateway/LlmGatewaySubscriptionDock";
+import { useCompactWindow } from "@/hooks/useCompactWindow";
 import { Button } from "@/components/ui/button";
 
 type View = "providers" | "settings";
@@ -56,7 +66,7 @@ const HEADER_HEIGHT = 64; // px
 function App() {
   const { t } = useTranslation();
 
-  // 选中的 app 提到了 context 里：转发面板是 <App/> 的兄弟节点，也要读它。
+  // 选中的 app 提到了 context 里：转发面板也要读它。
   const { activeApp, setActiveApp } = useActiveApp();
   const [currentView, setCurrentView] = useState<View>("providers");
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
@@ -68,6 +78,30 @@ function App() {
     isLinux() && (settingsData?.useAppWindowControls ?? false);
   const dragBarHeight = useAppWindowControls ? 32 : DEFAULT_DRAG_BAR_HEIGHT;
   const contentTopOffset = dragBarHeight + HEADER_HEIGHT;
+  // 默认是简洁模式：主界面只有按 app 的转发卡片。供应商管理（列表、新增、
+  // 编辑）只在用户去设置里打开高级模式后出现。
+  const advancedMode = settingsData?.advancedMode ?? false;
+  // 简洁模式下窗口贴合这块内容的大小，见 useCompactWindow。
+  const [compactContent, setCompactContent] = useState<HTMLElement | null>(
+    null,
+  );
+  useCompactWindow(!advancedMode, compactContent);
+
+  // 右上角一键切换简洁 / 完整界面，和设置页里的高级模式开关是同一个设置。
+  const saveSettings = useSaveSettingsMutation();
+  const toggleAdvancedMode = async () => {
+    if (!settingsData) return;
+    // webdavSync 由后端单独合并，前端不回写（同 FirstRunNoticeDialog）。
+    const { webdavSync: _, ...rest } = settingsData;
+    try {
+      await saveSettings.mutateAsync({ ...rest, advancedMode: !advancedMode });
+    } catch (error) {
+      console.error("[App] Failed to toggle advanced mode", error);
+      toast.error(
+        t("settings.saveFailedGeneric", { defaultValue: "保存失败，请重试" }),
+      );
+    }
+  };
   const visibleApps: VisibleApps =
     settingsData?.visibleApps ?? DEFAULT_VISIBLE_APPS;
 
@@ -515,36 +549,45 @@ function App() {
       ) : (
         <div className="px-6 flex flex-col flex-1 min-h-0 overflow-hidden">
           <div className="flex-1 overflow-y-auto overflow-x-hidden pb-12 px-1">
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={activeApp}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.15 }}
-                className="space-y-4"
-              >
-                <ProviderList
-                  providers={providers}
-                  currentProviderId={currentProviderId}
-                  appId={activeApp}
-                  isLoading={isLoading}
-                  onSwitch={switchProvider}
-                  onEdit={(provider) => {
-                    setEditingProvider(provider);
-                  }}
-                  onDelete={(provider) =>
-                    setConfirmAction({ provider, action: "delete" })
-                  }
-                  onDuplicate={handleDuplicateProvider}
-                  onOpenWebsite={handleOpenWebsite}
-                  onOpenTerminal={
-                    activeApp === "claude" ? handleOpenTerminal : undefined
-                  }
-                  onCreate={() => setIsAddOpen(true)}
-                />
-              </motion.div>
-            </AnimatePresence>
+            {!advancedMode ? (
+              // 固定一个版面宽度（和高级模式的浮动账号面板同宽），窗口按它
+              // 来定大小；宽度跟着窗口走的话两者会互相追。
+              <div ref={setCompactContent} className="w-96 space-y-4 pt-2">
+                <ForwardingAppCards visibleApps={visibleApps} />
+                <LlmGatewaySubscriptionDock inline />
+              </div>
+            ) : (
+              <AnimatePresence mode="wait">
+                <motion.div
+                  key={activeApp}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.15 }}
+                  className="space-y-4"
+                >
+                  <ProviderList
+                    providers={providers}
+                    currentProviderId={currentProviderId}
+                    appId={activeApp}
+                    isLoading={isLoading}
+                    onSwitch={switchProvider}
+                    onEdit={(provider) => {
+                      setEditingProvider(provider);
+                    }}
+                    onDelete={(provider) =>
+                      setConfirmAction({ provider, action: "delete" })
+                    }
+                    onDuplicate={handleDuplicateProvider}
+                    onOpenWebsite={handleOpenWebsite}
+                    onOpenTerminal={
+                      activeApp === "claude" ? handleOpenTerminal : undefined
+                    }
+                    onCreate={() => setIsAddOpen(true)}
+                  />
+                </motion.div>
+              </AnimatePresence>
+            )}
           </div>
         </div>
       );
@@ -681,11 +724,7 @@ function App() {
               </div>
             ) : (
               <div className="flex items-center gap-2">
-                <div className="relative inline-flex items-center">
-                  <span className="text-xl font-semibold text-blue-500 dark:text-blue-400">
-                    fwai_app
-                  </span>
-                </div>
+                <Wordmark />
                 <Button
                   variant="ghost"
                   size="icon"
@@ -708,7 +747,7 @@ function App() {
                 className="flex shrink-0 items-center gap-1.5 ml-auto"
                 style={{ WebkitAppRegion: "no-drag" } as any}
               >
-                {currentView === "providers" && (
+                {currentView === "providers" && advancedMode && (
                   <>
                     <AppSwitcher
                       activeApp={activeApp}
@@ -725,6 +764,35 @@ function App() {
                       <Plus className="w-5 h-5" />
                     </Button>
                   </>
+                )}
+                {currentView === "providers" && (
+                  <Button
+                    variant="ghost"
+                    size={advancedMode ? "icon" : "sm"}
+                    onClick={() => void toggleAdvancedMode()}
+                    disabled={!settingsData || saveSettings.isPending}
+                    title={
+                      advancedMode
+                        ? t("settings.switchToSimpleUi", {
+                            defaultValue: "简洁界面",
+                          })
+                        : t("settings.switchToFullUi", {
+                            defaultValue: "完整界面",
+                          })
+                    }
+                    className="gap-1.5 text-muted-foreground hover:bg-black/5 hover:text-foreground dark:hover:bg-white/5"
+                  >
+                    {advancedMode ? (
+                      <Rows3 className="h-4 w-4" />
+                    ) : (
+                      <>
+                        <LayoutGrid className="h-4 w-4" />
+                        {t("settings.switchToFullUi", {
+                          defaultValue: "完整界面",
+                        })}
+                      </>
+                    )}
+                  </Button>
                 )}
               </div>
             </div>
@@ -770,6 +838,9 @@ function App() {
       />
 
       <FirstRunNoticeDialog />
+      {/* 账号面板只挂一份：简洁模式内嵌在主界面（见 renderContent），高级模式
+          是右下角的浮动面板。两份同时挂会各自响应转发请求。 */}
+      {advancedMode && <LlmGatewaySubscriptionDock />}
     </div>
   );
 }

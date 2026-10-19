@@ -2,7 +2,7 @@ import { Suspense, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { resetProviderState } from "../msw/state";
+import { getSettings, resetProviderState, setSettings } from "../msw/state";
 import { emitTauriEvent } from "../msw/tauriMocks";
 
 const toastSuccessMock = vi.fn();
@@ -128,7 +128,43 @@ describe("App integration with MSW", () => {
     toastErrorMock.mockReset();
   });
 
+  it("defaults to simple mode: forwarding cards only, no provider management", async () => {
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    expect(await screen.findByText("Claude Code")).toBeInTheDocument();
+    expect(screen.getByText("Codex")).toBeInTheDocument();
+    expect(screen.getByText("Claude App")).toBeInTheDocument();
+    // Gemini 不可转发，简洁模式不出现
+    expect(screen.queryByText("Gemini")).toBeNull();
+    expect(screen.queryByTestId("provider-list")).toBeNull();
+    expect(screen.queryByTestId("app-switcher")).toBeNull();
+  });
+
+  it("header button switches to the full UI and back, persisting the choice", async () => {
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    const toFull = await screen.findByRole("button", { name: /完整界面/ });
+    // 设置读到之前按钮是禁用的
+    await waitFor(() => expect(toFull).toBeEnabled());
+    fireEvent.click(toFull);
+
+    expect(await screen.findByTestId("provider-list")).toBeInTheDocument();
+    expect(screen.getByTestId("app-switcher")).toBeInTheDocument();
+    expect(getSettings().advancedMode).toBe(true);
+
+    fireEvent.click(screen.getByTitle("简洁界面"));
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("provider-list")).toBeNull(),
+    );
+    expect(getSettings().advancedMode).toBe(false);
+  });
+
   it("covers basic provider flows via real hooks", async () => {
+    // 供应商管理只在高级模式下出现
+    setSettings({ advancedMode: true });
     const { default: App } = await import("@/App");
     renderApp(App);
 
@@ -179,5 +215,4 @@ describe("App integration with MSW", () => {
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalled();
   });
-
 });

@@ -23,9 +23,8 @@ const getInitialApp = (): AppId => {
 
 /// 当前选中的 CLI（Claude / Codex / Gemini）。
 ///
-/// 提到 App 外面是因为转发面板（LlmGatewaySubscriptionDock）是 <App/> 的兄弟
-/// 节点，却必须知道用户选的是哪个 app：转发只写当前这个 app 的配置，切走时还要
-/// 把上一个还原回去。
+/// 放在 context 里是因为转发面板（LlmGatewaySubscriptionDock）也要知道用户选
+/// 的是哪个 app：高级模式下面板里的转发按钮只写当前这个 app 的配置。
 export function ActiveAppProvider({
   children,
   initialApp,

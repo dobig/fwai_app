@@ -312,7 +312,7 @@ pub fn run() {
 
             // 构建托盘
             let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
-                .tooltip("fwai_app") // 鼠标悬停提示
+                .tooltip("fwai") // 鼠标悬停提示
                 .on_tray_icon_event(|_tray, event| {
                     log::debug!("tray icon event {event:?}");
                 })

@@ -48,3 +48,28 @@ export const APP_DISPLAY_NAME: Record<AppId, string> = {
   codex: "Codex",
   gemini: "Gemini",
 };
+
+/// 各 app 在切换器 / 转发卡片上用的图标名（ProviderIcon 的 icon）。
+export const APP_ICON_NAME: Record<AppId, string> = {
+  claude: "claude",
+  "claude-desktop": "claude",
+  codex: "openai",
+  gemini: "gemini",
+};
+
+/// 主界面的转发卡片 → 转发面板：「替我开/关这个 app 的转发」。
+///
+/// 开关的整套流程（登录校验、套餐对账、购买 / 验证邮箱跳转）都是面板的本地
+/// 状态，卡片只派发请求，由面板执行；需要用户操作时面板自己弹出来。
+export const GATEWAY_TOGGLE_FORWARDING_EVENT = "llm-gateway-toggle-forwarding";
+
+/// 面板 → 卡片：正在开/关哪个 app 的转发（null 表示空闲）。
+export const GATEWAY_FORWARDING_BUSY_EVENT = "llm-gateway-forwarding-busy";
+
+export function requestToggleForwarding(app: ForwardableApp): void {
+  window.dispatchEvent(
+    new CustomEvent<ForwardableApp>(GATEWAY_TOGGLE_FORWARDING_EVENT, {
+      detail: app,
+    }),
+  );
+}

@@ -198,6 +198,9 @@ pub struct AppSettings {
     /// 静默启动（程序启动时不显示主窗口，仅托盘运行）
     #[serde(default)]
     pub silent_startup: bool,
+    /// 高级模式：显示供应商列表、编辑页等完整管理界面。默认关，主界面只有按 app 的转发开关
+    #[serde(default)]
+    pub advanced_mode: bool,
     /// 是否在主页面启用本地代理功能（默认关闭）
     #[serde(default)]
     pub enable_local_proxy: bool,
@@ -309,6 +312,7 @@ impl Default for AppSettings {
             skip_claude_onboarding: false,
             launch_on_startup: false,
             silent_startup: false,
+            advanced_mode: false,
             enable_local_proxy: false,
             proxy_confirmed: None,
             usage_confirmed: None,

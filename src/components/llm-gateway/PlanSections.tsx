@@ -67,15 +67,9 @@ export function PlanSections({
   // 「先扣哪一层」，重排会让用户对不上账。
   const extras = plans.filter((p) => planRole(p) === "extra");
 
-  // 老服务端连 plans 都不返回：退回单行有效期，和加换档之前一样。
-  if (plans.length === 0) {
-    if (!subscription.active || !subscription.valid_until) return null;
-    return (
-      <div className="mb-3.5 -mt-1.5 text-center text-[11px] text-muted-foreground">
-        有效期至 {formatPlanDate(subscription.valid_until)}
-      </div>
-    );
-  }
+  // 老服务端连 plans 都不返回：没有可列的套餐，有效期由账号卡在套餐名下面
+  // 显示（见 LlmGatewaySubscriptionDock）。
+  if (plans.length === 0) return null;
 
   return (
     <div className="mb-3.5 -mt-1 space-y-3">

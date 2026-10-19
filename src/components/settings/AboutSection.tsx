@@ -1,3 +1,4 @@
+import { Wordmark } from "@/components/Wordmark";
 import { useCallback, useEffect, useState } from "react";
 import {
   ArrowUpCircle,
@@ -286,9 +287,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="space-y-2">
             <div className="flex items-center gap-2">
-              <img src={appIcon} alt="fwai_app" className="h-5 w-5" />
-              <h4 className="text-lg font-semibold text-foreground">
-                fwai_app
+              <img src={appIcon} alt="fwai" className="h-5 w-5" />
+              <h4>
+                <Wordmark live={false} className="text-lg" />
               </h4>
             </div>
             <div className="flex items-center gap-2">

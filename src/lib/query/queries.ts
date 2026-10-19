@@ -1,10 +1,16 @@
 import {
   useQuery,
+  useQueries,
   type UseQueryResult,
   keepPreviousData,
 } from "@tanstack/react-query";
 import { providersApi, settingsApi, type AppId } from "@/lib/api";
-import { forwardingFlagKey, isForwardable } from "@/lib/apps";
+import {
+  FORWARDABLE_APPS,
+  forwardingFlagKey,
+  isForwardable,
+  type ForwardableApp,
+} from "@/lib/apps";
 import type { Provider, Settings } from "@/types";
 
 const sortProviders = (
@@ -73,18 +79,32 @@ export const useProvidersQuery = (
 ///
 /// 用 query 而不是组件里的 state，是为了能在用户于供应商列表里手动切走之后自动
 /// 重读——那种切换会让后端作废备份，不重读就会一直显示「结束转发」。
+const readForwarding = async (appId: AppId): Promise<boolean> => {
+  try {
+    return await providersApi.isForwarding(appId);
+  } catch {
+    return localStorage.getItem(forwardingFlagKey(appId)) === "1";
+  }
+};
+
 export const useForwardingQuery = (appId: AppId): UseQueryResult<boolean> => {
   return useQuery({
     queryKey: ["forwarding", appId],
     enabled: isForwardable(appId),
-    queryFn: async () => {
-      try {
-        return await providersApi.isForwarding(appId);
-      } catch {
-        return localStorage.getItem(forwardingFlagKey(appId)) === "1";
-      }
-    },
+    queryFn: () => readForwarding(appId),
   });
+};
+
+/// 所有可转发 app 里正在转发的那些。和 useForwardingQuery 共用 query key，
+/// 任何一处 invalidate 两边一起刷新。
+export const useForwardingAppsQuery = (): ForwardableApp[] => {
+  const results = useQueries({
+    queries: FORWARDABLE_APPS.map((appId) => ({
+      queryKey: ["forwarding", appId],
+      queryFn: () => readForwarding(appId),
+    })),
+  });
+  return FORWARDABLE_APPS.filter((_, i) => results[i]?.data === true);
 };
 
 export const useSettingsQuery = (): UseQueryResult<Settings> => {

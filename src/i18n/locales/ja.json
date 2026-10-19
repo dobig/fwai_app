@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "fwai_app",
+    "title": "fwai",
     "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"
   },
   "common": {
@@ -43,9 +43,9 @@
     "notSet": "未設定"
   },
   "firstRunNotice": {
-    "title": "fwai_app へようこそ",
-    "bodyDefault": "fwai_app は LLM Gateway のデスクトップクライアントです。Claude Code / Codex / Gemini CLI のプロバイダーをワンクリックで切り替えられます。既存の CLI 設定は変更されません。必要ならプロバイダー一覧の「現在の設定をインポート」でプロバイダーとして保存できます。",
-    "bodyOfficial": "はじめかた：\n1. 右下の LLM Gateway パネルを開いてログイン\n2. 「転送を開始」をクリック\n3. プロバイダー一覧で「LLM Gateway」を有効化\nCLI 設定が書き込まれるのはステップ 3 のみです。プロバイダー切替時は、必ず元の設定を復元してから新しい設定を書き込みます。",
+    "title": "fwai へようこそ",
+    "bodyDefault": "fwai は LLM Gateway のデスクトップクライアントです。Claude Code・Codex・Claude App をワンクリックで LLM Gateway 経由にできます。",
+    "bodyOfficial": "はじめかた：\n1. 右下の LLM Gateway パネルを開いてログイン\n2. メイン画面で使いたいアプリをクリックして転送を開始\n置き換えるのはエンドポイントとキーだけで、その他の設定はそのままです。もう一度クリックすると元に戻ります。複数のプロバイダーを管理したい場合は、設定 → 詳細設定 で詳細モードをオンにしてください。",
     "confirm": "了解"
   },
   "apiKeyInput": {
@@ -190,7 +190,7 @@
     "modelMappingOffHint": "プロバイダーがネイティブの Claude シリーズモデルを提供していない場合は、このスイッチを有効にしてください。",
     "modelMappingOnHint": "Claude Desktop は現在モデル ID を制限しています。お使いのプロバイダーが Claude 系列以外のモデルを提供する場合、このスイッチを有効にし、使用中はローカルルーティングを起動したままにしてください。",
     "routeMapTitle": "モデルマッピング",
-    "routeMapHint": "モデル役割を選ぶと、fwai_app が Claude Desktop 互換ルートを自動生成します。DeepSeek や Kimi などのブランド名はメニュー表示名に入れ、実際のリクエストモデルは右側の入力どおりに送信されます。",
+    "routeMapHint": "モデル役割を選ぶと、fwai が Claude Desktop 互換ルートを自動生成します。DeepSeek や Kimi などのブランド名はメニュー表示名に入れ、実際のリクエストモデルは右側の入力どおりに送信されます。",
     "routeModelLabel": "モデル役割",
     "routeRoleSonnet": "Sonnet",
     "routeRoleOpus": "Opus",
@@ -226,7 +226,7 @@
     "providerDeleted": "プロバイダーを削除しました",
     "switchSuccess": "切り替え成功！",
     "claudeDesktopRestartRequired": "切り替えました。反映するには Claude Desktop を再起動してください",
-    "claudeDesktopProxyRestartRequired": "切り替えました。fwai_app を起動したまま Claude Desktop を再起動してください",
+    "claudeDesktopProxyRestartRequired": "切り替えました。fwai を起動したまま Claude Desktop を再起動してください",
     "addToConfigSuccess": "設定に追加しました",
     "removeFromConfigSuccess": "設定から削除しました",
     "switchFailedTitle": "切り替えに失敗しました",
@@ -267,7 +267,7 @@
     "deleteProvider": "プロバイダーを削除",
     "deleteProviderMessage": "プロバイダー「{{name}}」を削除してもよろしいですか？この操作は元に戻せません。",
     "removeProvider": "プロバイダーを解除",
-    "removeProviderMessage": "プロバイダー「{{name}}」を設定から解除してもよろしいですか？\n\n解除後、このプロバイダーは無効になりますが、設定データは fwai_app に保持されます。いつでも再追加できます。",
+    "removeProviderMessage": "プロバイダー「{{name}}」を設定から解除してもよろしいですか？\n\n解除後、このプロバイダーは無効になりますが、設定データは fwai に保持されます。いつでも再追加できます。",
     "proxy": {
       "title": "ローカルルーティングの有効化",
       "message": "ローカルルーティングは上級機能です。有効にする前に、その仕組みを理解していることをご確認ください。\n\n適切な設定方法については、関連ドキュメントまたはプロバイダーにご相談ください。",
@@ -342,7 +342,7 @@
       },
       "globalProxy": {
         "title": "グローバル送信プロキシ",
-        "description": "fwai_app が外部 API にアクセスする際のプロキシを設定"
+        "description": "fwai が外部 API にアクセスする際のプロキシを設定"
       },
       "data": {
         "title": "データ管理",
@@ -412,7 +412,7 @@
     "themeDark": "ダーク",
     "themeSystem": "システム",
     "importExport": "SQL インポート/エクスポート",
-    "importExportHint": "移行や復元用にデータベースの SQL バックアップをインポート/エクスポートします（インポートは fwai_app がエクスポートしたバックアップのみ対応）。",
+    "importExportHint": "移行や復元用にデータベースの SQL バックアップをインポート/エクスポートします（インポートは fwai がエクスポートしたバックアップのみ対応）。",
     "exportConfig": "SQL バックアップをエクスポート",
     "selectConfigFile": "SQL ファイルを選択",
     "noFileSelected": "ファイルが選択されていません。",
@@ -548,9 +548,11 @@
     "windowBehavior": "ウィンドウ動作",
     "windowBehaviorHint": "最小化動作や Claude プラグイン連携を設定します。",
     "launchOnStartup": "起動時に自動実行",
-    "launchOnStartupDescription": "システム起動時に fwai_app を自動起動します",
+    "launchOnStartupDescription": "システム起動時に fwai を自動起動します",
     "silentStartup": "サイレント起動",
     "silentStartupDescription": "起動時にメインウィンドウを表示せず、トレイのみで起動",
+    "advancedMode": "詳細モード",
+    "advancedModeDescription": "プロバイダー一覧や設定エディタなどの管理画面を表示します。オフの場合、メイン画面はアプリごとのワンクリック転送のみになります",
     "autoLaunchFailed": "自動起動の設定に失敗しました",
     "minimizeToTray": "閉じるときトレイへ最小化",
     "minimizeToTrayDescription": "チェックすると閉じるボタンでトレイに隠し、オフならアプリを終了します。",
@@ -570,8 +572,8 @@
     },
     "skillStorage": {
       "title": "スキル保存場所",
-      "description": "fwai_app がスキルのマスターコピーを保存するディレクトリを選択します",
-      "ccSwitch": "fwai_app",
+      "description": "fwai がスキルのマスターコピーを保存するディレクトリを選択します",
+      "ccSwitch": "fwai",
       "unified": "~/.agents/skills",
       "ccSwitchHint": "スキルは ~/.cc-switch/skills/ に保存され、シンボリックリンクまたはコピーで各アプリに同期されます。",
       "unifiedHint": "スキルは ~/.agents/skills/ に保存されます（Agent Skills オープン標準）。対応ツール（Claude Code、Codex、Gemini CLI など）はこのディレクトリのスキルを直接検出します。",
@@ -619,8 +621,8 @@
     },
     "configDirectoryOverride": "設定ディレクトリの上書き（詳細）",
     "configDirectoryDescription": "WSL などで Claude Code や Codex を使う場合、ここで設定ディレクトリを WSL 側に合わせるとデータを揃えられます。",
-    "appConfigDir": "fwai_app 設定ディレクトリ",
-    "appConfigDirDescription": "fwai_app の保存場所をカスタマイズします（クラウド同期フォルダを指定すると設定を同期できます）",
+    "appConfigDir": "fwai 設定ディレクトリ",
+    "appConfigDirDescription": "fwai の保存場所をカスタマイズします（クラウド同期フォルダを指定すると設定を同期できます）",
     "browsePlaceholderApp": "例: C:\\\\Users\\\\Administrator\\\\.cc-switch",
     "claudeConfigDir": "Claude Code 設定ディレクトリ",
     "claudeConfigDirDescription": "Claude の設定ディレクトリ（settings.json）を上書きし、claude.json（MCP）も同じ場所に置きます。",
@@ -677,7 +679,7 @@
     "importFailedError": "設定のインポートに失敗しました: {{message}}",
     "exportFailedError": "設定のエクスポートに失敗しました:",
     "restartRequired": "再起動が必要です",
-    "restartRequiredMessage": "fwai_app の設定ディレクトリを変更すると再起動が必要です。今すぐ再起動しますか？",
+    "restartRequiredMessage": "fwai の設定ディレクトリを変更すると再起動が必要です。今すぐ再起動しますか？",
     "restartNow": "今すぐ再起動",
     "restartLater": "後で再起動",
     "restartFailed": "アプリの再起動に失敗しました。手動で閉じて再度開いてください。",
@@ -711,7 +713,9 @@
       "defaultCostMultiplierRequired": "デフォルト倍率は必須です",
       "defaultCostMultiplierInvalid": "デフォルト倍率の形式が正しくありません"
     },
-    "saveFailedGeneric": "保存に失敗しました。もう一度お試しください"
+    "saveFailedGeneric": "保存に失敗しました。もう一度お試しください",
+    "switchToFullUi": "フル画面",
+    "switchToSimpleUi": "シンプル画面"
   },
   "apps": {
     "claude": "Claude",
@@ -838,30 +842,30 @@
     "officialHint": "💡 公式プロバイダーはブラウザログインで、API Key は不要です",
     "getApiKey": "API Key を取得",
     "partnerPromotion": {
-      "packycode": "PackyCode は fwai_app の公式パートナーです。登録後チャージ時に \"cc-switch\" を入力すると 10% オフ",
-      "patewayai": "PatewayAI は fwai_app ユーザーに特別な特典を提供しています。このリンクから登録すると $3 のクレジットがもらえます。",
-      "claudeapi": "ClaudeAPI は fwai_app ユーザーに特別な特典を提供しています。このリンクから登録するとテストクレジットを受け取ることができます。",
+      "packycode": "PackyCode は fwai の公式パートナーです。登録後チャージ時に \"cc-switch\" を入力すると 10% オフ",
+      "patewayai": "PatewayAI は fwai ユーザーに特別な特典を提供しています。このリンクから登録すると $3 のクレジットがもらえます。",
+      "claudeapi": "ClaudeAPI は fwai ユーザーに特別な特典を提供しています。このリンクから登録するとテストクレジットを受け取ることができます。",
       "claudecn": "ClaudeCN は登録企業が運営するエンタープライズグレードの AI ゲートウェイプラットフォームで、企業調達プロセスをサポートし、法人支払い、契約、コンプライアンス保証を提供します。",
-      "runapi": "RunAPI は fwai_app ユーザーに特別な特典を提供しています。このリンクから登録しカスタマーサポートにご連絡いただくと、¥14 の無料クレジットを受け取ることができます。",
+      "runapi": "RunAPI は fwai ユーザーに特別な特典を提供しています。このリンクから登録しカスタマーサポートにご連絡いただくと、¥14 の無料クレジットを受け取ることができます。",
       "minimax_cn": "MiniMax Coding Plan 特別価格、Starter ¥9.9 から",
       "minimax_en": "MiniMax Coding Plan Black Friday、Starter が月額 $2（80% OFF）",
       "dmxapi": "Claude Code 専用モデル 66% OFF 実施中！",
-      "cubence": "Cubence は fwai_app の公式パートナーです。登録後チャージ時に \"CCSWITCH\" を入力すると、毎回 10% オフ",
-      "aigocode": "AIGoCode は fwai_app の公式パートナーです。このリンクから登録すると、初回チャージ時に 10% のボーナスクレジットがもらえます！",
-      "rightcode": "RightCode は fwai_app の公式パートナーです。このリンクから登録すると、毎回のチャージに 5% のボーナスクレジットがもらえます！",
-      "aicodemirror": "AICodeMirror は fwai_app の公式パートナーです。このリンクから登録すると20%オフ！",
-      "aicoding": "AI Coding は fwai_app ユーザー向けに特別割引を提供しています。初回チャージが 10% オフ！",
-      "crazyrouter": "CrazyRouter は fwai_app ユーザー向けに特別ボーナスを提供しています。初回チャージで 30% の追加クレジットがもらえます！",
-      "sssaicode": "SSAI Code は fwai_app ユーザー向けに特別ボーナスを提供しています。チャージごとに $10 の追加クレジットがもらえます！",
-      "siliconflow": "SiliconFlow は fwai_app の公式パートナーです",
-      "ucloud": "Compshare は fwai_app ユーザー向けに特別ボーナスを提供しています。このリンクから登録すると、5元のプラットフォーム体験クレジットがもらえます！",
-      "micu": "Micu は fwai_app の公式パートナーです",
+      "cubence": "Cubence は fwai の公式パートナーです。登録後チャージ時に \"CCSWITCH\" を入力すると、毎回 10% オフ",
+      "aigocode": "AIGoCode は fwai の公式パートナーです。このリンクから登録すると、初回チャージ時に 10% のボーナスクレジットがもらえます！",
+      "rightcode": "RightCode は fwai の公式パートナーです。このリンクから登録すると、毎回のチャージに 5% のボーナスクレジットがもらえます！",
+      "aicodemirror": "AICodeMirror は fwai の公式パートナーです。このリンクから登録すると20%オフ！",
+      "aicoding": "AI Coding は fwai ユーザー向けに特別割引を提供しています。初回チャージが 10% オフ！",
+      "crazyrouter": "CrazyRouter は fwai ユーザー向けに特別ボーナスを提供しています。初回チャージで 30% の追加クレジットがもらえます！",
+      "sssaicode": "SSAI Code は fwai ユーザー向けに特別ボーナスを提供しています。チャージごとに $10 の追加クレジットがもらえます！",
+      "siliconflow": "SiliconFlow は fwai の公式パートナーです",
+      "ucloud": "Compshare は fwai ユーザー向けに特別ボーナスを提供しています。このリンクから登録すると、5元のプラットフォーム体験クレジットがもらえます！",
+      "micu": "Micu は fwai の公式パートナーです",
       "ctok": "公式サイトで CTok コミュニティに参加し、プランを購読してください。",
-      "lionccapi": "LionCCAPIはfwai_appユーザーに特別特典を提供しています。登録後、WeChat HSQBJ088888888を追加し、「cc-switch」と伝えると$10分のクレジットがもらえます！",
-      "shengsuanyun": "胜算云はfwai_appユーザーに特別特典を提供しています。このリンクから登録すると、10元分の無料クレジットと初回チャージ10%ボーナスがもらえます！",
-      "lemondata": "Lemon Code は fwai_app ユーザー向けの特別オファーを提供しています。このリンクから登録すると 1 ドル分の無料クレジットがもらえます。",
-      "doubaoseed": "豆包大モデルは fwai_app ユーザーに専属特典を提供しています：このリンクから登録すると、豆包全テキストモデル50万トークンの推論クレジットおよびSeedance2.0の500万トークン無料クレジットがもらえます。",
-      "volcengine_agentplan": "火山方舟 Agent Plan は fwai_app ユーザーに専属特典を提供しています：このリンクから方舟AgentPlanを購読すると、新規のお客様は初月40元から利用できます。",
+      "lionccapi": "LionCCAPIはfwaiユーザーに特別特典を提供しています。登録後、WeChat HSQBJ088888888を追加し、「cc-switch」と伝えると$10分のクレジットがもらえます！",
+      "shengsuanyun": "胜算云はfwaiユーザーに特別特典を提供しています。このリンクから登録すると、10元分の無料クレジットと初回チャージ10%ボーナスがもらえます！",
+      "lemondata": "Lemon Code は fwai ユーザー向けの特別オファーを提供しています。このリンクから登録すると 1 ドル分の無料クレジットがもらえます。",
+      "doubaoseed": "豆包大モデルは fwai ユーザーに専属特典を提供しています：このリンクから登録すると、豆包全テキストモデル50万トークンの推論クレジットおよびSeedance2.0の500万トークン無料クレジットがもらえます。",
+      "volcengine_agentplan": "火山方舟 Agent Plan は fwai ユーザーに専属特典を提供しています：このリンクから方舟AgentPlanを購読すると、新規のお客様は初月40元から利用できます。",
       "byteplus": "このリンクから登録すると、各モデルごとに50万トークンの無料推論クォータがもらえます。"
     },
     "presets": {
@@ -1407,7 +1411,7 @@
       "deleteConfirm": "サーバー「{{id}}」を削除しますか？この操作は元に戻せません。",
       "noServers": "まだサーバーがありません",
       "enabledApps": "有効なアプリ",
-      "noImportFound": "インポートする MCP サーバーが見つかりませんでした。すべてのサーバーは fwai_app で管理されています。",
+      "noImportFound": "インポートする MCP サーバーが見つかりませんでした。すべてのサーバーは fwai で管理されています。",
       "importSuccess": "{{count}} 個の MCP サーバーをインポートしました",
       "apps": {
         "claude": "Claude",
@@ -1952,10 +1956,10 @@
     "noInstalledDescription": "リポジトリからスキルを発見してインストールするか、既存のスキルをインポートしてください",
     "discover": "スキルを発見",
     "import": "既存をインポート",
-    "importDescription": "fwai_app 統合管理にインポートするスキルを選択してください",
+    "importDescription": "fwai 統合管理にインポートするスキルを選択してください",
     "importSuccess": "{{count}} 件のスキルをインポートしました",
     "importSelected": "選択をインポート ({{count}})",
-    "noUnmanagedFound": "インポートするスキルが見つかりませんでした。すべてのスキルは fwai_app で管理されています。",
+    "noUnmanagedFound": "インポートするスキルが見つかりませんでした。すべてのスキルは fwai で管理されています。",
     "foundIn": "発見場所",
     "local": "ローカル",
     "uninstallConfirm": "「{{name}}」をアンインストールしますか？すべてのアプリからこのスキルが削除され、削除前にローカルバックアップが自動作成されます。",
@@ -1999,7 +2003,7 @@
   },
   "deeplink": {
     "confirmImport": "プロバイダーのインポートを確認",
-    "confirmImportDescription": "次の設定をディープリンクから fwai_app へインポートします",
+    "confirmImportDescription": "次の設定をディープリンクから fwai へインポートします",
     "importPrompt": "プロンプトをインポート",
     "importPromptDescription": "このシステムプロンプトをインポートするか確認してください",
     "importMcp": "MCP サーバーをインポート",
@@ -2633,5 +2637,11 @@
     "queryFailed": "クエリに失敗しました",
     "refresh": "更新",
     "unavailable": "N/A"
+  },
+  "forwarding": {
+    "cards": {
+      "on": "転送中",
+      "off": "オフ"
+    }
   }
 }
