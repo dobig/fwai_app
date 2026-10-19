@@ -548,7 +548,13 @@ function App() {
         />
       ) : (
         <div className="px-6 flex flex-col flex-1 min-h-0 overflow-hidden">
-          <div className="flex-1 overflow-y-auto overflow-x-hidden pb-12 px-1">
+          {/* 简洁模式下窗口贴合内容，底部留白和两侧一致（px-6 + px-1）；
+              高级模式的列表底下要给浮动账号面板让位，留得多一些。 */}
+          <div
+            className={`flex-1 overflow-y-auto overflow-x-hidden px-1 ${
+              advancedMode ? "pb-12" : "pb-7"
+            }`}
+          >
             {!advancedMode ? (
               // 固定一个版面宽度（和高级模式的浮动账号面板同宽），窗口按它
               // 来定大小；宽度跟着窗口走的话两者会互相追。

@@ -57,18 +57,33 @@ export function useCompactWindow(
 
     const el = content;
     if (!el) return;
+    // 内容外面套着两层能滚的容器：App 的列表滚动区，和更外层的 <main>。
+    const scroller = el.closest<HTMLElement>(".overflow-y-auto");
+    const main = el.closest<HTMLElement>("main");
+    const scrollers = [scroller, main].filter(
+      (node): node is HTMLElement => node !== null,
+    );
     let last = "";
     const fit = () => {
       const rect = el.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) return;
-      const scroller = el.closest<HTMLElement>(".overflow-y-auto");
-      // 内容左右的留白对称；底部用同样的留白，看起来和两侧一致。
+      if (rect.width === 0 || rect.height === 0 || !scroller || !main) return;
+      // 内容左右的留白对称。
       const gutter = Math.max(rect.left, 0);
       const width = Math.ceil(rect.width + gutter * 2);
-      const top = rect.top + (scroller?.scrollTop ?? 0);
-      const height = Math.ceil(
-        Math.min(top + rect.height + gutter, window.screen.availHeight),
+      // 窗口刚好装下：内容底边（换算成未滚动时的位置）+ 滚动区的底部内边距
+      // + <main> 下面到窗口底边的距离（根节点的底部内边距）。少算一点，页面
+      // 就能被滚动几像素，鼠标滚轮一动整个界面上下窜。
+      const needed = Math.ceil(
+        rect.bottom +
+          scroller.scrollTop +
+          main.scrollTop +
+          parseFloat(getComputedStyle(scroller).paddingBottom) +
+          (window.innerHeight - main.getBoundingClientRect().bottom),
       );
+      const height = Math.min(needed, window.screen.availHeight);
+      // 装得下就干脆不让滚；只有内容高过屏幕、窗口被封顶时才需要滚动。
+      const overflowY = height < needed ? "auto" : "hidden";
+      for (const node of scrollers) node.style.overflowY = overflowY;
       const key = `${width}x${height}`;
       if (key === last) return;
       last = key;
@@ -83,7 +98,10 @@ export function useCompactWindow(
     );
     const ro = new ResizeObserver(fit);
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      for (const node of scrollers) node.style.overflowY = "";
+    };
   }, [compact, content]);
 }
 
