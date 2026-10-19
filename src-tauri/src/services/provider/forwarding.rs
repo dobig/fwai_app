@@ -273,7 +273,25 @@ fn apply_codex(token: &str, base_url: &str) -> Result<(), AppError> {
     point_codex_doc_at_gateway(&mut doc, base_url)?;
     // 网关模式下 Codex Desktop 的显示偏好也一并钉上；停止转发时不还原。
     crate::codex_config::upsert_codex_desktop_defaults(&mut doc);
+    crate::codex_config::remove_codex_forbidden_keys(&mut doc);
     write_codex_doc(&doc)
+}
+
+/// 转发期间禁止字段（`CODEX_FORWARDING_FORBIDDEN_KEYS`）不许留在 config.toml 里：
+/// 无论是 Codex Desktop 自己回写的还是用户手改的，发现就删。只动这些键，其余原样写回。
+/// 返回是否改写了文件。由 `codex_watcher` 在 config.toml 变化时调用。
+pub fn strip_codex_forbidden_keys(db: &Database) -> Result<bool, AppError> {
+    if !is_forwarding(db, &AppType::Codex)? {
+        return Ok(false);
+    }
+    let Some(mut doc) = read_codex_doc()? else {
+        return Ok(false);
+    };
+    if !crate::codex_config::remove_codex_forbidden_keys(&mut doc) {
+        return Ok(false);
+    }
+    write_codex_doc(&doc)?;
+    Ok(true)
 }
 
 /// 把一份 config.toml 的 `model_provider` 指到网关那张表，并保证那张表描述的是
@@ -573,6 +591,7 @@ pub(crate) fn pin_gateway_credentials(
                 })?
             };
             point_codex_doc_at_gateway(&mut doc, base_url)?;
+            crate::codex_config::remove_codex_forbidden_keys(&mut doc);
             obj.insert("config".to_string(), Value::String(doc.to_string()));
             Ok(())
         }
@@ -1327,8 +1346,9 @@ wire_api = "responses"
         });
     }
 
-    /// 开启转发时 `[desktop]` 里已有的两个键要被替换成目标值，表里其它键保留，
-    /// 且不能出现第二个 `[desktop]` 表头。
+    /// 开启转发时 `[desktop]` 的 `conversationDetailMode` 要被删掉、
+    /// `ambient-suggestions-enabled` 钉成 true，表里其它键保留，且不能出现第二个
+    /// `[desktop]` 表头。
     #[test]
     #[serial]
     fn codex_forwarding_upserts_desktop_defaults() {
@@ -1365,14 +1385,54 @@ ambient-suggestions-enabled = false
             assert_eq!(during.matches("[desktop]").count(), 1);
             let parsed: toml::Table = toml::from_str(&during).expect("valid toml");
             let desktop = parsed["desktop"].as_table().expect("desktop table");
-            assert_eq!(
-                desktop["conversationDetailMode"].as_str(),
-                Some("STEPS_COMMANDS")
-            );
+            assert!(!desktop.contains_key("conversationDetailMode"));
             assert_eq!(desktop["ambient-suggestions-enabled"].as_bool(), Some(true));
             assert_eq!(desktop["followUpQueueMode"].as_str(), Some("steer"));
             assert_eq!(desktop["sansFontSize"].as_integer(), Some(14));
             assert!(parsed.contains_key("notify"), "notify 必须保留");
+        });
+    }
+
+    /// 转发期间外部（Codex Desktop / 用户手改）写回禁止字段（这里用
+    /// conversationDetailMode），要被删掉且只删这个键；转发关闭后则不管。
+    #[test]
+    #[serial]
+    fn codex_strips_forbidden_keys_only_while_forwarding() {
+        with_test_home(|state| {
+            let config_path = crate::codex_config::get_codex_config_path();
+            std::fs::create_dir_all(config_path.parent().expect("parent"))
+                .expect("create codex dir");
+            std::fs::write(&config_path, "model = \"gpt-5\"\n").expect("write codex config");
+
+            let provider = gateway_provider("gw-token", "https://api.fwai.space");
+            start_forwarding(
+                state,
+                &AppType::Codex,
+                &provider,
+                "gw-token",
+                "https://api.fwai.space",
+            )
+            .expect("start codex forwarding");
+
+            let mut doc: DocumentMut = read_codex_text().parse().expect("valid toml");
+            doc["desktop"]["conversationDetailMode"] = toml_edit::value("STEPS_PROSE");
+            doc["desktop"]["sansFontSize"] = toml_edit::value(14);
+            std::fs::write(&config_path, doc.to_string()).expect("external write");
+
+            assert!(strip_codex_forbidden_keys(&state.db).expect("strip"));
+            let after = read_codex_text();
+            assert!(!after.contains("conversationDetailMode"));
+            assert!(after.contains("sansFontSize = 14"));
+            assert!(after.contains("model = \"gpt-5\""));
+            // 已经删干净了，再查一次不该再写文件。
+            assert!(!strip_codex_forbidden_keys(&state.db).expect("strip again"));
+
+            stop_forwarding(state, &AppType::Codex).expect("stop codex forwarding");
+            let mut stopped = read_codex_text();
+            stopped.push_str("\n[desktop]\nconversationDetailMode = \"STEPS_PROSE\"\n");
+            std::fs::write(&config_path, &stopped).expect("write after stop");
+            assert!(!strip_codex_forbidden_keys(&state.db).expect("strip after stop"));
+            assert!(read_codex_text().contains("conversationDetailMode"));
         });
     }
 

@@ -4,6 +4,7 @@ mod auto_launch;
 mod claude_desktop_config;
 mod claude_plugin;
 mod codex_config;
+mod codex_watcher;
 mod commands;
 mod config;
 mod database;
@@ -373,6 +374,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
                 initialize_common_config_snippets(&state);
+                codex_watcher::spawn(state.db.clone());
 
                 // Periodic backup check (on startup)
                 if let Err(e) = state.db.periodic_backup_if_needed() {
