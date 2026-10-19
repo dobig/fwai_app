@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_DESKTOP_MODEL_ROWS,
   isClaudeSafeModelId,
+  isPreviousDefaultRoutes,
   metaToRows,
   rowsToMeta,
   validateDesktopForm,
@@ -106,13 +107,13 @@ describe("metaToRows", () => {
   it("ticks exactly the stored models", () => {
     const rows = metaToRows({
       claudeDesktopModelRoutes: {
-        "claude-opus-5": { model: "claude-opus-5", supports1m: true },
+        "claude-opus-5-5": { model: "claude-opus-5-5", supports1m: true },
       },
     });
-    const opus = rows.find((row) => row.model === "claude-opus-5");
+    const opus = rows.find((row) => row.model === "claude-opus-5-5");
     expect(opus?.enabled).toBe(true);
     expect(opus?.supports1m).toBe(true);
-    expect(rows.find((row) => row.model === "claude-sonnet-5")?.enabled).toBe(
+    expect(rows.find((row) => row.model === "claude-sonnet-5-5")?.enabled).toBe(
       false,
     );
   });
@@ -208,5 +209,41 @@ describe("validateDesktopForm", () => {
         })),
       }),
     ).toBeNull();
+  });
+});
+
+describe("isPreviousDefaultRoutes", () => {
+  const routes = (...models: string[]) =>
+    Object.fromEntries(models.map((model) => [model, { model }]));
+
+  it("recognizes an untouched previous default set, in any order", () => {
+    expect(
+      isPreviousDefaultRoutes(
+        routes("claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-5"),
+      ),
+    ).toBe(true);
+  });
+
+  it("leaves edited or current lists alone", () => {
+    // 当前默认
+    expect(
+      isPreviousDefaultRoutes(rowsToMeta(DEFAULT_DESKTOP_MODEL_ROWS)),
+    ).toBe(false);
+    // 用户勾上了 Fable
+    expect(
+      isPreviousDefaultRoutes(
+        routes(
+          "claude-sonnet-5",
+          "claude-opus-5",
+          "claude-haiku-4-5-20251001",
+          "claude-fable-5-1",
+        ),
+      ),
+    ).toBe(false);
+    // 用户去掉了一档
+    expect(
+      isPreviousDefaultRoutes(routes("claude-sonnet-5", "claude-opus-5")),
+    ).toBe(false);
+    expect(isPreviousDefaultRoutes(undefined)).toBe(false);
   });
 });

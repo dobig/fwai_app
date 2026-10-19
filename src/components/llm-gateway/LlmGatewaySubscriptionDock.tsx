@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { GATEWAY_PROVIDER_ID } from "@/config/constants";
 import {
   DEFAULT_DESKTOP_MODEL_ROWS,
+  isPreviousDefaultRoutes,
   rowsToMeta,
 } from "@/lib/claudeDesktopModels";
 import {
@@ -744,7 +745,7 @@ export function LlmGatewaySubscriptionDock({
       settingsConfig: {
         auth: { OPENAI_API_KEY: token },
         config: `model_provider = "llm_gateway"
-model = "gpt-5.6-sol"
+model = "gpt-6.1-sol"
 model_reasoning_effort = "high"
 disable_response_storage = true
 
@@ -770,8 +771,30 @@ requires_openai_auth = true`,
   ): Promise<void> {
     try {
       const providers = await providersApi.getAll(app);
-      if (!providers[GATEWAY_PROVIDER_ID]) {
+      const existing = providers[GATEWAY_PROVIDER_ID];
+      if (!existing) {
         await providersApi.add(buildGatewayProvider(app), app, false);
+        return;
+      }
+      // Claude App 的模型清单存在条目里，换代后老条目还停在旧模型上。用户
+      // 没改过（恰好是某一代默认值）就换成当前默认；改过的不动。转发开着时
+      // 跳过：转发期间 update 是整份写 live，等下次开启转发前（这里会先跑
+      // 一遍）再换。
+      if (
+        app === "claude-desktop" &&
+        isPreviousDefaultRoutes(existing.meta?.claudeDesktopModelRoutes) &&
+        !(await providersApi.isForwarding(app))
+      ) {
+        await providersApi.update(
+          {
+            ...existing,
+            meta: {
+              ...existing.meta,
+              claudeDesktopModelRoutes: rowsToMeta(DEFAULT_DESKTOP_MODEL_ROWS),
+            },
+          },
+          app,
+        );
       }
     } catch {
       // Non-Tauri env or read failure — the next mount retries.

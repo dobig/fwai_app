@@ -3093,3 +3093,72 @@ describe("LlmGatewaySubscriptionDock 简洁模式", () => {
     );
   });
 });
+
+// Claude App 的模型清单存在网关条目里。换代后老条目要跟着换，但只换没被用户
+// 改过的（恰好是某一代默认值的）。
+describe("LlmGatewaySubscriptionDock Claude App 默认模型换代", () => {
+  const oldEntry = {
+    "llm-gateway-local": {
+      id: "llm-gateway-local",
+      name: "LLM Gateway",
+      settingsConfig: { env: { ANTHROPIC_AUTH_TOKEN: "t" } },
+      meta: {
+        claudeDesktopMode: "direct",
+        claudeDesktopModelRoutes: {
+          "claude-sonnet-5": { model: "claude-sonnet-5", supports1m: true },
+          "claude-opus-5": { model: "claude-opus-5", supports1m: true },
+          "claude-haiku-4-5-20251001": { model: "claude-haiku-4-5-20251001" },
+        },
+      },
+    },
+  };
+
+  it("没改过的旧默认清单换成当前默认", async () => {
+    seedActivePlan();
+    vi.mocked(providersApi.getAll).mockResolvedValue(oldEntry as never);
+
+    renderDock("claude-desktop");
+
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalled());
+    const [updated, app] = vi.mocked(providersApi.update).mock.calls[0];
+    expect(app).toBe("claude-desktop");
+    expect(
+      Object.keys(updated.meta?.claudeDesktopModelRoutes ?? {}).sort(),
+    ).toEqual(["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"]);
+    // 其它字段原样保留
+    expect(updated.settingsConfig).toEqual(
+      oldEntry["llm-gateway-local"].settingsConfig,
+    );
+    expect(updated.meta?.claudeDesktopMode).toBe("direct");
+  });
+
+  it("转发开着时先不动，避免整份重写 live", async () => {
+    seedActivePlan();
+    vi.mocked(providersApi.getAll).mockResolvedValue(oldEntry as never);
+    vi.mocked(providersApi.isForwarding).mockResolvedValue(true);
+
+    renderDock("claude-desktop");
+
+    await waitFor(() => expect(providersApi.getAll).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 50));
+    expect(providersApi.update).not.toHaveBeenCalled();
+  });
+
+  it("用户改过的清单不动", async () => {
+    seedActivePlan();
+    const edited = structuredClone(oldEntry);
+    (
+      edited["llm-gateway-local"].meta.claudeDesktopModelRoutes as Record<
+        string,
+        { model: string }
+      >
+    )["claude-fable-5-1"] = { model: "claude-fable-5-1" };
+    vi.mocked(providersApi.getAll).mockResolvedValue(edited as never);
+
+    renderDock("claude-desktop");
+
+    await waitFor(() => expect(providersApi.getAll).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 50));
+    expect(providersApi.update).not.toHaveBeenCalled();
+  });
+});
