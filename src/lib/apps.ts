@@ -66,10 +66,17 @@ export const GATEWAY_TOGGLE_FORWARDING_EVENT = "llm-gateway-toggle-forwarding";
 /// 面板 → 卡片：正在开/关哪个 app 的转发（null 表示空闲）。
 export const GATEWAY_FORWARDING_BUSY_EVENT = "llm-gateway-forwarding-busy";
 
-export function requestToggleForwarding(app: ForwardableApp): void {
-  window.dispatchEvent(
+/// 返回面板是否接住了这次请求（面板此刻没挂载就是 false，调用方可以稍后重试）。
+export function requestToggleForwarding(app: ForwardableApp): boolean {
+  const handled = !window.dispatchEvent(
     new CustomEvent<ForwardableApp>(GATEWAY_TOGGLE_FORWARDING_EVENT, {
       detail: app,
+      cancelable: true,
     }),
   );
+  return handled;
 }
+
+/// 托盘菜单点转发开关时后端发来的事件（见 tray.rs 的
+/// `TRAY_TOGGLE_FORWARDING_EVENT`），载荷是 app id。
+export const TRAY_TOGGLE_FORWARDING_EVENT = "tray-toggle-forwarding";

@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import type { Provider, VisibleApps } from "@/types";
 import type { EnvConflict } from "@/types/env";
 import {
@@ -43,7 +44,13 @@ import {
   DRAG_REGION_STYLE,
 } from "@/lib/platform";
 import { AppSwitcher } from "@/components/AppSwitcher";
-import { DEFAULT_VISIBLE_APPS } from "@/lib/apps";
+import {
+  DEFAULT_VISIBLE_APPS,
+  isForwardable,
+  requestToggleForwarding,
+  TRAY_TOGGLE_FORWARDING_EVENT,
+  type ForwardableApp,
+} from "@/lib/apps";
 import { useActiveApp } from "@/components/active-app-provider";
 import { ProviderList } from "@/components/providers/ProviderList";
 import { AddProviderDialog } from "@/components/providers/AddProviderDialog";
@@ -95,6 +102,8 @@ function App() {
     const { webdavSync: _, ...rest } = settingsData;
     try {
       await saveSettings.mutateAsync({ ...rest, advancedMode: !advancedMode });
+      // 托盘菜单按模式不同（供应商列表 / 转发开关），切完要重建。
+      void providersApi.updateTrayMenu().catch(() => {});
     } catch (error) {
       console.error("[App] Failed to toggle advanced mode", error);
       toast.error(
@@ -362,6 +371,56 @@ function App() {
 
     checkEnvOnSwitch();
   }, [activeApp]);
+
+  // 托盘菜单上点了某个 app 的转发开关（简洁模式的托盘，见 tray.rs）。
+  //
+  // 开关流程在转发面板里，而简洁模式下面板嵌在主界面上——用户正开着设置页时
+  // 它没挂载。所以先切回主界面，再派发请求，面板接住为止（最多等 3 秒）。
+  const [pendingTrayToggle, setPendingTrayToggle] =
+    useState<ForwardableApp | null>(null);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    listen<string>(TRAY_TOGGLE_FORWARDING_EVENT, (event) => {
+      const app = event.payload as AppId;
+      if (!isForwardable(app)) return;
+      setCurrentView("providers");
+      setPendingTrayToggle(app);
+    })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch((error) => {
+        console.error("[App] Failed to subscribe tray forwarding event", error);
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pendingTrayToggle) return;
+    const tryToggle = () => {
+      if (!requestToggleForwarding(pendingTrayToggle)) return false;
+      setPendingTrayToggle(null);
+      return true;
+    };
+    if (tryToggle()) return;
+    const retry = setInterval(() => {
+      if (tryToggle()) clearInterval(retry);
+    }, 100);
+    const giveUp = setTimeout(() => {
+      clearInterval(retry);
+      setPendingTrayToggle(null);
+    }, 3000);
+    return () => {
+      clearInterval(retry);
+      clearTimeout(giveUp);
+    };
+  }, [pendingTrayToggle]);
 
   const currentViewRef = useRef(currentView);
 

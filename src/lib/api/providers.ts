@@ -113,6 +113,11 @@ export const providersApi = {
     return await invoke("update_tray_menu");
   },
 
+  /// 把主窗口叫到前台（托盘里开转发、但需要用户先登录 / 购买时）。
+  async showMainWindow(): Promise<void> {
+    await invoke("show_main_window");
+  },
+
   async updateSortOrder(
     updates: ProviderSortUpdate[],
     appId: AppId,

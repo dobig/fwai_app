@@ -872,6 +872,22 @@ requires_openai_auth = true`,
     };
   }
 
+  // 需要用户接着操作（登录、购买、换项目）时把面板亮出来。请求可能来自托盘，
+  // 那时主窗口多半藏着，只展开面板用户看不见，所以连窗口一起叫到前台。
+  function revealPanel() {
+    setOpen(true);
+    void providersApi.showMainWindow().catch(() => {
+      // 非 Tauri 环境（浏览器预览、测试）没有这个命令。
+    });
+  }
+
+  // 托盘上的转发项打勾与否由后端按转发状态生成，状态变了要重建一次菜单。
+  function refreshTray() {
+    void providersApi.updateTrayMenu().catch(() => {
+      // 同上：非 Tauri 环境没有托盘。
+    });
+  }
+
   async function startForwarding(app: ForwardableApp): Promise<void> {
     const token = gatewayOAuthAccessToken();
     // 规则 2：没登录不能开启转发。
@@ -893,7 +909,7 @@ requires_openai_auth = true`,
             clearGatewayLogin();
             setLogin(null);
             setScreen("auth");
-            setOpen(true);
+            revealPanel();
             return;
           }
         }
@@ -937,6 +953,7 @@ requires_openai_auth = true`,
     } finally {
       setFwdBusyApp(null);
       void queryClient.invalidateQueries({ queryKey: ["forwarding", app] });
+      refreshTray();
       void queryClient.invalidateQueries({ queryKey: ["providers", app] });
     }
   }
@@ -960,6 +977,7 @@ requires_openai_auth = true`,
     } finally {
       setFwdBusyApp(null);
       void queryClient.invalidateQueries({ queryKey: ["forwarding", app] });
+      refreshTray();
       void queryClient.invalidateQueries({ queryKey: ["providers", app] });
     }
   }
@@ -976,6 +994,7 @@ requires_openai_auth = true`,
         console.error(`[forwarding] ${app} 配置还原失败`, error);
       }
       void queryClient.invalidateQueries({ queryKey: ["forwarding", app] });
+      refreshTray();
     }
   }
 
@@ -998,7 +1017,7 @@ requires_openai_auth = true`,
     if (!login) {
       toast.info("请先登录 llm_gateway");
       setScreen("auth");
-      setOpen(true);
+      revealPanel();
       return;
     }
     // 组织成员的 active 由服务端按当前项目算：当前项目有额度才为 true。
@@ -1038,19 +1057,19 @@ requires_openai_auth = true`,
     }
     const memberOrg = orgNow === undefined ? org : orgNow;
     if (login && memberOrg) {
-      setOpen(true);
+      revealPanel();
       promptNoProjectAllowance(memberOrg);
       return;
     }
     // 服务端确认了确实没开通。未验证邮箱的话连购买屏都进不去，goToPurchase 会
     // 改道去验证屏并自己提示原因——这里就别再叠一条「请先购买会员」的 toast。
     if (login && fresh.user?.email_verified === false) {
-      setOpen(true);
+      revealPanel();
       await goToPurchase(fresh);
       return;
     }
     toast.info("请先购买会员再开启转发");
-    setOpen(true);
+    revealPanel();
     await goToPurchase(fresh);
   }
 
@@ -1061,7 +1080,12 @@ requires_openai_auth = true`,
   useEffect(() => {
     const onToggle = (e: Event) => {
       const app = (e as CustomEvent<ForwardableApp>).detail;
-      if (isForwardable(app)) void toggleForwardingRef.current(app);
+      if (!isForwardable(app)) return;
+      // 告诉派发方「接住了」，见 requestToggleForwarding。
+      e.preventDefault();
+      // 没走到开/关那一步（要先登录、没套餐…）时托盘上的勾已经被系统自己
+      // 翻过去了，也得按真实状态重建一次。
+      void toggleForwardingRef.current(app).finally(refreshTray);
     };
     window.addEventListener(GATEWAY_TOGGLE_FORWARDING_EVENT, onToggle);
     return () =>

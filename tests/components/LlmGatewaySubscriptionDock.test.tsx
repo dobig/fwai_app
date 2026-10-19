@@ -2967,6 +2967,21 @@ describe("LlmGatewaySubscriptionDock 简洁模式", () => {
     expect(screen.queryByText(/^开启转发/)).toBeNull();
   });
 
+  it("面板挂着时接住请求，卸载后不再接", async () => {
+    seedActivePlan();
+    const view = renderDock("claude");
+    await screen.findByText(/在主界面点应用即可开启转发/);
+
+    let handled = false;
+    act(() => {
+      handled = requestToggleForwarding("codex");
+    });
+    expect(handled).toBe(true);
+
+    view.unmount();
+    expect(requestToggleForwarding("codex")).toBe(false);
+  });
+
   it("卡片点名的 app 才被转发，与当前 tab 无关", async () => {
     seedActivePlan();
     renderDock("claude");

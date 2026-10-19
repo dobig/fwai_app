@@ -63,6 +63,13 @@ async fn update_tray_menu(
     }
 }
 
+/// 把主窗口叫到前台。转发需要用户登录 / 购买时由前端调用：托盘上点开关时窗口
+/// 多半是藏着的，只在页面里弹面板用户看不见。
+#[tauri::command]
+fn show_main_window(app: tauri::AppHandle) {
+    tray::show_main_window(&app);
+}
+
 #[cfg(target_os = "macos")]
 fn macos_tray_icon() -> Option<Image<'static>> {
     const ICON_BYTES: &[u8] = include_bytes!("../icons/tray/macos/statusbar_template_3x.png");
@@ -509,6 +516,7 @@ pub fn run() {
             commands::delete_db_backup,
             commands::sync_current_providers_live,
             update_tray_menu,
+            show_main_window,
             // Environment variable management
             commands::check_env_conflicts,
             commands::delete_env_vars,
