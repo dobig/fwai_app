@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { GATEWAY_PROVIDER_ID } from "@/config/constants";
 import {
   DEFAULT_DESKTOP_MODEL_ROWS,
+  isPreviousDefaultRoutes,
   rowsToMeta,
 } from "@/lib/claudeDesktopModels";
 import {
@@ -21,11 +22,17 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { providersApi } from "@/lib/api";
 import { useActiveApp } from "@/components/active-app-provider";
-import { useForwardingQuery } from "@/lib/query";
+import {
+  useForwardingAppsQuery,
+  useForwardingQuery,
+  useSettingsQuery,
+} from "@/lib/query";
 import {
   APP_DISPLAY_NAME,
   FORWARDABLE_APPS,
   forwardingFlagKey,
+  GATEWAY_FORWARDING_BUSY_EVENT,
+  GATEWAY_TOGGLE_FORWARDING_EVENT,
   isForwardable,
   type ForwardableApp,
 } from "@/lib/apps";
@@ -350,10 +357,25 @@ function ScreenView({
   );
 }
 
-export function LlmGatewaySubscriptionDock() {
-  const [open, setOpen] = useState(
+interface LlmGatewaySubscriptionDockProps {
+  /// 嵌在简洁模式主界面里（应用列表下面），常驻展开、不浮动、不能收起。
+  /// 高级模式下仍是右下角的浮动面板。
+  inline?: boolean;
+}
+
+export function LlmGatewaySubscriptionDock({
+  inline = false,
+}: LlmGatewaySubscriptionDockProps = {}) {
+  const [openState, setOpen] = useState(
     () => localStorage.getItem(DOCK_OPEN_KEY) === "1",
   );
+  // 内嵌时永远是「展开」：下面那些 setOpen(true)（要用户登录、购买时把面板
+  // 弹出来）对它是空操作，读 open 的副作用照常跑。
+  const open = inline || openState;
+  // 内嵌时账号屏下半部分（购买 / 兑换 / 登出）是否展开。
+  const [accountMoreOpen, setAccountMoreOpen] = useState(false);
+  // 用量卡里按模型的份额条（如 Fable）是否展开。
+  const [modelCapsOpen, setModelCapsOpen] = useState(false);
   const [login, setLogin] = useState<GatewayLoginResult | null>(
     loadGatewayLogin(),
   );
@@ -370,7 +392,9 @@ export function LlmGatewaySubscriptionDock() {
     pass?: boolean;
   }>({});
   const [busy, setBusy] = useState(false);
-  const [fwdBusy, setFwdBusy] = useState(false);
+  // 正在开/关哪个 app 的转发。主界面的卡片据此转圈，见下面的广播。
+  const [fwdBusyApp, setFwdBusyApp] = useState<ForwardableApp | null>(null);
+  const fwdBusy = fwdBusyApp !== null;
   const [refreshBusy, setRefreshBusy] = useState(false);
   const [pending, setPending] = useState<PendingOrder | null>(null);
   // Two-step purchase: pick a tier, then pick the period before the QR.
@@ -462,6 +486,12 @@ export function LlmGatewaySubscriptionDock() {
   const activeAppName = APP_DISPLAY_NAME[activeApp];
   const { data: forwardingData } = useForwardingQuery(activeApp);
   const forwarding = target ? (forwardingData ?? false) : false;
+  // 简洁模式（默认）下转发开关在主界面的卡片上，面板只管账号；不止一个 app
+  // 可能同时在转发，所以面板上说的是「哪些」而不是「当前这个」。
+  const { data: settingsData } = useSettingsQuery();
+  const advancedMode = settingsData?.advancedMode ?? false;
+  const forwardingApps = useForwardingAppsQuery();
+  const anyForwarding = advancedMode ? forwarding : forwardingApps.length > 0;
 
   const subscription = login?.subscription;
   const isActive = Boolean(subscription?.active);
@@ -497,6 +527,15 @@ export function LlmGatewaySubscriptionDock() {
   // 超过 10 分钟未成功刷新即视为过时：变灰并标注时间，避免陈旧值被当成实时值。
   const usageIsStale =
     usageFetchedAt != null && Date.now() - usageFetchedAt > 10 * 60 * 1000;
+  // 折叠的模型份额行上显示的数：所有模型族、两个窗口里用得最多的那个。
+  const modelCapPeak = Math.max(
+    0,
+    ...(usage?.model_caps ?? []).flatMap((cap) =>
+      [cap.five_hour, cap.seven_day].map((w) =>
+        Math.max(0, Math.min(100, w?.utilization ?? 0)),
+      ),
+    ),
+  );
 
   // 组织与项目（GET /v1/me/organization）。null = 不是组织成员，界面和以前
   // 一模一样。从缓存起步，组织成员打开面板不会先闪一下个人账号的界面。
@@ -520,8 +559,8 @@ export function LlmGatewaySubscriptionDock() {
   const [accountHeight, setAccountHeight] = useState<number | null>(null);
 
   useEffect(() => {
-    localStorage.setItem(DOCK_OPEN_KEY, open ? "1" : "0");
-  }, [open]);
+    localStorage.setItem(DOCK_OPEN_KEY, openState ? "1" : "0");
+  }, [openState]);
   // 目录到手后把已经填着的单位数吸到合法的一档。用户在目录回来之前按老规则
   // 填了 50 的话，不吸附就会停在一个红字提示上。空的不动 —— 那是用户正在打字。
   useEffect(() => {
@@ -568,7 +607,7 @@ export function LlmGatewaySubscriptionDock() {
             setUsage(u);
             setUsageFetchedAt(Date.now());
           }
-          if (target) await syncGatewayProviderEntry(target);
+          await syncGatewayEntries();
         } catch {
           if (!cancelled) {
             toast.error("登录已过期，请重新登录");
@@ -627,7 +666,7 @@ export function LlmGatewaySubscriptionDock() {
   // token 盖回去。
   useEffect(() => {
     if (!open) return;
-    void queryClient.invalidateQueries({ queryKey: ["forwarding", activeApp] });
+    void queryClient.invalidateQueries({ queryKey: ["forwarding"] });
   }, [open, activeApp, queryClient]);
 
   // 切 app 不动上一个的转发状态。
@@ -706,7 +745,7 @@ export function LlmGatewaySubscriptionDock() {
       settingsConfig: {
         auth: { OPENAI_API_KEY: token },
         config: `model_provider = "llm_gateway"
-model = "gpt-5.6-sol"
+model = "gpt-6.1-sol"
 model_reasoning_effort = "high"
 disable_response_storage = true
 
@@ -732,8 +771,30 @@ requires_openai_auth = true`,
   ): Promise<void> {
     try {
       const providers = await providersApi.getAll(app);
-      if (!providers[GATEWAY_PROVIDER_ID]) {
+      const existing = providers[GATEWAY_PROVIDER_ID];
+      if (!existing) {
         await providersApi.add(buildGatewayProvider(app), app, false);
+        return;
+      }
+      // Claude App 的模型清单存在条目里，换代后老条目还停在旧模型上。用户
+      // 没改过（恰好是某一代默认值）就换成当前默认；改过的不动。转发开着时
+      // 跳过：转发期间 update 是整份写 live，等下次开启转发前（这里会先跑
+      // 一遍）再换。
+      if (
+        app === "claude-desktop" &&
+        isPreviousDefaultRoutes(existing.meta?.claudeDesktopModelRoutes) &&
+        !(await providersApi.isForwarding(app))
+      ) {
+        await providersApi.update(
+          {
+            ...existing,
+            meta: {
+              ...existing.meta,
+              claudeDesktopModelRoutes: rowsToMeta(DEFAULT_DESKTOP_MODEL_ROWS),
+            },
+          },
+          app,
+        );
       }
     } catch {
       // Non-Tauri env or read failure — the next mount retries.
@@ -747,8 +808,6 @@ requires_openai_auth = true`,
   // buildGatewayProvider 是只有凭据的最小配置，整份写出去会把用户的 live 削光。
   // 窄路径只覆盖 endpoint + key，其余字节不动。
   //
-  // 同样只处理当前 app：按「最多一个 app 在转发且必然是当前这个」的不变量，
-  // 也只有它可能把网关条目设成当前，也就只有它需要落新 token。
   async function syncGatewayProviderEntry(app: ForwardableApp): Promise<void> {
     try {
       const providers = await providersApi.getAll(app);
@@ -771,15 +830,11 @@ requires_openai_auth = true`,
 
   /// token 刷新后同步网关条目。
   ///
-  /// 除了当前选中的那个 app，还要点名同步 Claude Desktop：它的转发可以在用户停留
-  /// 在 Claude 页时开着，而 Desktop 只在启动时读 profile，陈旧的 Key 会一直 401。
+  /// 每个可转发的 app 都过一遍：各 app 的转发相互独立、可以同时开着（主界面上
+  /// 一个 app 一张卡），哪个漏了，哪个就会拿着作废的 token 一直 401。
   /// `syncGatewayProviderEntry` 对没有条目或没开转发的 app 自己会早退，白调不要钱。
-  async function syncGatewayEntries(
-    active: ForwardableApp | null,
-  ): Promise<void> {
-    const apps = new Set<ForwardableApp>(["claude-desktop"]);
-    if (active) apps.add(active);
-    for (const app of apps) {
+  async function syncGatewayEntries(): Promise<void> {
+    for (const app of FORWARDABLE_APPS) {
       await syncGatewayProviderEntry(app);
     }
   }
@@ -817,6 +872,22 @@ requires_openai_auth = true`,
     };
   }
 
+  // 需要用户接着操作（登录、购买、换项目）时把面板亮出来。请求可能来自托盘，
+  // 那时主窗口多半藏着，只展开面板用户看不见，所以连窗口一起叫到前台。
+  function revealPanel() {
+    setOpen(true);
+    void providersApi.showMainWindow().catch(() => {
+      // 非 Tauri 环境（浏览器预览、测试）没有这个命令。
+    });
+  }
+
+  // 托盘上的转发项打勾与否由后端按转发状态生成，状态变了要重建一次菜单。
+  function refreshTray() {
+    void providersApi.updateTrayMenu().catch(() => {
+      // 同上：非 Tauri 环境没有托盘。
+    });
+  }
+
   async function startForwarding(app: ForwardableApp): Promise<void> {
     const token = gatewayOAuthAccessToken();
     // 规则 2：没登录不能开启转发。
@@ -824,7 +895,7 @@ requires_openai_auth = true`,
       toast.error("请先登录");
       return;
     }
-    setFwdBusy(true);
+    setFwdBusyApp(app);
     try {
       // 「登录」必须是活会话：401 先试 refresh，不行就打回登录页。
       try {
@@ -838,6 +909,7 @@ requires_openai_auth = true`,
             clearGatewayLogin();
             setLogin(null);
             setScreen("auth");
+            revealPanel();
             return;
           }
         }
@@ -879,14 +951,15 @@ requires_openai_auth = true`,
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "开启转发失败");
     } finally {
-      setFwdBusy(false);
+      setFwdBusyApp(null);
       void queryClient.invalidateQueries({ queryKey: ["forwarding", app] });
+      refreshTray();
       void queryClient.invalidateQueries({ queryKey: ["providers", app] });
     }
   }
 
   async function stopForwarding(app: ForwardableApp): Promise<void> {
-    setFwdBusy(true);
+    setFwdBusyApp(app);
     try {
       // 只还原 endpoint + api key。以前这里是切回 default——而 default 是很久
       // 以前一次 import 留下的快照，切过去等于把那份陈旧配置整个写回磁盘，把
@@ -902,8 +975,9 @@ requires_openai_auth = true`,
       console.error(`[forwarding] ${app} 配置还原失败`, error);
       toast.error(error instanceof Error ? error.message : "结束转发失败");
     } finally {
-      setFwdBusy(false);
+      setFwdBusyApp(null);
       void queryClient.invalidateQueries({ queryKey: ["forwarding", app] });
+      refreshTray();
       void queryClient.invalidateQueries({ queryKey: ["providers", app] });
     }
   }
@@ -920,36 +994,49 @@ requires_openai_auth = true`,
         console.error(`[forwarding] ${app} 配置还原失败`, error);
       }
       void queryClient.invalidateQueries({ queryKey: ["forwarding", app] });
+      refreshTray();
     }
   }
 
-  async function handleToggleForwarding() {
+  // app 缺省是当前 tab（高级模式下面板里的按钮）；主界面的卡片会点名。
+  //
+  // 凡是需要用户接着操作的分支（登录、购买、换项目）都把面板打开：从卡片点
+  // 进来时面板多半是收着的，只切屏不展开，用户看到的就是点了没反应。
+  async function handleToggleForwarding(app: ForwardableApp | null = target) {
     if (fwdBusy) return;
-    if (!target) {
+    if (!app) {
       toast.info(`${activeAppName} 暂不支持转发`);
       return;
     }
-    if (forwarding) {
-      await stopForwarding(target);
+    const isOn =
+      queryClient.getQueryData<boolean>(["forwarding", app]) ?? false;
+    if (isOn) {
+      await stopForwarding(app);
+      return;
+    }
+    if (!login) {
+      toast.info("请先登录 llm_gateway");
+      setScreen("auth");
+      revealPanel();
       return;
     }
     // 组织成员的 active 由服务端按当前项目算：当前项目有额度才为 true。
     if (isActive) {
-      await startForwarding(target);
+      await startForwarding(app);
       return;
     }
     // 本地说没套餐——这是全 app 唯一会真正挡住用户的判断，所以在这里跟服务端
     // 对一次账再决定。管理员在后台开的套餐不经过客户端，缓存里那份会一直停在
     // 「未开通」，不问的话人就点不动转发，而服务端其实早已放行。
-    setFwdBusy(true);
+    setFwdBusyApp(app);
     let fresh: SubscriptionRead | null = null;
     try {
       fresh = await refreshSubscription();
     } finally {
-      setFwdBusy(false);
+      setFwdBusyApp(null);
     }
     if (fresh?.subscription.active) {
-      await startForwarding(target);
+      await startForwarding(app);
       return;
     }
     if (!fresh) {
@@ -961,27 +1048,57 @@ requires_openai_auth = true`,
     // 服务端确认了没有额度。先看是不是组织成员：组织成员不能自己购买（下单
     // 会被 409 organization_member 打回），该做的是换项目或找管理员。缓存可能
     // 还停在「不是组织成员」，所以这里重读一次；没问到就退回看缓存。
-    setFwdBusy(true);
+    setFwdBusyApp(app);
     let orgNow: GatewayOrganization | null | undefined;
     try {
       orgNow = await reloadOrg();
     } finally {
-      setFwdBusy(false);
+      setFwdBusyApp(null);
     }
     const memberOrg = orgNow === undefined ? org : orgNow;
     if (login && memberOrg) {
+      revealPanel();
       promptNoProjectAllowance(memberOrg);
       return;
     }
     // 服务端确认了确实没开通。未验证邮箱的话连购买屏都进不去，goToPurchase 会
     // 改道去验证屏并自己提示原因——这里就别再叠一条「请先购买会员」的 toast。
     if (login && fresh.user?.email_verified === false) {
+      revealPanel();
       await goToPurchase(fresh);
       return;
     }
     toast.info("请先购买会员再开启转发");
+    revealPanel();
     await goToPurchase(fresh);
   }
+
+  // 主界面卡片 → 面板。监听器只挂一次，经 ref 调最新的那份闭包（login、
+  // isActive 这些每次渲染都会变）。
+  const toggleForwardingRef = useRef(handleToggleForwarding);
+  toggleForwardingRef.current = handleToggleForwarding;
+  useEffect(() => {
+    const onToggle = (e: Event) => {
+      const app = (e as CustomEvent<ForwardableApp>).detail;
+      if (!isForwardable(app)) return;
+      // 告诉派发方「接住了」，见 requestToggleForwarding。
+      e.preventDefault();
+      // 没走到开/关那一步（要先登录、没套餐…）时托盘上的勾已经被系统自己
+      // 翻过去了，也得按真实状态重建一次。
+      void toggleForwardingRef.current(app).finally(refreshTray);
+    };
+    window.addEventListener(GATEWAY_TOGGLE_FORWARDING_EVENT, onToggle);
+    return () =>
+      window.removeEventListener(GATEWAY_TOGGLE_FORWARDING_EVENT, onToggle);
+  }, []);
+
+  useEffect(() => {
+    window.dispatchEvent(
+      new CustomEvent<ForwardableApp | null>(GATEWAY_FORWARDING_BUSY_EVENT, {
+        detail: fwdBusyApp,
+      }),
+    );
+  }, [fwdBusyApp]);
 
   // ---- auth -----------------------------------------------------------------
 
@@ -1026,7 +1143,7 @@ requires_openai_auth = true`,
     if (target) {
       await ensureGatewayProviderListed(target);
     }
-    await syncGatewayEntries(target);
+    await syncGatewayEntries();
     toast.success(justRegistered ? "注册成功，请验证邮箱" : "登录成功");
   }
 
@@ -1345,7 +1462,7 @@ requires_openai_auth = true`,
       await refreshGatewayToken();
       // 刷新即轮换，旧 token 全部作废。用标准 update 同步条目：live 仅在
       // 该条目正被启用时随之更新（转发 + 启用的合取由列表守卫保证）。
-      await syncGatewayEntries(target);
+      await syncGatewayEntries();
       toast.success("Auth Token 已刷新");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "刷新失败");
@@ -1917,9 +2034,15 @@ requires_openai_auth = true`,
                 ? "用注册邮箱收取验证码重设密码"
                 : screen === "login-code"
                   ? "输入邮箱收到的验证码完成登录"
-                  : (forwarding
-                      ? `转发中 · ${activeAppName} 正在走 llm_gateway`
-                      : "已登录 · 开启转发后即可使用") +
+                  : (advancedMode
+                      ? forwarding
+                        ? `转发中 · ${activeAppName} 正在走 llm_gateway`
+                        : "已登录 · 开启转发后即可使用"
+                      : anyForwarding
+                        ? `转发中 · ${forwardingApps
+                            .map((app) => APP_DISPLAY_NAME[app])
+                            .join("、")}`
+                        : "已登录 · 在主界面点应用即可开启转发") +
                     (isOrgMember && currentProject
                       ? ` · ${currentProject.name}`
                       : "");
@@ -1939,7 +2062,11 @@ requires_openai_auth = true`,
           {login ? initials(login.user.username) : "GW"}
         </span>
         <span>
-          {forwarding ? "转发中" : login ? login.user.username : "llm_gateway"}
+          {anyForwarding
+            ? "转发中"
+            : login
+              ? login.user.username
+              : "llm_gateway"}
           {/* 组织成员：不展开也知道请求在扣哪个项目 */}
           {isOrgMember && (
             <span className="font-normal text-muted-foreground">
@@ -1952,7 +2079,7 @@ requires_openai_auth = true`,
           className={`h-2 w-2 rounded-full ${
             projectBlocked
               ? "bg-amber-500 ring-4 ring-amber-500/20"
-              : forwarding
+              : anyForwarding
                 ? "bg-green-500 ring-4 ring-green-500/20"
                 : "bg-muted-foreground/50"
           }`}
@@ -1966,27 +2093,42 @@ requires_openai_auth = true`,
     // the dock is z-30 (must stay below dialogs, which start at z-40), so it must
     // not grow up under that bar or the header paints over it. Reserve 8.5rem
     // (header band + top/bottom gaps) so the dock's top always clears the header.
-    <div className="fixed bottom-6 right-6 z-30 flex max-h-[calc(100vh-8.5rem)] w-[384px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-2xl border border-border bg-background text-sm shadow-2xl">
-      {/* header — flex-none so it stays pinned; the body below scrolls */}
-      <div className="flex flex-none items-center justify-between gap-3 border-b border-border px-4 py-3.5">
-        <div className="min-w-0">
-          <div className="truncate font-semibold">{headTitle}</div>
-          <div className="truncate text-xs text-muted-foreground">
-            {headSub}
+    <div
+      className={
+        inline
+          ? "flex flex-col overflow-hidden rounded-xl border border-border bg-card text-sm"
+          : "fixed bottom-6 right-6 z-30 flex max-h-[calc(100vh-8.5rem)] w-[384px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-2xl border border-border bg-background text-sm shadow-2xl"
+      }
+    >
+      {/* header — flex-none so it stays pinned; the body below scrolls.
+          内嵌在简洁模式主界面时，账号屏不要这条标题：转发状态上面的列表已经
+          写着了，「我的账号」四个字只占地方。其它屏（登录、购买…）照常显示。 */}
+      {!(inline && screen === "account") && (
+        <div className="flex flex-none items-center justify-between gap-3 border-b border-border px-4 py-3.5">
+          <div className="min-w-0">
+            <div className="truncate font-semibold">{headTitle}</div>
+            <div className="truncate text-xs text-muted-foreground">
+              {headSub}
+            </div>
           </div>
+          {!inline && (
+            <button
+              className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition hover:bg-muted hover:text-foreground"
+              title="收起"
+              onClick={() => setOpen(false)}
+            >
+              <ChevronDown className="h-4 w-4" />
+            </button>
+          )}
         </div>
-        <button
-          className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition hover:bg-muted hover:text-foreground"
-          title="收起"
-          onClick={() => setOpen(false)}
-        >
-          <ChevronDown className="h-4 w-4" />
-        </button>
-      </div>
+      )}
 
       {/* min-h-0 lets this flex child shrink below its content so overflow-y
           actually scrolls instead of being clipped by the container */}
-      <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto p-4">
+      <div
+        ref={bodyRef}
+        className={inline ? "p-4" : "min-h-0 flex-1 overflow-y-auto p-4"}
+      >
         {screen === "auth" && (
           <ScreenView key="auth">
             {/* tabs */}
@@ -2156,14 +2298,26 @@ requires_openai_auth = true`,
                   {currentProject?.name ?? "未加入项目"}
                 </span>
               ) : (
-                <span
-                  className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                    isActive
-                      ? "bg-green-500/15 text-green-600 dark:text-green-400"
-                      : "bg-muted text-muted-foreground"
-                  }`}
-                >
-                  {isActive ? planLabel(subscription?.tier) : "未开通"}
+                <span className="flex flex-none flex-col items-end gap-1">
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                      isActive
+                        ? "bg-green-500/15 text-green-600 dark:text-green-400"
+                        : "bg-muted text-muted-foreground"
+                    }`}
+                  >
+                    {isActive ? planLabel(subscription?.tier) : "未开通"}
+                  </span>
+                  {/* 老服务端不返回 plans 时，有效期只有这一个数：放在套餐名
+                      下面，不单独占一行。有 plans 时每条套餐自己带到期日，
+                      见 PlanSections。 */}
+                  {isActive &&
+                    subscription?.valid_until &&
+                    !(subscription.plans ?? []).length && (
+                      <span className="text-[10px] text-muted-foreground">
+                        至 {formatPlanDate(subscription.valid_until)}
+                      </span>
+                    )}
                 </span>
               )}
             </div>
@@ -2265,123 +2419,184 @@ requires_openai_auth = true`,
                   {usage.five_hour && (
                     <UsageBar label="5 小时" window={usage.five_hour} />
                   )}
-                  {(usage.model_caps ?? []).map((cap) => (
-                    <ModelCapBar
-                      key={`5h-${cap.id}`}
-                      cap={cap}
-                      windowKey="five_hour"
-                    />
-                  ))}
+                  {modelCapsOpen &&
+                    (usage.model_caps ?? []).map((cap) => (
+                      <ModelCapBar
+                        key={`5h-${cap.id}`}
+                        cap={cap}
+                        windowKey="five_hour"
+                      />
+                    ))}
                   {usage.seven_day && (
                     <UsageBar label="7 天" window={usage.seven_day} />
                   )}
-                  {(usage.model_caps ?? []).map((cap) => (
-                    <ModelCapBar
-                      key={`7d-${cap.id}`}
-                      cap={cap}
-                      windowKey="seven_day"
-                    />
-                  ))}
+                  {modelCapsOpen &&
+                    (usage.model_caps ?? []).map((cap) => (
+                      <ModelCapBar
+                        key={`7d-${cap.id}`}
+                        cap={cap}
+                        windowKey="seven_day"
+                      />
+                    ))}
+                  {/* 模型份额（如 Fable）默认折叠：大多数时候只看总用量就够。
+                      折叠时仍给出最高的那个份额，快用完时标红，不用点开也能
+                      注意到。 */}
+                  {(usage.model_caps ?? []).length > 0 && (
+                    <button
+                      type="button"
+                      className="flex w-full items-center justify-between gap-2 pt-0.5 text-[11px] text-muted-foreground transition hover:text-foreground"
+                      aria-expanded={modelCapsOpen}
+                      onClick={() => setModelCapsOpen((v) => !v)}
+                    >
+                      <span className="truncate">
+                        {(usage.model_caps ?? [])
+                          .map((cap) => cap.label)
+                          .join("、")}{" "}
+                        份额
+                      </span>
+                      <span className="flex flex-none items-center gap-1">
+                        {!modelCapsOpen && (
+                          <span
+                            className={
+                              modelCapPeak >= 90
+                                ? "font-semibold text-red-500"
+                                : "text-foreground"
+                            }
+                          >
+                            最高 {modelCapPeak.toFixed(1)}%
+                          </span>
+                        )}
+                        <ChevronDown
+                          className={`h-3.5 w-3.5 transition-transform ${
+                            modelCapsOpen ? "rotate-180" : ""
+                          }`}
+                        />
+                      </span>
+                    </button>
+                  )}
                 </div>
               )}
 
-            {/* forwarding toggle — 只作用于当前选中的那个 CLI */}
-            <button
-              className={`flex w-full items-center justify-center gap-2 rounded-lg border py-2.5 font-semibold transition disabled:opacity-60 ${
-                forwarding
-                  ? "border-green-500/35 bg-green-500/12 text-green-600 dark:text-green-400 hover:bg-green-500/20"
-                  : "border-transparent bg-primary text-primary-foreground hover:brightness-105"
-              }`}
-              disabled={fwdBusy || !target}
-              onClick={() => void handleToggleForwarding()}
-            >
-              {fwdBusy ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Plug className="h-4 w-4" />
-              )}
-              {!target
-                ? `${activeAppName} 暂不支持转发`
-                : forwarding
-                  ? `结束转发（${activeAppName}）`
-                  : `开启转发（${activeAppName}）`}
-            </button>
-
-            {/* 版本过旧提示。挡的只有购买 —— 上面的转发开关照常可用，说清楚
-                这一点，不然人会以为整个客户端废了。 */}
-            {!isOrgMember && upgradeRequired && (
-              <div className="mt-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
-                当前版本过旧，暂时无法购买套餐。请更新到最新版本后再试 ——
-                转发和其它功能不受影响。
-              </div>
+            {/* forwarding toggle — 只作用于当前选中的那个 CLI。简洁模式下开关
+                在主界面的卡片上，这里不再重复。 */}
+            {advancedMode && (
+              <button
+                className={`flex w-full items-center justify-center gap-2 rounded-lg border py-2.5 font-semibold transition disabled:opacity-60 ${
+                  forwarding
+                    ? "border-green-500/35 bg-green-500/12 text-green-600 dark:text-green-400 hover:bg-green-500/20"
+                    : "border-transparent bg-primary text-primary-foreground hover:brightness-105"
+                }`}
+                disabled={fwdBusy || !target}
+                onClick={() => void handleToggleForwarding()}
+              >
+                {fwdBusy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Plug className="h-4 w-4" />
+                )}
+                {!target
+                  ? `${activeAppName} 暂不支持转发`
+                  : forwarding
+                    ? `结束转发（${activeAppName}）`
+                    : `开启转发（${activeAppName}）`}
+              </button>
             )}
 
-            {/* purchase */}
-            {!isOrgMember && (
+            {/* 购买、兑换、高级、登出这些低频操作。内嵌在简洁模式主界面时默认
+                折叠，主界面只留开关和用量；浮动面板照旧全部展开。 */}
+            {inline && (
+              <button
+                className="mt-3 flex w-full items-center justify-center gap-1 py-1 text-xs text-muted-foreground transition hover:text-foreground"
+                aria-expanded={accountMoreOpen}
+                onClick={() => setAccountMoreOpen((v) => !v)}
+              >
+                {accountMoreOpen ? "收起" : "套餐与账号"}
+                <ChevronDown
+                  className={`h-3.5 w-3.5 transition-transform ${
+                    accountMoreOpen ? "rotate-180" : ""
+                  }`}
+                />
+              </button>
+            )}
+            {(!inline || accountMoreOpen) && (
               <>
-                <button
-                  className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-muted/40 py-2.5 font-medium transition hover:border-border/80 hover:bg-muted disabled:opacity-60"
-                  disabled={busy || upgradeRequired}
-                  onClick={() => void goToPurchase()}
-                >
-                  {busy ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <ShoppingBag className="h-4 w-4" />
-                  )}
-                  购买套餐
-                </button>
+                {/* 版本过旧提示。挡的只有购买 —— 上面的转发开关照常可用，说清楚
+                    这一点，不然人会以为整个客户端废了。 */}
+                {!isOrgMember && upgradeRequired && (
+                  <div className="mt-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+                    当前版本过旧，暂时无法购买套餐。请更新到最新版本后再试 ——
+                    转发和其它功能不受影响。
+                  </div>
+                )}
 
-                {/* 兑换码入口。做成次要样式：绝大多数人没有码，它不该和购买抢
-                注意力，但有码的人得找得到。 */}
-                <button
-                  className="mt-2 w-full rounded-lg py-2 text-xs text-muted-foreground transition hover:text-foreground disabled:opacity-60"
-                  disabled={busy}
-                  onClick={() => {
-                    setRedeemInput("");
-                    setScreen("redeem");
-                  }}
-                >
-                  使用兑换码
-                </button>
+                {/* purchase */}
+                {!isOrgMember && (
+                  <>
+                    <button
+                      className="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-muted/40 py-2.5 font-medium transition hover:border-border/80 hover:bg-muted disabled:opacity-60"
+                      disabled={busy || upgradeRequired}
+                      onClick={() => void goToPurchase()}
+                    >
+                      {busy ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <ShoppingBag className="h-4 w-4" />
+                      )}
+                      购买套餐
+                    </button>
+
+                    {/* 兑换码入口。做成次要样式：绝大多数人没有码，它不该和购买抢
+                    注意力，但有码的人得找得到。 */}
+                    <button
+                      className="mt-2 w-full rounded-lg py-2 text-xs text-muted-foreground transition hover:text-foreground disabled:opacity-60"
+                      disabled={busy}
+                      onClick={() => {
+                        setRedeemInput("");
+                        setScreen("redeem");
+                      }}
+                    >
+                      使用兑换码
+                    </button>
+                  </>
+                )}
+
+                {/* advanced */}
+                <details className="mt-3.5 border-t border-border pt-1.5">
+                  <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1.5 text-xs text-muted-foreground [&::-webkit-details-marker]:hidden">
+                    <ChevronDown className="h-3.5 w-3.5" />
+                    高级
+                  </summary>
+                  <div className="pt-1.5">
+                    <button
+                      className="flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-muted/40 py-2.5 text-sm font-medium transition hover:bg-muted disabled:opacity-60"
+                      disabled={refreshBusy}
+                      onClick={handleRefreshToken}
+                    >
+                      {refreshBusy ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-4 w-4" />
+                      )}
+                      刷新 Auth Token
+                    </button>
+                    <div className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                      重新获取访问令牌；若正在转发会同步更新已安装的配置
+                    </div>
+                  </div>
+                </details>
+
+                <div className="mt-3.5 text-center">
+                  <button
+                    className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition hover:text-destructive disabled:opacity-60"
+                    disabled={loggingOut}
+                    onClick={() => void handleLogout()}
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    登出
+                  </button>
+                </div>
               </>
             )}
-
-            {/* advanced */}
-            <details className="mt-3.5 border-t border-border pt-1.5">
-              <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1.5 text-xs text-muted-foreground [&::-webkit-details-marker]:hidden">
-                <ChevronDown className="h-3.5 w-3.5" />
-                高级
-              </summary>
-              <div className="pt-1.5">
-                <button
-                  className="flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-muted/40 py-2.5 text-sm font-medium transition hover:bg-muted disabled:opacity-60"
-                  disabled={refreshBusy}
-                  onClick={handleRefreshToken}
-                >
-                  {refreshBusy ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="h-4 w-4" />
-                  )}
-                  刷新 Auth Token
-                </button>
-                <div className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
-                  重新获取访问令牌；若正在转发会同步更新已安装的配置
-                </div>
-              </div>
-            </details>
-
-            <div className="mt-3.5 text-center">
-              <button
-                className="inline-flex items-center gap-1.5 text-xs text-muted-foreground transition hover:text-destructive disabled:opacity-60"
-                disabled={loggingOut}
-                onClick={() => void handleLogout()}
-              >
-                <LogOut className="h-3.5 w-3.5" />
-                登出
-              </button>
-            </div>
           </ScreenView>
         )}
 

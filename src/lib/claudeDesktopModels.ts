@@ -51,14 +51,14 @@ export interface ClaudeDesktopModelRow {
  * 写进去 Desktop 会直接拒收(要映射得用上游 cc-switch 的本地路由模式)。
  */
 export const DEFAULT_DESKTOP_MODEL_ROWS: ClaudeDesktopModelRow[] = [
-  { role: "Sonnet", model: "claude-sonnet-5", enabled: true, supports1m: true },
-  { role: "Opus", model: "claude-opus-5", enabled: true, supports1m: true },
   {
-    role: "Haiku",
-    model: "claude-haiku-4-5-20251001",
+    role: "Sonnet",
+    model: "claude-sonnet-5-5",
     enabled: true,
-    supports1m: false,
+    supports1m: true,
   },
+  { role: "Opus", model: "claude-opus-5-5", enabled: true, supports1m: true },
+  { role: "Haiku", model: "claude-haiku-5-5", enabled: true, supports1m: true },
   {
     role: "Fable",
     model: "claude-fable-5-1",
@@ -66,6 +66,30 @@ export const DEFAULT_DESKTOP_MODEL_ROWS: ClaudeDesktopModelRow[] = [
     supports1m: true,
   },
 ];
+
+/**
+ * 以前各版本默认勾上的模型。网关条目的模型清单恰好是其中一组时，说明用户从没
+ * 改过它，换代时可以直接换成当前的默认清单；改过的（多一个、少一个、换了名字）
+ * 一律不动。每次升级默认模型时把旧的那组加进来。
+ */
+const PREVIOUS_DEFAULT_MODEL_SETS: string[][] = [
+  ["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5-20251001"],
+];
+
+/** 已存的模型清单是不是某一代没改过的旧默认值。 */
+export function isPreviousDefaultRoutes(
+  routes?: ProviderMeta["claudeDesktopModelRoutes"],
+): boolean {
+  if (!routes) return false;
+  const models = Object.keys(routes).sort();
+  return PREVIOUS_DEFAULT_MODEL_SETS.some((set) => {
+    const expected = [...set].sort();
+    return (
+      expected.length === models.length &&
+      expected.every((model, i) => model === models[i])
+    );
+  });
+}
 
 /** 把表单里的行转成 provider.meta 的形状。 */
 export function rowsToMeta(

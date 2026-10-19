@@ -4,6 +4,7 @@ mod auto_launch;
 mod claude_desktop_config;
 mod claude_plugin;
 mod codex_config;
+mod codex_watcher;
 mod commands;
 mod config;
 mod database;
@@ -61,6 +62,13 @@ async fn update_tray_menu(
             Ok(false)
         }
     }
+}
+
+/// 把主窗口叫到前台。转发需要用户登录 / 购买时由前端调用：托盘上点开关时窗口
+/// 多半是藏着的，只在页面里弹面板用户看不见。
+#[tauri::command]
+fn show_main_window(app: tauri::AppHandle) {
+    tray::show_main_window(&app);
 }
 
 #[cfg(target_os = "macos")]
@@ -312,7 +320,7 @@ pub fn run() {
 
             // 构建托盘
             let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
-                .tooltip("fwai_app") // 鼠标悬停提示
+                .tooltip("fwai") // 鼠标悬停提示
                 .on_tray_icon_event(|_tray, event| {
                     log::debug!("tray icon event {event:?}");
                 })
@@ -366,6 +374,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
                 initialize_common_config_snippets(&state);
+                codex_watcher::spawn(state.db.clone());
 
                 // Periodic backup check (on startup)
                 if let Err(e) = state.db.periodic_backup_if_needed() {
@@ -509,6 +518,7 @@ pub fn run() {
             commands::delete_db_backup,
             commands::sync_current_providers_live,
             update_tray_menu,
+            show_main_window,
             // Environment variable management
             commands::check_env_conflicts,
             commands::delete_env_vars,

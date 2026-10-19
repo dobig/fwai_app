@@ -86,8 +86,9 @@ const LEGACY_ENTERPRISE_GATEWAY_KEYS: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DesktopPaths {
-    /// 1P 安装目录。它不存在就说明这台机器没装过 Desktop。
-    normal_dir: PathBuf,
+    /// 判断「装没装」看的目录。它不存在就说明这台机器没装过 Desktop。
+    /// 传统安装是 1P 目录;MSIX 安装是包容器的 `LocalCache`。
+    install_dir: PathBuf,
     normal_config: PathBuf,
     threep_config: PathBuf,
     config_library: PathBuf,
@@ -104,7 +105,7 @@ fn paths_from_dirs(normal_dir: PathBuf, threep_dir: PathBuf) -> DesktopPaths {
         profile: config_library.join(format!("{PROFILE_ID}.json")),
         meta: config_library.join("_meta.json"),
         config_library,
-        normal_dir,
+        install_dir: normal_dir,
     }
 }
 
@@ -117,9 +118,62 @@ fn linux_paths_from_config_dir(config_dir: &Path) -> DesktopPaths {
     paths_from_dirs(config_dir.join("Claude"), config_dir.join("Claude-3p"))
 }
 
-/// Windows 上安装目录名可能带后缀(Claude-beta 之类),精确名不存在时扫一遍
-/// `Claude*`,按名字排序取第一个,保证同一台机器上每次解析到同一个目录。
+/// Windows:MSIX 安装(微软商店等打包版)优先,其次传统安装。
+///
+/// MSIX 应用的 `%APPDATA%` / `%LOCALAPPDATA%` 被重定向进包容器,我们写到真实
+/// `%LOCALAPPDATA%\Claude-3p` 的文件它看不见——开关显示成功,Desktop 却还在用
+/// 自己那份。所以只要包容器在,就写进容器里。
 fn windows_paths_from_local_app_data(local_app_data: &Path) -> DesktopPaths {
+    windows_msix_paths(local_app_data).unwrap_or_else(|| windows_classic_paths(local_app_data))
+}
+
+/// 包容器里的布局:1P 在 `LocalCache\Roaming\Claude`,3P 在
+/// `LocalCache\Local\Claude-3p`(早期版本在 `Roaming\Claude-3p`,启动时会自己
+/// 搬到 Local)。哪个已经存在就用哪个,都不存在用新版的位置。
+///
+/// 只认跑过一次的包(有 `LocalCache`):没跑过的退回传统路径,由安装检查报
+/// 「请先启动一次」。
+fn windows_msix_paths(local_app_data: &Path) -> Option<DesktopPaths> {
+    let mut packages: Vec<PathBuf> = std::fs::read_dir(local_app_data.join("Packages"))
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("Claude_"))
+        })
+        .filter(|path| path.join("LocalCache").is_dir())
+        .collect();
+    // 同一台机器上每次解析到同一个包。
+    packages.sort();
+    let local_cache = packages.into_iter().next()?.join("LocalCache");
+
+    let existing_or = |preferred: PathBuf, legacy: PathBuf| {
+        if !preferred.exists() && legacy.exists() {
+            legacy
+        } else {
+            preferred
+        }
+    };
+    let normal_dir = existing_or(
+        local_cache.join("Roaming").join("Claude"),
+        local_cache.join("Local").join("Claude"),
+    );
+    let threep_dir = existing_or(
+        local_cache.join("Local").join("Claude-3p"),
+        local_cache.join("Roaming").join("Claude-3p"),
+    );
+    Some(DesktopPaths {
+        // 商店版装完首次以 1P 启动之前未必有 Roaming\Claude,装没装看容器本身。
+        install_dir: local_cache,
+        ..paths_from_dirs(normal_dir, threep_dir)
+    })
+}
+
+/// 传统安装目录名可能带后缀(Claude-beta 之类),精确名不存在时扫一遍
+/// `Claude*`,按名字排序取第一个,保证同一台机器上每次解析到同一个目录。
+fn windows_classic_paths(local_app_data: &Path) -> DesktopPaths {
     let pick = |threep: bool| -> PathBuf {
         let exact_name = if threep { "Claude-3p" } else { "Claude" };
         let exact = local_app_data.join(exact_name);
@@ -192,10 +246,10 @@ pub fn is_supported_platform() -> bool {
 
 /// 这台机器装过 Desktop 吗。
 ///
-/// 按 1P 目录是否存在判断,而不是去找 .app/.exe:绿色解压、改过安装路径的装法
+/// 按配置目录(MSIX 是包容器)是否存在判断,而不是去找 .app/.exe:绿色解压、改过安装路径的装法
 /// 都找不到可执行文件,但只要跑过一次就一定有这个配置目录。
 pub fn is_installed() -> bool {
-    current_paths().is_ok_and(|paths| paths.normal_dir.is_dir())
+    current_paths().is_ok_and(|paths| paths.install_dir.is_dir())
 }
 
 /// `configLibrary` 的绝对路径,给「打开配置目录」用。
@@ -663,7 +717,7 @@ fn apply_provider_to_paths(
     paths: &DesktopPaths,
     backup_dir: &Path,
 ) -> Result<(), AppError> {
-    if !paths.normal_dir.is_dir() {
+    if !paths.install_dir.is_dir() {
         return Err(not_installed_error());
     }
     validate_provider(provider)?;
@@ -728,7 +782,7 @@ pub struct DesktopSnapshot {
 /// 采集动手前的状态。Desktop 没装时返回空快照(还原时就什么都不做)。
 pub fn capture_snapshot() -> Result<DesktopSnapshot, AppError> {
     let paths = current_paths()?;
-    if !paths.normal_dir.is_dir() {
+    if !paths.install_dir.is_dir() {
         return Ok(DesktopSnapshot::default());
     }
     capture_snapshot_at_paths(&paths)
@@ -779,7 +833,7 @@ fn restore_at_paths(
     backup_dir: &Path,
 ) -> Result<(), AppError> {
     // 没装过就没什么可还原的。不要在这里把目录建出来。
-    if !paths.normal_dir.is_dir() {
+    if !paths.install_dir.is_dir() {
         return Ok(());
     }
 
@@ -861,7 +915,7 @@ fn restore_official_if_matches_at_paths(
         // 条目本身就没有完整凭据,不可能是它写进去的。
         return Ok(());
     };
-    if !paths.normal_dir.is_dir() {
+    if !paths.install_dir.is_dir() {
         return Ok(());
     }
     let profile = read_object(&paths.profile)?;
@@ -941,7 +995,7 @@ pub fn get_status() -> Result<ClaudeDesktopStatus, AppError> {
 
     Ok(ClaudeDesktopStatus {
         supported: true,
-        installed: paths.normal_dir.is_dir(),
+        installed: paths.install_dir.is_dir(),
         configured: listed && profile.get("inferenceProvider").is_some(),
         profile_path: Some(paths.profile.display().to_string()),
         config_library_path: Some(paths.config_library.display().to_string()),
@@ -997,7 +1051,7 @@ mod tests {
     /// Desktop 装好之后的目录布局：1P 目录在才算装过。
     fn installed_paths(root: &Path) -> DesktopPaths {
         let paths = paths_from_dirs(root.join("Claude"), root.join("Claude-3p"));
-        std::fs::create_dir_all(&paths.normal_dir).expect("normal dir");
+        std::fs::create_dir_all(&paths.install_dir).expect("normal dir");
         std::fs::create_dir_all(&paths.config_library).expect("config library");
         paths
     }
@@ -1202,7 +1256,7 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("Claude")).expect("Claude");
         std::fs::create_dir_all(temp.path().join("Claude-3p")).expect("Claude-3p");
         let paths = windows_paths_from_local_app_data(temp.path());
-        assert_eq!(paths.normal_dir, temp.path().join("Claude"));
+        assert_eq!(paths.install_dir, temp.path().join("Claude"));
         assert_eq!(
             paths.threep_config,
             temp.path().join("Claude-3p").join(CONFIG_FILE)
@@ -1216,11 +1270,100 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("Claude-beta")).expect("Claude-beta");
         std::fs::create_dir_all(temp.path().join("Claude-beta-3p")).expect("Claude-beta-3p");
         let paths = windows_paths_from_local_app_data(temp.path());
-        assert_eq!(paths.normal_dir, temp.path().join("Claude-beta"));
+        assert_eq!(paths.install_dir, temp.path().join("Claude-beta"));
         assert_eq!(
             paths.threep_config,
             temp.path().join("Claude-beta-3p").join(CONFIG_FILE)
         );
+    }
+
+    #[test]
+    fn windows_paths_prefer_the_msix_container() {
+        // 商店版跑过以后,传统目录里往往还留着迁移前的旧文件;必须写进容器,
+        // 不然 Desktop 看不见。
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("Claude")).expect("Claude");
+        std::fs::create_dir_all(temp.path().join("Claude-3p")).expect("Claude-3p");
+        let local_cache = temp
+            .path()
+            .join("Packages")
+            .join("Claude_pzs8sxrjxfjjc")
+            .join("LocalCache");
+        std::fs::create_dir_all(local_cache.join("Roaming").join("Claude")).expect("Roaming");
+        std::fs::create_dir_all(local_cache.join("Local").join("Claude-3p")).expect("Local");
+
+        let paths = windows_paths_from_local_app_data(temp.path());
+        assert_eq!(paths.install_dir, local_cache);
+        assert_eq!(
+            paths.normal_config,
+            local_cache.join("Roaming").join("Claude").join(CONFIG_FILE)
+        );
+        assert_eq!(
+            paths.profile,
+            local_cache
+                .join("Local")
+                .join("Claude-3p")
+                .join(CONFIG_LIBRARY_DIR)
+                .join(format!("{PROFILE_ID}.json"))
+        );
+    }
+
+    #[test]
+    fn windows_msix_counts_as_installed_before_any_config_exists() {
+        // 刚装好、只启动过一次的商店版:容器在,1P / 3P 目录都还没有。
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local_cache = temp
+            .path()
+            .join("Packages")
+            .join("Claude_pzs8sxrjxfjjc")
+            .join("LocalCache");
+        std::fs::create_dir_all(&local_cache).expect("LocalCache");
+
+        let paths = windows_paths_from_local_app_data(temp.path());
+        assert!(paths.install_dir.is_dir());
+        assert_eq!(
+            paths.normal_config,
+            local_cache.join("Roaming").join("Claude").join(CONFIG_FILE)
+        );
+        assert_eq!(
+            paths.threep_config,
+            local_cache
+                .join("Local")
+                .join("Claude-3p")
+                .join(CONFIG_FILE)
+        );
+    }
+
+    #[test]
+    fn windows_msix_keeps_a_not_yet_migrated_roaming_3p_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local_cache = temp
+            .path()
+            .join("Packages")
+            .join("Claude_pzs8sxrjxfjjc")
+            .join("LocalCache");
+        std::fs::create_dir_all(local_cache.join("Roaming").join("Claude-3p")).expect("Roaming");
+
+        let paths = windows_paths_from_local_app_data(temp.path());
+        assert_eq!(
+            paths.threep_config,
+            local_cache
+                .join("Roaming")
+                .join("Claude-3p")
+                .join(CONFIG_FILE)
+        );
+    }
+
+    #[test]
+    fn windows_ignores_a_never_launched_msix_package() {
+        // 没有 LocalCache 的包不算,退回传统路径。
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("Packages").join("Claude_pzs8sxrjxfjjc"))
+            .expect("package");
+        std::fs::create_dir_all(temp.path().join("Claude")).expect("Claude");
+
+        let paths = windows_paths_from_local_app_data(temp.path());
+        assert_eq!(paths.install_dir, temp.path().join("Claude"));
     }
 
     // ---- profile 合并 ----------------------------------------------------

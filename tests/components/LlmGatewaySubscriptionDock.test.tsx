@@ -10,7 +10,8 @@ import {
 } from "@/components/active-app-provider";
 import * as gateway from "@/lib/api/llm-gateway";
 import { GatewayApiError } from "@/lib/api/llm-gateway";
-import { providersApi, type AppId } from "@/lib/api";
+import { providersApi, settingsApi, type AppId } from "@/lib/api";
+import { requestToggleForwarding } from "@/lib/apps";
 import { createTestQueryClient } from "../utils/testQueryClient";
 import { recordUpgradeSignal, resetUpgradeSignal } from "@/lib/clientUpgrade";
 
@@ -227,6 +228,13 @@ beforeEach(() => {
   vi.spyOn(providersApi, "updateTrayMenu").mockResolvedValue(
     undefined as never,
   );
+  // 面板里的「开启转发」按钮只在高级模式下出现。下面大部分 case 测的是那个按钮，
+  // 默认开着高级模式；简洁模式（主界面卡片派发请求）单独一组。
+  vi.spyOn(settingsApi, "get").mockResolvedValue({
+    showInTray: true,
+    minimizeToTrayOnClose: true,
+    advancedMode: true,
+  });
 });
 
 describe("LlmGatewaySubscriptionDock 开启转发", () => {
@@ -2029,6 +2037,13 @@ describe("LlmGatewaySubscriptionDock 模型份额", () => {
     });
     renderDock();
 
+    // 默认折叠：只有一行汇总，用得最多的那个份额标红。
+    const toggle = await screen.findByRole("button", { name: /Fable 份额/ });
+    expect(toggle).toHaveTextContent("最高 100.0%");
+    expect(screen.queryByText("· 最多占 50%")).not.toBeInTheDocument();
+
+    await userEvent.click(toggle);
+
     expect(await screen.findAllByText("Fable")).toHaveLength(2);
     expect(screen.getAllByText("· 最多占 50%")).toHaveLength(2);
     expect(screen.getByText("Fable 份额已用完，其它模型仍可使用")).toBeTruthy();
@@ -2532,6 +2547,8 @@ describe("LlmGatewaySubscriptionDock 组织项目", () => {
     expect(await projectRow()).toHaveTextContent("核心模型");
     expect(await screen.findByText("用量 · 核心模型")).toBeInTheDocument();
     expect(screen.getByText("41.0%")).toBeInTheDocument();
+    // 按模型的份额默认折叠，点开才看得到每一条。
+    await userEvent.click(screen.getByRole("button", { name: /份额/ }));
     expect(screen.getByText("12.0%")).toBeInTheDocument();
     expect(
       screen.getByTitle("Acme AI 研发中心 · 核心模型"),
@@ -2928,5 +2945,235 @@ describe("LlmGatewaySubscriptionDock 组织项目", () => {
     await userEvent.click(await screen.findByText("登出"));
 
     await waitFor(() => expect(gateway.loadGatewayOrgCache()).toBeNull());
+  });
+});
+
+// 简洁模式：转发开关在主界面的卡片上，卡片只派发事件，流程仍由面板执行。
+// 关键是 app 由卡片点名，而不是取当前 tab。
+describe("LlmGatewaySubscriptionDock 简洁模式", () => {
+  beforeEach(() => {
+    vi.mocked(settingsApi.get).mockResolvedValue({
+      showInTray: true,
+      minimizeToTrayOnClose: true,
+      advancedMode: false,
+    });
+  });
+
+  it("面板里不再有转发按钮", async () => {
+    seedActivePlan();
+    renderDock("claude");
+
+    expect(await screen.findByText(/在主界面点应用即可开启转发/)).toBeVisible();
+    expect(screen.queryByText(/^开启转发/)).toBeNull();
+  });
+
+  it("面板挂着时接住请求，卸载后不再接", async () => {
+    seedActivePlan();
+    const view = renderDock("claude");
+    await screen.findByText(/在主界面点应用即可开启转发/);
+
+    let handled = false;
+    act(() => {
+      handled = requestToggleForwarding("codex");
+    });
+    expect(handled).toBe(true);
+
+    view.unmount();
+    expect(requestToggleForwarding("codex")).toBe(false);
+  });
+
+  it("卡片点名的 app 才被转发，与当前 tab 无关", async () => {
+    seedActivePlan();
+    renderDock("claude");
+    await screen.findByText(/在主界面点应用即可开启转发/);
+
+    act(() => requestToggleForwarding("codex"));
+
+    await waitFor(() =>
+      expect(providersApi.startForwarding).toHaveBeenCalledTimes(1),
+    );
+    expect(providersApi.startForwarding).toHaveBeenCalledWith(
+      expect.anything(),
+      "codex",
+      expect.any(String),
+      expect.any(String),
+    );
+  });
+
+  it("已在转发的 app 再点一次是结束转发", async () => {
+    seedActivePlan();
+    vi.mocked(providersApi.isForwarding).mockImplementation(
+      async (app) => app === "codex",
+    );
+    renderDock("claude");
+    expect(await screen.findByText("转发中 · Codex")).toBeVisible();
+
+    act(() => requestToggleForwarding("codex"));
+
+    await waitFor(() =>
+      expect(providersApi.stopForwarding).toHaveBeenCalledWith("codex"),
+    );
+    expect(providersApi.startForwarding).not.toHaveBeenCalled();
+  });
+
+  it("没登录时把面板弹出来停在登录屏", async () => {
+    renderDock("claude");
+    expect(screen.queryByText("登录 llm_gateway")).toBeNull();
+
+    act(() => requestToggleForwarding("claude"));
+
+    expect(await screen.findByText("登录 llm_gateway")).toBeVisible();
+    expect(toasts.info).toHaveBeenCalledWith("请先登录 llm_gateway");
+    expect(providersApi.startForwarding).not.toHaveBeenCalled();
+  });
+
+  it("没套餐时把面板弹出来进购买屏", async () => {
+    seedLoggedOutOfPlan();
+    localStorage.setItem(DOCK_OPEN_KEY, "0");
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue({
+      ...serverSaysActive(),
+      subscription: { active: false },
+    });
+    renderDock("claude");
+
+    act(() => requestToggleForwarding("claude"));
+
+    expect(await screen.findByText("购买套餐")).toBeVisible();
+    expect(providersApi.startForwarding).not.toHaveBeenCalled();
+  });
+
+  it("内嵌时购买及以下默认折叠，点开才出现", async () => {
+    seedActivePlan();
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <ActiveAppProvider initialApp="claude">
+          <LlmGatewaySubscriptionDock inline />
+        </ActiveAppProvider>
+      </QueryClientProvider>,
+    );
+
+    await userEvent.click(await screen.findByText("套餐与账号"));
+
+    expect(await screen.findByText("购买套餐")).toBeVisible();
+    expect(screen.getByText("登出")).toBeVisible();
+    expect(screen.queryByTitle("收起")).toBeNull();
+  });
+
+  it("内嵌时折叠前看不到购买和登出", async () => {
+    seedActivePlan();
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <ActiveAppProvider initialApp="claude">
+          <LlmGatewaySubscriptionDock inline />
+        </ActiveAppProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("套餐与账号")).toBeVisible();
+    expect(screen.queryByText("购买套餐")).toBeNull();
+    expect(screen.queryByText("登出")).toBeNull();
+  });
+
+  it("token 刷新同步每个在转发的 app，不只是当前 tab", async () => {
+    seedActivePlan();
+    vi.spyOn(providersApi, "refreshForwardingCredentials").mockResolvedValue(
+      undefined as never,
+    );
+    vi.mocked(providersApi.getAll).mockResolvedValue({
+      "llm-gateway-local": {
+        id: "llm-gateway-local",
+        name: "LLM Gateway",
+        settingsConfig: {},
+      },
+    } as never);
+    vi.mocked(providersApi.isForwarding).mockImplementation(
+      async (app) => app === "codex",
+    );
+    vi.spyOn(gateway, "refreshGatewayToken").mockResolvedValue({
+      token_type: "Bearer",
+      access_token: "new-access-token",
+      refresh_token: "refresh-token",
+      expires_in: 3600,
+    });
+
+    renderDock("claude");
+    await userEvent.click(await screen.findByText("刷新 Auth Token"));
+
+    await waitFor(() =>
+      expect(providersApi.refreshForwardingCredentials).toHaveBeenCalledWith(
+        "codex",
+        expect.any(String),
+        expect.any(String),
+      ),
+    );
+  });
+});
+
+// Claude App 的模型清单存在网关条目里。换代后老条目要跟着换，但只换没被用户
+// 改过的（恰好是某一代默认值的）。
+describe("LlmGatewaySubscriptionDock Claude App 默认模型换代", () => {
+  const oldEntry = {
+    "llm-gateway-local": {
+      id: "llm-gateway-local",
+      name: "LLM Gateway",
+      settingsConfig: { env: { ANTHROPIC_AUTH_TOKEN: "t" } },
+      meta: {
+        claudeDesktopMode: "direct",
+        claudeDesktopModelRoutes: {
+          "claude-sonnet-5": { model: "claude-sonnet-5", supports1m: true },
+          "claude-opus-5": { model: "claude-opus-5", supports1m: true },
+          "claude-haiku-4-5-20251001": { model: "claude-haiku-4-5-20251001" },
+        },
+      },
+    },
+  };
+
+  it("没改过的旧默认清单换成当前默认", async () => {
+    seedActivePlan();
+    vi.mocked(providersApi.getAll).mockResolvedValue(oldEntry as never);
+
+    renderDock("claude-desktop");
+
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalled());
+    const [updated, app] = vi.mocked(providersApi.update).mock.calls[0];
+    expect(app).toBe("claude-desktop");
+    expect(
+      Object.keys(updated.meta?.claudeDesktopModelRoutes ?? {}).sort(),
+    ).toEqual(["claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"]);
+    // 其它字段原样保留
+    expect(updated.settingsConfig).toEqual(
+      oldEntry["llm-gateway-local"].settingsConfig,
+    );
+    expect(updated.meta?.claudeDesktopMode).toBe("direct");
+  });
+
+  it("转发开着时先不动，避免整份重写 live", async () => {
+    seedActivePlan();
+    vi.mocked(providersApi.getAll).mockResolvedValue(oldEntry as never);
+    vi.mocked(providersApi.isForwarding).mockResolvedValue(true);
+
+    renderDock("claude-desktop");
+
+    await waitFor(() => expect(providersApi.getAll).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 50));
+    expect(providersApi.update).not.toHaveBeenCalled();
+  });
+
+  it("用户改过的清单不动", async () => {
+    seedActivePlan();
+    const edited = structuredClone(oldEntry);
+    (
+      edited["llm-gateway-local"].meta.claudeDesktopModelRoutes as Record<
+        string,
+        { model: string }
+      >
+    )["claude-fable-5-1"] = { model: "claude-fable-5-1" };
+    vi.mocked(providersApi.getAll).mockResolvedValue(edited as never);
+
+    renderDock("claude-desktop");
+
+    await waitFor(() => expect(providersApi.getAll).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 50));
+    expect(providersApi.update).not.toHaveBeenCalled();
   });
 });

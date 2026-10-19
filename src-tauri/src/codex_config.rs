@@ -151,9 +151,11 @@ pub fn read_and_validate_codex_config_text() -> Result<String, AppError> {
     Ok(s)
 }
 
-/// 保证 `[desktop]` 里有我们要的两个键：已有就覆盖值，没有才插入；
+/// 保证 `[desktop]` 里有我们要的键：已有就覆盖值，没有才插入；
 /// `[desktop]` 本身不存在（或不是表）就新建。表里其它键原样保留。
 /// 不能直接往文本尾部拼一段 `[desktop]`——已有这张表时重复表头会让 TOML 解析失败。
+///
+/// `conversationDetailMode` 不在这里写：交给 Codex Desktop 用它自己的默认值。
 pub fn upsert_codex_desktop_defaults(doc: &mut DocumentMut) {
     let root = doc.as_table_mut();
     if !root.get("desktop").is_some_and(|item| item.is_table_like()) {
@@ -162,8 +164,43 @@ pub fn upsert_codex_desktop_defaults(doc: &mut DocumentMut) {
     let desktop = root["desktop"]
         .as_table_like_mut()
         .expect("desktop was just ensured to be a table");
-    desktop.insert("conversationDetailMode", toml_edit::value("STEPS_COMMANDS"));
     desktop.insert("ambient-suggestions-enabled", toml_edit::value(true));
+}
+
+/// 转发期间不许出现在 config.toml 里的键，按 TOML 路径逐段写。
+/// 要禁止新字段，往这里加一行就行：开启转发、编辑页保存、外部写入三条路都会删它。
+pub const CODEX_FORWARDING_FORBIDDEN_KEYS: &[&[&str]] = &[&["desktop", "conversationDetailMode"]];
+
+/// 删掉 `CODEX_FORWARDING_FORBIDDEN_KEYS` 里的每个键，返回是否真的删了什么。
+pub fn remove_codex_forbidden_keys(doc: &mut DocumentMut) -> bool {
+    let mut removed = false;
+    for path in CODEX_FORWARDING_FORBIDDEN_KEYS {
+        removed |= remove_toml_path(doc.as_table_mut(), path);
+    }
+    removed
+}
+
+/// 按路径删一个键。删完让上层表空了就连表头一起去掉，别留个空壳；
+/// 路径上某段不存在或不是表，就当没有这个键。
+fn remove_toml_path(table: &mut dyn toml_edit::TableLike, path: &[&str]) -> bool {
+    match path {
+        [] => false,
+        [key] => table.remove(key).is_some(),
+        [head, rest @ ..] => {
+            let Some(child) = table
+                .get_mut(head)
+                .and_then(|item| item.as_table_like_mut())
+            else {
+                return false;
+            };
+            let removed = remove_toml_path(child, rest);
+            let emptied = child.is_empty();
+            if removed && emptied {
+                table.remove(head);
+            }
+            removed
+        }
+    }
 }
 
 fn active_codex_model_provider_id(doc: &DocumentMut) -> Option<String> {
@@ -992,5 +1029,49 @@ base_url = "https://production.api/v1"
             .and_then(|v| v.get("base_url"))
             .and_then(|v| v.as_str());
         assert_eq!(base_url, Some("https://production.api/v1"));
+    }
+
+    fn remove(text: &str, path: &[&str]) -> (bool, String) {
+        let mut doc: DocumentMut = text.parse().expect("valid toml");
+        let removed = remove_toml_path(doc.as_table_mut(), path);
+        (removed, doc.to_string())
+    }
+
+    #[test]
+    fn remove_toml_path_keeps_siblings_and_prunes_emptied_tables() {
+        let (removed, after) = remove(
+            "model = \"gpt-5\"\n\n[desktop]\nconversationDetailMode = \"STEPS_PROSE\"\nsansFontSize = 14\n",
+            &["desktop", "conversationDetailMode"],
+        );
+        assert!(removed);
+        assert!(!after.contains("conversationDetailMode"));
+        assert!(after.contains("[desktop]"));
+        assert!(after.contains("sansFontSize = 14"));
+
+        let (removed, after) = remove("model = \"gpt-5\"\n\n[a.b]\nc = 1\n", &["a", "b", "c"]);
+        assert!(removed);
+        assert_eq!(after.trim(), "model = \"gpt-5\"");
+    }
+
+    #[test]
+    fn remove_toml_path_handles_inline_tables_and_missing_paths() {
+        let (removed, after) = remove(
+            "desktop = { conversationDetailMode = \"X\", other = 1 }\n",
+            &["desktop", "conversationDetailMode"],
+        );
+        assert!(removed);
+        assert!(!after.contains("conversationDetailMode"));
+        assert!(after.contains("other = 1"));
+
+        // 路径上某段不存在、或不是表：什么都不动。
+        let text = "desktop = \"not a table\"\n\n[other]\nx = 1\n";
+        assert_eq!(
+            remove(text, &["desktop", "conversationDetailMode"]),
+            (false, text.to_string())
+        );
+        assert_eq!(remove(text, &["missing", "key"]), (false, text.to_string()));
+        // 没删东西时，原本就空的表也不该被顺手去掉。
+        let empty = "[desktop]\n";
+        assert_eq!(remove(empty, &["desktop", "x"]), (false, empty.to_string()));
     }
 }

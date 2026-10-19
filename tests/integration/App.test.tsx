@@ -2,7 +2,7 @@ import { Suspense, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { resetProviderState } from "../msw/state";
+import { getSettings, resetProviderState, setSettings } from "../msw/state";
 import { emitTauriEvent } from "../msw/tauriMocks";
 
 const toastSuccessMock = vi.fn();
@@ -100,6 +100,11 @@ vi.mock("@/components/ConfirmDialog", () => ({
     ) : null,
 }));
 
+// 设置页本身依赖主题等上下文，这里只关心「在设置页时主界面不在」。
+vi.mock("@/components/settings/SettingsPage", () => ({
+  SettingsPage: () => <div data-testid="settings-page" />,
+}));
+
 vi.mock("@/components/AppSwitcher", () => ({
   AppSwitcher: ({ activeApp, onSwitch }: any) => (
     <div data-testid="app-switcher">
@@ -128,7 +133,94 @@ describe("App integration with MSW", () => {
     toastErrorMock.mockReset();
   });
 
+  it("defaults to simple mode: forwarding cards only, no provider management", async () => {
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    expect(await screen.findByText("Claude Code")).toBeInTheDocument();
+    expect(screen.getByText("Codex")).toBeInTheDocument();
+    expect(screen.getByText("Claude App")).toBeInTheDocument();
+    // Gemini 不可转发，简洁模式不出现
+    expect(screen.queryByText("Gemini")).toBeNull();
+    expect(screen.queryByTestId("provider-list")).toBeNull();
+    expect(screen.queryByTestId("app-switcher")).toBeNull();
+  });
+
+  it("header button switches to the full UI and back, persisting the choice", async () => {
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    const toFull = await screen.findByRole("button", { name: /完整界面/ });
+    // 设置读到之前按钮是禁用的
+    await waitFor(() => expect(toFull).toBeEnabled());
+    fireEvent.click(toFull);
+
+    expect(await screen.findByTestId("provider-list")).toBeInTheDocument();
+    expect(screen.getByTestId("app-switcher")).toBeInTheDocument();
+    expect(getSettings().advancedMode).toBe(true);
+
+    fireEvent.click(screen.getByTitle("简洁界面"));
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("provider-list")).toBeNull(),
+    );
+    expect(getSettings().advancedMode).toBe(false);
+  });
+
+  it("tray forwarding item hands the request to the forwarding panel", async () => {
+    const requested: string[] = [];
+    const onToggle = (e: Event) => {
+      requested.push((e as CustomEvent<string>).detail);
+      e.preventDefault(); // 面板接住了
+    };
+    window.addEventListener("llm-gateway-toggle-forwarding", onToggle);
+    try {
+      const { default: App } = await import("@/App");
+      renderApp(App);
+      await screen.findByText("Claude Code");
+
+      emitTauriEvent("tray-toggle-forwarding", "codex");
+      // 不认识的 app（比如 Gemini）不转发
+      emitTauriEvent("tray-toggle-forwarding", "gemini");
+
+      await waitFor(() => expect(requested).toEqual(["codex"]));
+    } finally {
+      window.removeEventListener("llm-gateway-toggle-forwarding", onToggle);
+    }
+  });
+
+  it("tray request from the settings page returns to the main screen and is handled there", async () => {
+    const requested: string[] = [];
+    const onToggle = (e: Event) =>
+      requested.push((e as CustomEvent<string>).detail);
+    window.addEventListener("llm-gateway-toggle-forwarding", onToggle);
+    try {
+      const { default: App } = await import("@/App");
+      renderApp(App);
+      await screen.findByText("Claude Code");
+
+      // 设置页上没有转发面板（简洁模式下它嵌在主界面里）
+      fireEvent.click(screen.getByTitle("common.settings"));
+      await waitFor(() => expect(screen.queryByText("Claude Code")).toBeNull());
+
+      emitTauriEvent("tray-toggle-forwarding", "claude");
+
+      // 切回主界面，面板挂上后接住请求。之前没人接的那几次派发也会被这里的
+      // 监听看到，所以只断言：最终派发的是 claude，而且接住之后不再重试。
+      expect(await screen.findByText("Claude Code")).toBeInTheDocument();
+      await waitFor(() => expect(requested.at(-1)).toBe("claude"));
+      await new Promise((r) => setTimeout(r, 300));
+      const settled = requested.length;
+      await new Promise((r) => setTimeout(r, 300));
+      expect(requested.length).toBe(settled);
+    } finally {
+      window.removeEventListener("llm-gateway-toggle-forwarding", onToggle);
+    }
+  });
+
   it("covers basic provider flows via real hooks", async () => {
+    // 供应商管理只在高级模式下出现
+    setSettings({ advancedMode: true });
     const { default: App } = await import("@/App");
     renderApp(App);
 
@@ -179,5 +271,4 @@ describe("App integration with MSW", () => {
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalled();
   });
-
 });

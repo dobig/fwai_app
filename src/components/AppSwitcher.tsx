@@ -2,7 +2,7 @@ import type { AppId } from "@/lib/api";
 import type { VisibleApps } from "@/types";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { cn } from "@/lib/utils";
-import { ALL_APPS, APP_DISPLAY_NAME } from "@/lib/apps";
+import { ALL_APPS, APP_DISPLAY_NAME, APP_ICON_NAME } from "@/lib/apps";
 import { Terminal } from "lucide-react";
 
 const APP_BADGE_ICON: Partial<
@@ -30,12 +30,7 @@ export function AppSwitcher({
     onSwitch(app);
   };
   const iconSize = 20;
-  const appIconName: Record<AppId, string> = {
-    claude: "claude",
-    "claude-desktop": "claude",
-    codex: "openai",
-    gemini: "gemini",
-  };
+  const appIconName = APP_ICON_NAME;
   const appDisplayName = APP_DISPLAY_NAME;
 
   // Filter apps based on visibility settings (default all visible)

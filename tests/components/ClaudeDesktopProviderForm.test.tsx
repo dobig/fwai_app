@@ -82,9 +82,9 @@ describe("ClaudeDesktopProviderForm", () => {
     expect(payload.meta.claudeDesktopMode).toBe("direct");
     // 默认勾上的三档都在，Fable 默认不勾
     expect(Object.keys(payload.meta.claudeDesktopModelRoutes).sort()).toEqual([
-      "claude-haiku-4-5-20251001",
-      "claude-opus-5",
-      "claude-sonnet-5",
+      "claude-haiku-5-5",
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
     ]);
   });
 
@@ -126,12 +126,12 @@ describe("ClaudeDesktopProviderForm", () => {
         name: "Mine",
         meta: {
           claudeDesktopModelRoutes: {
-            "claude-opus-5": { model: "claude-opus-5", supports1m: true },
+            "claude-opus-5-5": { model: "claude-opus-5-5", supports1m: true },
           },
         },
       },
     });
-    expect(screen.getByLabelText("Opus 模型名")).toHaveValue("claude-opus-5");
+    expect(screen.getByLabelText("Opus 模型名")).toHaveValue("claude-opus-5-5");
     // 存过的档位勾上，没存过的不勾。未勾选行的 1M 标记无所谓——rowsToMeta 不读它。
     expect(screen.getByLabelText("Opus")).toBeChecked();
     expect(screen.getByLabelText("Sonnet")).not.toBeChecked();

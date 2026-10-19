@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Loader2 } from "lucide-react";
+import { Loader2, SlidersHorizontal } from "lucide-react";
 import { toast } from "sonner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { LanguageSettings } from "@/components/settings/LanguageSettings";
@@ -9,6 +9,7 @@ import { WindowSettings } from "@/components/settings/WindowSettings";
 import { GatewayAccountSettings } from "./GatewayAccountSettings";
 import { AppVisibilitySettings } from "@/components/settings/AppVisibilitySettings";
 import { TerminalSettings } from "@/components/settings/TerminalSettings";
+import { ToggleRow } from "@/components/ui/toggle-row";
 import { AboutSection } from "@/components/settings/AboutSection";
 import { useSettings } from "@/hooks/useSettings";
 import { useTranslation } from "react-i18next";
@@ -124,6 +125,19 @@ export function SettingsPage({
                   transition={{ duration: 0.3 }}
                   className="space-y-6"
                 >
+                  {settings ? (
+                    <ToggleRow
+                      icon={
+                        <SlidersHorizontal className="h-4 w-4 text-primary" />
+                      }
+                      title={t("settings.advancedMode")}
+                      description={t("settings.advancedModeDescription")}
+                      checked={!!settings.advancedMode}
+                      onCheckedChange={(value) =>
+                        handleAutoSave({ advancedMode: value })
+                      }
+                    />
+                  ) : null}
                   <GatewayAccountSettings />
                 </motion.div>
               </TabsContent>

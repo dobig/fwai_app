@@ -470,10 +470,7 @@ mod tests {
         ProviderService::apply_codex_desktop_defaults(&mut provider).unwrap();
 
         let desktop = desktop_table(&provider);
-        assert_eq!(
-            desktop["conversationDetailMode"].as_str(),
-            Some("STEPS_COMMANDS")
-        );
+        assert!(!desktop.contains_key("conversationDetailMode"));
         assert_eq!(desktop["ambient-suggestions-enabled"].as_bool(), Some(true));
     }
 
@@ -486,12 +483,9 @@ mod tests {
 
         let config = provider.settings_config["config"].as_str().unwrap();
         assert_eq!(config.matches("[desktop]").count(), 1);
-        assert_eq!(config.matches("conversationDetailMode").count(), 1);
         let desktop = desktop_table(&provider);
-        assert_eq!(
-            desktop["conversationDetailMode"].as_str(),
-            Some("STEPS_COMMANDS")
-        );
+        // 新增供应商时不碰用户自己写的 conversationDetailMode，只是不再主动写。
+        assert_eq!(desktop["conversationDetailMode"].as_str(), Some("SUMMARY"));
         assert_eq!(desktop["ambient-suggestions-enabled"].as_bool(), Some(true));
         assert_eq!(desktop["other"].as_integer(), Some(1));
     }

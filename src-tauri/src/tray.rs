@@ -122,6 +122,50 @@ fn sort_providers(
     sorted
 }
 
+/// 简洁模式（`advanced_mode` 关）的托盘：一个可转发 app 一项，打勾 = 正在转发，
+/// 点一下开/关。和主界面的转发列表是同一组 app、同样的名字。Gemini 不能转发，
+/// 不出现。
+pub struct TrayForwardItem {
+    pub app_type: AppType,
+    pub label: &'static str,
+}
+
+pub const TRAY_FORWARD_ITEMS: [TrayForwardItem; 3] = [
+    TrayForwardItem {
+        app_type: AppType::Claude,
+        label: "Claude Code",
+    },
+    TrayForwardItem {
+        app_type: AppType::ClaudeDesktop,
+        label: "Claude App",
+    },
+    TrayForwardItem {
+        app_type: AppType::Codex,
+        label: "Codex",
+    },
+];
+
+/// 转发项的菜单 id 前缀。不能和任何供应商分区的前缀互为前缀，见
+/// `forward_prefix_is_unambiguous`。
+pub const FORWARD_PREFIX: &str = "forward:";
+
+/// 发给前端的事件：替我开/关这个 app 的转发。
+///
+/// 开关的整套流程（登录校验、套餐对账、购买跳转）在前端的转发面板里，托盘只
+/// 负责把请求交过去；需要用户操作时由前端把主窗口叫出来。
+pub const TRAY_TOGGLE_FORWARDING_EVENT: &str = "tray-toggle-forwarding";
+
+fn handle_forward_tray_event(app: &tauri::AppHandle, event_id: &str) -> bool {
+    let Some(app_id) = event_id.strip_prefix(FORWARD_PREFIX) else {
+        return false;
+    };
+    log::info!("托盘请求切换转发: {app_id}");
+    if let Err(e) = app.emit(TRAY_TOGGLE_FORWARDING_EVENT, app_id) {
+        log::error!("发射 {TRAY_TOGGLE_FORWARDING_EVENT} 事件失败: {e}");
+    }
+    true
+}
+
 /// 处理供应商托盘事件
 pub fn handle_provider_tray_event(app: &tauri::AppHandle, event_id: &str) -> bool {
     for section in TRAY_SECTIONS.iter() {
@@ -195,8 +239,33 @@ pub fn create_tray_menu(
             .map_err(|e| AppError::Message(format!("创建打开主界面菜单失败: {e}")))?;
     menu_builder = menu_builder.item(&show_main_item).separator();
 
+    if !app_settings.advanced_mode {
+        // 简洁模式：不列供应商，只给每个 app 一个转发开关。
+        for item in TRAY_FORWARD_ITEMS.iter() {
+            if !visible_apps.is_visible(&item.app_type) {
+                continue;
+            }
+            let forwarding = crate::services::provider::forwarding::is_forwarding(
+                app_state.db.as_ref(),
+                &item.app_type,
+            )
+            .unwrap_or(false);
+            let menu_item = CheckMenuItem::with_id(
+                app,
+                format!("{FORWARD_PREFIX}{}", item.app_type.as_str()),
+                item.label,
+                true,
+                forwarding,
+                None::<&str>,
+            )
+            .map_err(|e| AppError::Message(format!("创建{}转发菜单项失败: {e}", item.label)))?;
+            menu_builder = menu_builder.item(&menu_item);
+        }
+        menu_builder = menu_builder.separator();
+    }
+
     // 每个应用类型折叠为子菜单，避免供应商过多时菜单过长
-    for section in TRAY_SECTIONS.iter() {
+    for section in TRAY_SECTIONS.iter().filter(|_| app_settings.advanced_mode) {
         if !visible_apps.is_visible(&section.app_type) {
             continue;
         }
@@ -322,35 +391,41 @@ pub fn apply_tray_policy(app: &tauri::AppHandle, dock_visible: bool) {
     }
 }
 
+/// 把主窗口叫到前台（托盘「打开主界面」，以及前端在转发需要用户登录 / 购买时）。
+pub fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = window.set_skip_taskbar(false);
+        }
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        #[cfg(target_os = "linux")]
+        {
+            crate::linux_fix::nudge_main_window(window.clone());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            apply_tray_policy(app, true);
+        }
+    }
+}
+
 /// 处理托盘菜单事件
 pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
     log::info!("处理托盘菜单事件: {event_id}");
 
     match event_id {
-        "show_main" => {
-            if let Some(window) = app.get_webview_window("main") {
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = window.set_skip_taskbar(false);
-                }
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-                #[cfg(target_os = "linux")]
-                {
-                    crate::linux_fix::nudge_main_window(window.clone());
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    apply_tray_policy(app, true);
-                }
-            }
-        }
+        "show_main" => show_main_window(app),
         "quit" => {
             log::info!("退出应用");
             app.exit(0);
         }
         _ => {
+            if handle_forward_tray_event(app, event_id) {
+                return;
+            }
             if handle_provider_tray_event(app, event_id) {
                 return;
             }
@@ -404,6 +479,21 @@ mod tests {
                     outer.prefix,
                 );
             }
+        }
+    }
+
+    /// 转发项的前缀不能和供应商分区的前缀互相包含，否则点击会被另一边的处理器
+    /// 吃掉（`handle_tray_menu_event` 先试转发，再试供应商）。
+    #[test]
+    fn forward_prefix_is_unambiguous() {
+        for section in TRAY_SECTIONS.iter() {
+            assert!(
+                !section.prefix.starts_with(FORWARD_PREFIX)
+                    && !FORWARD_PREFIX.starts_with(section.prefix),
+                "转发前缀 \"{FORWARD_PREFIX}\" 和 {} 的前缀 \"{}\" 冲突",
+                section.log_name,
+                section.prefix,
+            );
         }
     }
 
