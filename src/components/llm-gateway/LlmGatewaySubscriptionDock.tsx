@@ -1237,6 +1237,7 @@ requires_openai_auth = true`,
       // {"error":"invite_code_required"} and friends.
       const code = gatewayErrorCode(error);
       const authErrors: Record<string, string> = {
+        registration_closed: "暂停新用户注册，请稍后再来",
         invite_code_required: "注册需要邀请码",
         invalid_invite_code: "邀请码无效或已被使用",
         email_already_exists: "该邮箱已被注册",
@@ -1950,6 +1951,11 @@ requires_openai_auth = true`,
         return;
       }
       if (handleOrgMemberPurchaseBlocked(error)) return;
+      // 管理员在控制台暂停了接单（套餐和加量包都一样）。
+      if (gatewayErrorCode(error) === "orders_closed") {
+        toast.error("暂停购买，请稍后再来");
+        return;
+      }
       toast.error(
         (asExtra ? extraPurchaseErrorMessage(error) : null) ??
           (error instanceof Error ? error.message : "购买失败"),
