@@ -54,6 +54,14 @@
     "openLink": "詳細を見る",
     "more": "ほかに {{count}} 件のお知らせ"
   },
+  "forceUpgrade": {
+    "title": "アップデートが必要です",
+    "body": "バージョン {{current}} はサポートが終了しました。引き続き使うには {{min}} 以降にアップデートしてください。",
+    "bodyNoVersion": "バージョン {{current}} はサポートが終了しました。引き続き使うには最新版にアップデートしてください。",
+    "forwardingStopped": "アップデートするまで、Claude Code・Codex・Claude App の転送はオフになり、元の設定に戻されています。",
+    "update": "今すぐアップデート",
+    "updateFailed": "アップデートに失敗しました。公式サイトから最新版をダウンロードしてください。"
+  },
   "apiKeyInput": {
     "placeholder": "API Key を入力",
     "show": "API Key を表示",

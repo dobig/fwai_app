@@ -55,6 +55,14 @@
     "more_one": "{{count}} more announcement",
     "more_other": "{{count}} more announcements"
   },
+  "forceUpgrade": {
+    "title": "Update required",
+    "body": "Version {{current}} is no longer supported. Update to {{min}} or later to keep using fwai.",
+    "bodyNoVersion": "Version {{current}} is no longer supported. Update to the latest version to keep using fwai.",
+    "forwardingStopped": "Until you update, forwarding for Claude Code, Codex and Claude App is off and their original config has been restored.",
+    "update": "Update now",
+    "updateFailed": "Update failed. Please download the latest version from the website."
+  },
   "apiKeyInput": {
     "placeholder": "Enter API Key",
     "show": "Show API Key",

@@ -4,6 +4,10 @@ import {
   CLIENT_VERSION_VALUE,
   recordUpgradeSignal,
 } from "@/lib/clientUpgrade";
+import {
+  CLIENT_UPGRADE_REQUIRED_CODE,
+  recordUpgradeRefusal,
+} from "@/lib/forceUpgrade";
 
 export interface GatewayTokens {
   token_type: "Bearer";
@@ -230,6 +234,10 @@ async function gatewayRequest<T>(
       }
     } catch {
       // Non-JSON error body; fall back to the status code alone.
+    }
+    // 网关说这个版本已经停止服务了：锁住整个 App（见 ForceUpgradeGate）。
+    if (response.status === 426 && detail === CLIENT_UPGRADE_REQUIRED_CODE) {
+      recordUpgradeRefusal(body.min_version);
     }
     throw new GatewayApiError(response.status, detail, body);
   }
@@ -783,6 +791,26 @@ export async function redeemPromoCode(code: string): Promise<{
     { method: "POST", body: JSON.stringify({ code }) },
     true,
   );
+}
+
+// 管理员在后台设的版本门槛。两个都是 "x.y.z" 或空串（不限制 / 不提示）。
+export interface GatewayClientVersionPolicy {
+  min_version: string;
+  suggest_version: string;
+}
+
+// fetchGatewayClientVersion 读版本门槛。接口是公开的，而且是网关唯一不会对
+// 过旧版本回 426 的接口——被锁住的 App 正要靠它知道该升到哪个版本。
+export async function fetchGatewayClientVersion(): Promise<GatewayClientVersionPolicy> {
+  const data = await gatewayRequest<Partial<GatewayClientVersionPolicy>>(
+    "/v1/client-version",
+    { method: "GET" },
+  );
+  const text = (value: unknown) => (typeof value === "string" ? value : "");
+  return {
+    min_version: text(data?.min_version),
+    suggest_version: text(data?.suggest_version),
+  };
 }
 
 export async function fetchGatewaySubscription(): Promise<{
