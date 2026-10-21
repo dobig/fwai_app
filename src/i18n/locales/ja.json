@@ -48,6 +48,12 @@
     "bodyOfficial": "はじめかた：\n1. 右下の LLM Gateway パネルを開いてログイン\n2. メイン画面で使いたいアプリをクリックして転送を開始\n置き換えるのはエンドポイントとキーだけで、その他の設定はそのままです。もう一度クリックすると元に戻ります。複数のプロバイダーを管理したい場合は、設定 → 詳細設定 で詳細モードをオンにしてください。",
     "confirm": "了解"
   },
+  "announcement": {
+    "important": "重要",
+    "acknowledge": "了解",
+    "openLink": "詳細を見る",
+    "more": "ほかに {{count}} 件のお知らせ"
+  },
   "apiKeyInput": {
     "placeholder": "API Key を入力",
     "show": "API Key を表示",

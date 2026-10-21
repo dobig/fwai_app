@@ -795,6 +795,59 @@ export async function fetchGatewaySubscription(): Promise<{
   }>("/v1/subscription", { method: "GET" }, true);
 }
 
+// --- Announcements ------------------------------------------------------------
+
+export type GatewayAnnouncementLevel = "info" | "important";
+
+export interface GatewayAnnouncement {
+  id: string;
+  title: string;
+  body: string;
+  level: GatewayAnnouncementLevel;
+  // 两个都是空串表示没有链接按钮。
+  link_url: string;
+  link_label: string;
+  published_at: string;
+}
+
+// fetchGatewayAnnouncements 拉取当前生效的公告，旧的在前。接口是公开的：没登录
+// 的用户也要收到「服务维护」「请升级」这类消息，所以不带 token。
+//
+// 形状不对的条目直接丢掉，而不是让整批失败——一条坏数据不该挡住其余公告。
+export async function fetchGatewayAnnouncements(): Promise<
+  GatewayAnnouncement[]
+> {
+  const data = await gatewayRequest<{ announcements?: unknown }>(
+    "/v1/announcements",
+    { method: "GET" },
+  );
+  if (!Array.isArray(data?.announcements)) return [];
+  return data.announcements.flatMap((raw): GatewayAnnouncement[] => {
+    if (!raw || typeof raw !== "object") return [];
+    const item = raw as Record<string, unknown>;
+    if (
+      typeof item.id !== "string" ||
+      !item.id ||
+      typeof item.title !== "string" ||
+      typeof item.body !== "string"
+    ) {
+      return [];
+    }
+    const text = (value: unknown) => (typeof value === "string" ? value : "");
+    return [
+      {
+        id: item.id,
+        title: item.title,
+        body: item.body,
+        level: item.level === "important" ? "important" : "info",
+        link_url: text(item.link_url),
+        link_label: text(item.link_label),
+        published_at: text(item.published_at),
+      },
+    ];
+  });
+}
+
 // --- Email verification / password reset ------------------------------------
 
 // sendEmailCode mails a six-digit code to the signed-in account's OWN address.
