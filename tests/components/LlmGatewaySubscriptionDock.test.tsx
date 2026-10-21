@@ -2871,6 +2871,27 @@ describe("LlmGatewaySubscriptionDock 组织项目", () => {
     expect(toasts.error).not.toHaveBeenCalled();
   });
 
+  it("下单被 403 orders_closed 打回：提示暂停购买", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    vi.spyOn(gateway, "createPlanOrder").mockRejectedValue(
+      new GatewayApiError(403, "orders_closed"),
+    );
+    renderDock();
+
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("$100"));
+    mockQuote({ action: "upgrade_now" });
+    await userEvent.click(await screen.findByText(/^下一步/));
+    await userEvent.click(await screen.findByText(/^微信支付/));
+
+    await waitFor(() =>
+      expect(toasts.error).toHaveBeenCalledWith("暂停购买，请稍后再来"),
+    );
+  });
+
   it("兑换被 409 organization_member 打回：提示不能使用兑换码，回账号屏", async () => {
     seedActivePlan();
     vi.spyOn(gateway, "redeemPromoCode").mockRejectedValue(
