@@ -123,8 +123,24 @@ fn linux_paths_from_config_dir(config_dir: &Path) -> DesktopPaths {
 /// MSIX 应用的 `%APPDATA%` / `%LOCALAPPDATA%` 被重定向进包容器,我们写到真实
 /// `%LOCALAPPDATA%\Claude-3p` 的文件它看不见——开关显示成功,Desktop 却还在用
 /// 自己那份。所以只要包容器在,就写进容器里。
-fn windows_paths_from_local_app_data(local_app_data: &Path) -> DesktopPaths {
-    windows_msix_paths(local_app_data).unwrap_or_else(|| windows_classic_paths(local_app_data))
+fn windows_paths_from_app_data(app_data: &Path, local_app_data: &Path) -> DesktopPaths {
+    windows_msix_paths(local_app_data)
+        .unwrap_or_else(|| windows_classic_paths_in_either(app_data, local_app_data))
+}
+
+/// 传统安装的 1P / 3P 目录总是成对放在同一个根下:要么都在 `%LOCALAPPDATA%`,
+/// 要么都在 `%APPDATA%`。按 1P 目录在哪个根下来选,`%LOCALAPPDATA%` 优先;
+/// 两边都没有就按 `%LOCALAPPDATA%`,由安装检查报未安装。
+fn windows_classic_paths_in_either(app_data: &Path, local_app_data: &Path) -> DesktopPaths {
+    let local = windows_classic_paths(local_app_data);
+    if local.install_dir.is_dir() {
+        return local;
+    }
+    let roaming = windows_classic_paths(app_data);
+    if roaming.install_dir.is_dir() {
+        return roaming;
+    }
+    local
 }
 
 /// 包容器里的布局:1P 在 `LocalCache\Roaming\Claude`,3P 在
@@ -171,7 +187,7 @@ fn windows_msix_paths(local_app_data: &Path) -> Option<DesktopPaths> {
     })
 }
 
-/// 传统安装目录名可能带后缀(Claude-beta 之类),精确名不存在时扫一遍
+/// 在一个根目录下找 1P / 3P 目录。目录名可能带后缀(Claude-beta 之类),精确名不存在时扫一遍
 /// `Claude*`,按名字排序取第一个,保证同一台机器上每次解析到同一个目录。
 fn windows_classic_paths(local_app_data: &Path) -> DesktopPaths {
     let pick = |threep: bool| -> PathBuf {
@@ -221,10 +237,15 @@ fn current_paths() -> Result<DesktopPaths, AppError> {
     }
     #[cfg(windows)]
     {
-        let local_app_data = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| crate::config::get_home_dir().join("AppData").join("Local"));
-        Ok(windows_paths_from_local_app_data(&local_app_data))
+        let known_dir = |var: &str, fallback: &str| {
+            std::env::var_os(var)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| crate::config::get_home_dir().join("AppData").join(fallback))
+        };
+        Ok(windows_paths_from_app_data(
+            &known_dir("APPDATA", "Roaming"),
+            &known_dir("LOCALAPPDATA", "Local"),
+        ))
     }
     #[cfg(target_os = "linux")]
     {
@@ -1255,7 +1276,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(temp.path().join("Claude")).expect("Claude");
         std::fs::create_dir_all(temp.path().join("Claude-3p")).expect("Claude-3p");
-        let paths = windows_paths_from_local_app_data(temp.path());
+        let paths = windows_paths_from_app_data(&temp.path().join("Roaming"), temp.path());
         assert_eq!(paths.install_dir, temp.path().join("Claude"));
         assert_eq!(
             paths.threep_config,
@@ -1269,11 +1290,46 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(temp.path().join("Claude-beta")).expect("Claude-beta");
         std::fs::create_dir_all(temp.path().join("Claude-beta-3p")).expect("Claude-beta-3p");
-        let paths = windows_paths_from_local_app_data(temp.path());
+        let paths = windows_paths_from_app_data(&temp.path().join("Roaming"), temp.path());
         assert_eq!(paths.install_dir, temp.path().join("Claude-beta"));
         assert_eq!(
             paths.threep_config,
             temp.path().join("Claude-beta-3p").join(CONFIG_FILE)
+        );
+    }
+
+    #[test]
+    fn windows_paths_fall_back_to_the_roaming_pair() {
+        // 1P / 3P 都在 %APPDATA% 的装法:成对取 %APPDATA% 下的两个目录。
+        let temp = tempfile::tempdir().expect("tempdir");
+        let roaming = temp.path().join("Roaming");
+        std::fs::create_dir_all(roaming.join("Claude")).expect("Claude");
+        std::fs::create_dir_all(roaming.join("Claude-3p")).expect("Claude-3p");
+        let paths = windows_paths_from_app_data(&roaming, temp.path());
+        assert_eq!(paths.install_dir, roaming.join("Claude"));
+        assert_eq!(
+            paths.normal_config,
+            roaming.join("Claude").join(CONFIG_FILE)
+        );
+        assert_eq!(
+            paths.threep_config,
+            roaming.join("Claude-3p").join(CONFIG_FILE)
+        );
+    }
+
+    #[test]
+    fn windows_paths_prefer_the_local_pair_over_roaming() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let roaming = temp.path().join("Roaming");
+        std::fs::create_dir_all(roaming.join("Claude")).expect("Roaming Claude");
+        std::fs::create_dir_all(roaming.join("Claude-3p")).expect("Roaming Claude-3p");
+        std::fs::create_dir_all(temp.path().join("Claude")).expect("Claude");
+        std::fs::create_dir_all(temp.path().join("Claude-3p")).expect("Claude-3p");
+        let paths = windows_paths_from_app_data(&roaming, temp.path());
+        assert_eq!(paths.install_dir, temp.path().join("Claude"));
+        assert_eq!(
+            paths.threep_config,
+            temp.path().join("Claude-3p").join(CONFIG_FILE)
         );
     }
 
@@ -1292,7 +1348,7 @@ mod tests {
         std::fs::create_dir_all(local_cache.join("Roaming").join("Claude")).expect("Roaming");
         std::fs::create_dir_all(local_cache.join("Local").join("Claude-3p")).expect("Local");
 
-        let paths = windows_paths_from_local_app_data(temp.path());
+        let paths = windows_paths_from_app_data(&temp.path().join("Roaming"), temp.path());
         assert_eq!(paths.install_dir, local_cache);
         assert_eq!(
             paths.normal_config,
@@ -1319,7 +1375,7 @@ mod tests {
             .join("LocalCache");
         std::fs::create_dir_all(&local_cache).expect("LocalCache");
 
-        let paths = windows_paths_from_local_app_data(temp.path());
+        let paths = windows_paths_from_app_data(&temp.path().join("Roaming"), temp.path());
         assert!(paths.install_dir.is_dir());
         assert_eq!(
             paths.normal_config,
@@ -1344,7 +1400,7 @@ mod tests {
             .join("LocalCache");
         std::fs::create_dir_all(local_cache.join("Roaming").join("Claude-3p")).expect("Roaming");
 
-        let paths = windows_paths_from_local_app_data(temp.path());
+        let paths = windows_paths_from_app_data(&temp.path().join("Roaming"), temp.path());
         assert_eq!(
             paths.threep_config,
             local_cache
@@ -1362,7 +1418,7 @@ mod tests {
             .expect("package");
         std::fs::create_dir_all(temp.path().join("Claude")).expect("Claude");
 
-        let paths = windows_paths_from_local_app_data(temp.path());
+        let paths = windows_paths_from_app_data(&temp.path().join("Roaming"), temp.path());
         assert_eq!(paths.install_dir, temp.path().join("Claude"));
     }
 

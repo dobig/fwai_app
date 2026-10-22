@@ -1,6 +1,6 @@
 [package]
 name = "fwai_app"
-version = "1.9.0"
+version = "1.9.1"
 description = "fwai_app — provider switcher for Claude Code / Codex / Gemini CLI with LLM Gateway integration"
 authors = ["Jason Young"]
 license = "MIT"
@@ -33,6 +33,9 @@ tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
+# panic hook 里弹崩溃框用：那时可能还没有 AppHandle，用不了 tauri-plugin-dialog。
+# 版本和 features 跟 tauri-plugin-dialog 依赖的那份保持一致。
+rfd = { version = "0.16", default-features = false, features = ["common-controls-v6"] }
 tauri-plugin-store = "2"
 tauri-plugin-window-state = "2"
 dirs = "5.0"
