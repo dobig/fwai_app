@@ -59,6 +59,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
+import { AnnouncementDialog } from "@/components/AnnouncementDialog";
 import { ForwardingAppCards } from "@/components/forwarding/ForwardingAppCards";
 import { Wordmark } from "@/components/Wordmark";
 import { LlmGatewaySubscriptionDock } from "@/components/llm-gateway/LlmGatewaySubscriptionDock";
@@ -903,6 +904,7 @@ function App() {
       />
 
       <FirstRunNoticeDialog />
+      <AnnouncementDialog />
       {/* 账号面板只挂一份：简洁模式内嵌在主界面（见 renderContent），高级模式
           是右下角的浮动面板。两份同时挂会各自响应转发请求。 */}
       {advancedMode && <LlmGatewaySubscriptionDock />}

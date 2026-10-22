@@ -48,6 +48,12 @@
     "bodyOfficial": "上手两步：\n1. 打开右下角 LLM Gateway 面板并登录\n2. 在主界面点要用的应用，开启转发\n开启时只替换请求地址和密钥，你原有的其它配置不动；再点一下就还原。需要管理多个供应商的话，可以在 设置 → 高级 里打开高级模式。",
     "confirm": "我知道了"
   },
+  "announcement": {
+    "important": "重要",
+    "acknowledge": "我知道了",
+    "openLink": "查看详情",
+    "more": "还有 {{count}} 条公告"
+  },
   "apiKeyInput": {
     "placeholder": "请输入API Key",
     "show": "显示API Key",

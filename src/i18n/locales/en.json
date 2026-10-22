@@ -48,6 +48,13 @@
     "bodyOfficial": "Two steps to get going:\n1. Open the LLM Gateway panel (bottom-right) and log in\n2. Click an app on the main screen to start forwarding\nOnly the endpoint and key are swapped — the rest of your config stays as is, and clicking again restores it. To manage multiple providers, turn on Advanced Mode in Settings → Advanced.",
     "confirm": "Got it"
   },
+  "announcement": {
+    "important": "Important",
+    "acknowledge": "Got it",
+    "openLink": "Learn more",
+    "more_one": "{{count}} more announcement",
+    "more_other": "{{count}} more announcements"
+  },
   "apiKeyInput": {
     "placeholder": "Enter API Key",
     "show": "Show API Key",
