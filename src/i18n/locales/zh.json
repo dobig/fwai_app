@@ -54,6 +54,14 @@
     "openLink": "查看详情",
     "more": "还有 {{count}} 条公告"
   },
+  "forceUpgrade": {
+    "title": "需要升级",
+    "body": "当前版本 {{current}} 已停止服务，请升级到 {{min}} 或更高版本后继续使用。",
+    "bodyNoVersion": "当前版本 {{current}} 已停止服务，请升级到最新版本后继续使用。",
+    "forwardingStopped": "在升级之前，Claude Code、Codex 和 Claude App 的转发已关闭，原有配置已还原。",
+    "update": "立即升级",
+    "updateFailed": "升级失败，请到官网下载最新版本"
+  },
   "apiKeyInput": {
     "placeholder": "请输入API Key",
     "show": "显示API Key",

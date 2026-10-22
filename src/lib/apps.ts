@@ -1,4 +1,5 @@
-import type { AppId } from "@/lib/api";
+import { providersApi, type AppId } from "@/lib/api";
+import { isUpgradeLocked } from "@/lib/forceUpgrade";
 import type { VisibleApps } from "@/types";
 
 export const ALL_APPS: AppId[] = [
@@ -67,7 +68,16 @@ export const GATEWAY_TOGGLE_FORWARDING_EVENT = "llm-gateway-toggle-forwarding";
 export const GATEWAY_FORWARDING_BUSY_EVENT = "llm-gateway-forwarding-busy";
 
 /// 返回面板是否接住了这次请求（面板此刻没挂载就是 false，调用方可以稍后重试）。
+///
+/// 被强制升级锁住时一律吞掉：转发已经关了，不能让托盘或别的入口再开回来。
+/// 返回 true 让调用方别重试；托盘上被系统自己翻过去的勾按真实状态重建。
 export function requestToggleForwarding(app: ForwardableApp): boolean {
+  if (isUpgradeLocked()) {
+    void providersApi.updateTrayMenu().catch(() => {
+      // 非 Tauri 环境没有托盘。
+    });
+    return true;
+  }
   const handled = !window.dispatchEvent(
     new CustomEvent<ForwardableApp>(GATEWAY_TOGGLE_FORWARDING_EVENT, {
       detail: app,
