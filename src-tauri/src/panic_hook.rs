@@ -1,12 +1,12 @@
 //! Panic Hook 模块
 //!
 //! 在应用崩溃时捕获 panic 信息并记录到 `<app_config_dir>/crash.log` 文件中（默认 `~/.fwai_app/crash.log`）。
-//! 便于用户和开发者诊断闪退问题。
+//! 便于用户和开发者诊断闪退问题。主线程上的 panic 还会弹框告诉用户原因。
 
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::panic;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// 应用版本号（从 Cargo.toml 读取）
@@ -172,20 +172,80 @@ Stack Trace (Backtrace)
         );
 
         // 写入文件（追加模式）
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
-            let _ = file.write_all(crash_entry.as_bytes());
-            let _ = file.flush();
+        let log_saved = match OpenOptions::new().create(true).append(true).open(&log_path) {
+            Ok(mut file) => {
+                let written = file.write_all(crash_entry.as_bytes()).is_ok();
+                let _ = file.flush();
 
-            // 记录日志文件位置到 stderr
-            eprintln!("\n[CC-Switch] Crash log saved to: {}", log_path.display());
-        }
+                // 记录日志文件位置到 stderr
+                eprintln!("\n[CC-Switch] Crash log saved to: {}", log_path.display());
+                written
+            }
+            Err(_) => false,
+        };
 
         // 同时输出到 stderr（便于开发调试）
         eprintln!("{crash_entry}");
 
+        if is_fatal_thread() {
+            let short_location = panic_info
+                .location()
+                .map(|loc| format!("{}:{}", loc.file(), loc.line()))
+                .unwrap_or_default();
+            let saved_path = log_saved.then_some(log_path.as_path());
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                show_crash_dialog(&message, &short_location, saved_path)
+            }));
+        }
+
         // 调用默认 hook
         default_hook(panic_info);
     }));
+}
+
+/// 当前线程的 panic 会不会带走整个进程。
+///
+/// Tauri 的事件循环、setup 和同步 command 都跑在主线程：这里 panic，要么一路
+/// 展开出 main，要么穿过窗口回调的 FFI 边界直接 abort，进程都活不了。
+/// tokio 任务里的 panic 会被运行时接住，应用照常运行，这时弹「即将退出」是误报。
+fn is_fatal_thread() -> bool {
+    std::thread::current().name() == Some("main")
+}
+
+/// 弹框里 panic 消息的最大长度。tauri::Error 的 Debug 输出可能很长，全文在崩溃日志里。
+const DIALOG_MESSAGE_MAX_CHARS: usize = 800;
+
+/// 崩溃弹框的正文。中英双语：Windows 上通常没有 LANG，没法可靠判断语言。
+fn crash_dialog_text(message: &str, location: &str, log_path: Option<&Path>) -> String {
+    let mut reason: String = message.chars().take(DIALOG_MESSAGE_MAX_CHARS).collect();
+    if message.chars().count() > DIALOG_MESSAGE_MAX_CHARS {
+        reason.push('…');
+    }
+    if !location.is_empty() {
+        reason.push_str(&format!("\n({location})"));
+    }
+    let log = match log_path {
+        Some(path) => format!(
+            "崩溃日志 / Crash log:\n{}\n\n\
+             请把这个文件发给我们。\nPlease send this file to us.",
+            path.display()
+        ),
+        None => "崩溃日志写入失败。\nFailed to write the crash log.".to_string(),
+    };
+    format!(
+        "fwai_app 遇到错误，即将退出。\n\
+         fwai_app ran into an error and needs to close.\n\n\
+         原因 / Reason:\n{reason}\n\n{log}"
+    )
+}
+
+fn show_crash_dialog(message: &str, location: &str, log_path: Option<&Path>) {
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title(format!("fwai_app {APP_VERSION}"))
+        .set_description(crash_dialog_text(message, location, log_path))
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
 }
 
 #[cfg(test)]
@@ -207,6 +267,24 @@ mod tests {
         let dir = default_app_config_dir();
         assert!(!dir.to_string_lossy().contains(".cc-switch"));
         assert!(dir.ends_with(".fwai_app"));
+    }
+
+    #[test]
+    fn test_crash_dialog_text_has_reason_and_log_path() {
+        let path = PathBuf::from("/home/u/.fwai_app/crash.log");
+        let text = crash_dialog_text("setup failed", "src/lib.rs:540", Some(&path));
+        assert!(text.contains("setup failed"));
+        assert!(text.contains("src/lib.rs:540"));
+        assert!(text.contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn test_crash_dialog_text_truncates_long_message() {
+        let long = "错".repeat(DIALOG_MESSAGE_MAX_CHARS + 100);
+        let text = crash_dialog_text(&long, "", None);
+        assert!(text.contains('…'));
+        assert!(!text.contains(&long));
+        assert!(text.contains("Failed to write the crash log"));
     }
 
     #[test]
