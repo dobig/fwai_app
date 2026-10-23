@@ -14,6 +14,8 @@ import {
   formatMicrosUSD,
   formatPlanDate,
   planLabel,
+  TIERS,
+  tierBlurb,
   vendorLabel,
 } from "./planCatalog";
 
@@ -51,7 +53,15 @@ function actionHeadline(
       // new_valid_from）的兜底，它取的是**当前生效档**的到期日 —— 服务端现在排
       // 的正是这个日子（排队单会被替换而不是串在后面），两者一致。
       const when = formatPlanDate(quote.new_valid_from ?? currentValidUntil);
-      const head = `当前套餐到期后${when ? `（${when}）` : ""}自动切换到 ${planLabel(quote.target_tier)}`;
+      const whenText = when ? `（${when}）` : "";
+      // 买的就是手上这一档却排队，只有一种情况：手上那张是按旧额度买的
+      // （business 曾是 20×，现在是 10×）。得说清当前这期不受影响、新的
+      // 一期是现行额度，否则用户会以为续费变成了降档。
+      const tier = TIERS.find((t) => t.id === quote.target_tier);
+      const head =
+        quote.current_tier === quote.target_tier && tier
+          ? `当前套餐按原额度用到到期${whenText}，之后开始新的一期 ${planLabel(quote.target_tier)}（${tierBlurb(tier)}）`
+          : `当前套餐到期后${whenText}自动切换到 ${planLabel(quote.target_tier)}`;
       // 抵扣在降档里通常是 0，但用户改主意时不是：上一个排队单已付的钱会全额
       // 折进来。不说这一句，用户看到「实付 $0」会以为下错了单。
       return quote.credit_applied_micros > 0

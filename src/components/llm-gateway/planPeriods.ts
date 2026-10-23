@@ -5,6 +5,8 @@
 // 一份服务端的折扣表（num/den/discount）在本地乘出预览价，后来两边的折扣
 // 对不上 —— 只要客户端有一份自己的价目表，这种漂移就迟早会发生，所以删了。
 
+import type { GatewayCatalogPeriod } from "@/lib/api/llm-gateway";
+
 // 周选项只对加量包开放（订阅层一律按月起售），且停在 3 周 —— 第 4 周的价格
 // 和 1 个月一样，但只给 28 天而不是 30 天。
 export interface PlanPeriod {
@@ -28,6 +30,21 @@ export const DEFAULT_PERIOD = "1m";
 
 export function findPeriod(key: string): PlanPeriod {
   return PERIODS.find((p) => p.key === key) ?? PERIODS[3];
+}
+
+/**
+ * 这个厂商能不能买这个周期，按服务端 periods[].vendors（Claude 最长一个月，
+ * GPT 不限）。服务端没发 vendors（老网关）或没传厂商（老网关不按厂商卖）时
+ * 一律开放 —— 那边本来就不限，真被拒了也只是一个 period_not_available。
+ */
+export function periodOpenTo(
+  periods: GatewayCatalogPeriod[],
+  key: string,
+  vendor: string | undefined,
+): boolean {
+  const vendors = periods.find((p) => p.key === key)?.vendors;
+  if (!vendor || !vendors) return true;
+  return vendors.includes(vendor);
 }
 
 /**

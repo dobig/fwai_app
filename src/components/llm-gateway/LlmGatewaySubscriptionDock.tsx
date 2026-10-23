@@ -104,14 +104,17 @@ import {
 } from "./planCatalog";
 // 周期的名字和天数。价格一律来自服务端：周期列表取 GET /v1/plans 的成品价，
 // 结账页取 quote 的 amount_due_micros，二维码页取下单响应的 amount_credits。
-import { DEFAULT_PERIOD, findPeriod, periodDiscountLabel } from "./planPeriods";
 import {
-  businessRateLabel,
+  DEFAULT_PERIOD,
+  findPeriod,
+  periodDiscountLabel,
+  periodOpenTo,
+} from "./planPeriods";
+import {
   bulkExtraSizes,
   extraBlockedMessage,
   extraErrorMessage,
   extraForVendor,
-  extraPeriodPrice,
   extraUnitRules,
   extraUnitsRuleText,
   maxExtraUnits,
@@ -2957,10 +2960,13 @@ requires_openai_auth = true`,
               (() => {
                 const tier = TIERS.find((t) => t.id === selectedTier);
                 // 这一屏的每一个数字都是服务端给的成品价。服务端只列这一档
-                // 卖的周期，周付档（只卖给加量包）本来就不在里面。
-                const options =
-                  catalog.plans.find((p) => p.id === selectedTier)?.prices ??
-                  [];
+                // 卖的周期，周付档（只卖给加量包）本来就不在里面；这一家买不了
+                // 的周期（Claude 只卖 1 个月）按 periods[].vendors 再滤掉。
+                const options = (
+                  catalog.plans.find((p) => p.id === selectedTier)?.prices ?? []
+                ).filter((p) =>
+                  periodOpenTo(catalog.periods, p.period, purchaseVendor),
+                );
                 // A tier switch can strand a weekly selection on a catalog
                 // tier that cannot buy one; fall back rather than send the
                 // server a period it will reject.
@@ -3059,13 +3065,16 @@ requires_openai_auth = true`,
             ) : intent === "extra" ? (
               // 加量包路径：两个输入（买几个单位、买多久），**没有档位卡片、
               // 没有期限折扣角标** —— 加量包不吃 6/12 个月的折扣，把订阅那边
-              // 的角标搬过来会让用户以为 12 个月的加量包也打 9 折。唯一的折扣
-              // 是商务价，它有自己的角标和说明，条件是服务端说了算。
+              // 的角标搬过来会让用户以为 12 个月的加量包也打 9 折。
               (() => {
                 const extra = extraForVendor(catalog.extra, purchaseVendor);
                 const rules = extraUnitRules(extra);
                 const units = parseExtraUnits(extraUnitsInput, rules);
-                const options = extra.prices;
+                // Claude 的加量包最长 1 个月，GPT 不限 —— 同订阅那边一样按
+                // periods[].vendors 滤。
+                const options = extra.prices.filter((p) =>
+                  periodOpenTo(catalog.periods, p.period, purchaseVendor),
+                );
                 const period =
                   options.find((p) => p.period === selectedPeriod)?.period ??
                   DEFAULT_PERIOD;
@@ -3074,17 +3083,10 @@ requires_openai_auth = true`,
                 const blocked = extraBlockedMessage(extra, purchaseVendor);
                 const noPlan =
                   extra.eligibility?.reason === "subscription_required";
-                const rate = extra.business_rate;
-                const rateQualified = Boolean(
-                  rate && extra.eligibility?.business_rate,
-                );
                 // 20 以上可选的那几档，连同 20 本身做成快捷选项：输入框里一格
-                // 一格点到 80 太累，而这几档正好是商务价的整块。
+                // 一格点到 80 太累。
                 const bulk = bulkExtraSizes(rules);
                 const quickSizes = bulk.length > 0 ? [rules.step, ...bulk] : [];
-                const rateSizes = rate
-                  ? quickSizes.filter((n) => n % rate.unit_step === 0)
-                  : [];
                 return (
                   <>
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
@@ -3174,8 +3176,7 @@ requires_openai_auth = true`,
                       {/* 额度用相对描述，不给具体金额 —— 理由同档位卡片
                           （见 planDescription）。1 单位恒等于 1× Starter，
                           所以 N 单位就是 N×，倍数是精确的。上面那行标签里的
-                          单价是**价格**不是额度，保留：用户得知道花多少钱。
-                          商务价折的只是价钱，额度照旧是 N×。 */}
+                          单价是**价格**不是额度，保留：用户得知道花多少钱。 */}
                       <div className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
                         {units
                           ? `${units} 单位 = ${units}× Starter 的用量，叠加在当前套餐之上`
@@ -3193,36 +3194,17 @@ requires_openai_auth = true`,
                         )
                       )}
                     </div>
-                    {/* 商务价说明。对所有人都说：不是 Business 的用户也该知道
-                        有这回事；是的话说清楚他这一单享不享受（要整 20 单位、
-                        按月）。周付原价也要说，不然选了周付看到原价会以为坏了。 */}
-                    {rate && rateSizes.length > 0 && (
-                      <div
-                        className={`mb-2.5 rounded-lg px-3 py-2 text-[11px] leading-relaxed ${
-                          rateQualified
-                            ? "bg-green-500/10 text-green-700 dark:text-green-300"
-                            : "bg-muted/40 text-muted-foreground"
-                        }`}
-                      >
-                        {rateQualified
-                          ? `你的 ${planLabel(rate.plan_id)} 套餐享商务价：${rateSizes.join(" / ")} 单位按月购买${businessRateLabel(rate.discount_bps)}，按周购买仍为原价`
-                          : `${planLabel(rate.plan_id)} 套餐用户按月购买 ${rateSizes.join(" / ")} 单位享商务价（${businessRateLabel(rate.discount_bps)}）`}
-                      </div>
-                    )}
                     <div className="mb-1 text-xs font-medium text-muted-foreground">
                       购买时长
                     </div>
                     <div className="flex flex-col gap-2">
-                      {/* 周期全部开放：周付的限制只作用于订阅层。每行的价格是
-                          目录里「一个单位」的成品价（商务价取 business_rate
-                          的那一份），不乘单位数 —— N 单位的实付以结账页的报价
-                          为准，客户端不算钱。 */}
+                      {/* 周付只对加量包开放，订阅层不卖。每行的价格是目录里
+                          「一个单位」的成品价，不乘单位数 —— N 单位的实付以
+                          结账页的报价为准，客户端不算钱。单位数不合法时不显示
+                          价格，免得像是在给一个买不到的数报价。 */}
                       {options.map((listPrice) => {
                         const p = findPeriod(listPrice.period);
-                        const price =
-                          units === null
-                            ? null
-                            : extraPeriodPrice(extra, units, listPrice.period);
+                        const price = units === null ? null : listPrice;
                         return (
                           <button
                             key={listPrice.period}
@@ -3237,11 +3219,6 @@ requires_openai_auth = true`,
                             <div>
                               <div className="text-sm font-semibold">
                                 {p.label}
-                                {price?.businessRate && (
-                                  <span className="ml-1.5 rounded bg-green-600 px-1 py-0.5 text-[10px] font-bold text-white">
-                                    商务价
-                                  </span>
-                                )}
                               </div>
                               {price && (
                                 <div className="text-[11px] text-muted-foreground">
@@ -3252,16 +3229,11 @@ requires_openai_auth = true`,
                             {price ? (
                               <div className="text-right">
                                 <div className="text-[15px] font-bold">
-                                  {formatMicrosUSD(price.chargeMicros)}
+                                  {formatMicrosUSD(price.charge_micros)}
                                   <span className="text-[11px] font-normal text-muted-foreground">
                                     /单位
                                   </span>
                                 </div>
-                                {price.listMicros > price.chargeMicros && (
-                                  <div className="text-[11px] text-muted-foreground line-through">
-                                    {formatMicrosUSD(price.listMicros)}/单位
-                                  </div>
-                                )}
                               </div>
                             ) : (
                               <span className="text-[11px] text-muted-foreground">

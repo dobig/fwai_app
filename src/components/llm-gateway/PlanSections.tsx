@@ -38,19 +38,24 @@ export interface PlanSectionsProps {
 //   1. title  —— admin 发这份额度时写的标题（「新春回馈」）。他既然特地写了，
 //                就比任何自动生成的描述更贴切。
 //   2. extra  —— 真加量包。1 单位恒等于 $20 = 1× Starter，倍数是精确的。
-//   3. custom —— admin 直接发放/兑换码得来的专属额度。**不给倍数**：服务端只
+//   3. 目录档 —— Starter 说它是什么；其余按这张 grant **自己的**额度算倍数，
+//                不按目录：business 从 20× 改成了 10×，改之前买的那张到期前
+//                仍是 20×，按目录说「10×」就是少说了用户买到的东西。
+//   4. custom —— admin 直接发放/兑换码得来的专属额度。**不给倍数**：服务端只
 //                要求两个窗口都 > 0，彼此没有比例约束，硬算出「1.85× Starter」
 //                既难看又不准（5h 和周可能是完全不同的倍数）。这一档返回空串,
 //                因为 planLabel("custom") 已经是「专属额度」了,再来一句同样的
 //                话就成了「专属额度 专属额度」。调用方负责跳过空串。
 function planDescription(plan: GatewaySubscriptionPlan): string {
   if (plan.title) return plan.title;
-  if (plan.tier === "extra") {
-    const n = starterMultiple(plan.usage_micros_per_5h / 1_000_000);
-    return `${formatMultiple(n)}× Starter 用量`;
-  }
+  const own = `${formatMultiple(starterMultiple(plan.usage_micros_per_5h / 1_000_000))}× Starter 用量`;
+  if (plan.tier === "extra") return own;
   const known = TIERS.find((t) => t.id === plan.tier);
-  return known ? tierDescription(known) : "";
+  if (!known) return "";
+  if (known.id === TIERS[0].id || !(plan.usage_micros_per_5h > 0)) {
+    return tierDescription(known);
+  }
+  return own;
 }
 
 // 一份额度是哪一家的。只在有套餐绑了厂商时才标：老服务端、或者手上全是绑定
@@ -145,7 +150,10 @@ export function PlanSections({
           >
             {/* Claude 和 GPT 各排各的队，得说清是哪一家到期后切换。 */}
             {showVendor && p.vendor ? `${vendorLabel(p.vendor)} ` : ""}
-            到期后自动切换到 {planLabel(p.tier)}（生效于{" "}
+            到期后自动切换到 {planLabel(p.tier)}
+            {/* 同一档也可能排队：老 business（20×）再买 business，新的
+                那期是 10×。不写倍数的话两行看起来一模一样。 */}
+            {planDescription(p) && ` · ${planDescription(p)}`}（生效于{" "}
             {formatPlanDate(p.valid_from)}）
           </div>
         ))}

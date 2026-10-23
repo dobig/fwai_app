@@ -643,6 +643,44 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     expect(screen.getByText(/到期后自动切换到 \$100/)).toBeTruthy();
   });
 
+  it("老 business（20×）按自己的额度显示，排队的新一期是 10×", async () => {
+    // business 从 20× 改成了 10×。改之前买的那张到期前仍是 20×，账户页得照
+    // 实说；再买一期是排队，新的那期按现行的 10×。
+    seedLoggedOutOfPlan();
+    const login = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
+    login.subscription = {
+      active: true,
+      tier: "business",
+      valid_until: "2099-01-01T00:00:00Z",
+      plans: [
+        {
+          grant_id: "g_old_biz",
+          tier: "business",
+          usage_micros_per_5h: 400_000_000,
+          usage_micros_per_week: 2_000_000_000,
+          valid_from: "2026-07-01T00:00:00Z",
+          valid_until: "2026-07-31T00:00:00Z",
+        },
+        {
+          grant_id: "g_new_biz",
+          tier: "business",
+          usage_micros_per_5h: 200_000_000,
+          usage_micros_per_week: 1_000_000_000,
+          valid_from: "2026-07-31T00:00:00Z",
+          valid_until: "2026-08-30T00:00:00Z",
+          pending: true,
+        },
+      ],
+    };
+    localStorage.setItem(LOGIN_KEY, JSON.stringify(login));
+    renderDock();
+
+    expect(await screen.findByText("20× Starter 用量")).toBeTruthy();
+    expect(
+      screen.getByText(/到期后自动切换到 \$200 · 10× Starter 用量/),
+    ).toBeTruthy();
+  });
+
   it("换档路径下单不带 as_extra", async () => {
     seedStackedPlans();
     vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
@@ -908,6 +946,23 @@ describe("LlmGatewaySubscriptionDock 换档结账页", () => {
       await screen.findByText(`当前套餐到期后（${queueTail}）自动切换到 $20`),
     ).toBeTruthy();
     expect(screen.queryByText(new RegExp(`${liveEnd}.*自动切换`))).toBeNull();
+  });
+
+  it("同一档排队（老 business 再买）：说清当前这期不变、新的一期按现行额度", async () => {
+    await openCheckout({
+      action: "queue",
+      amount_due_micros: 200_000_000,
+      new_valid_from: "2099-01-01T00:00:00Z",
+      new_valid_until: "2099-01-31T00:00:00Z",
+      current_tier: "business",
+      target_tier: "business",
+    });
+
+    expect(
+      await screen.findByText(
+        `当前套餐按原额度用到到期（${formatPlanDate("2099-01-01T00:00:00Z")}），之后开始新的一期 $200（10× Starter 用量）`,
+      ),
+    ).toBeTruthy();
   });
 
   it("老服务端不发 new_valid_from 时退回当前档到期日", async () => {
@@ -2149,8 +2204,8 @@ describe("LlmGatewaySubscriptionDock 购买屏价格来自服务端", () => {
 });
 
 // llm_gateway#325 起加量包的新规则：必须有生效的付费套餐（赠送额度不算）、
-// 最多同时持有 2 个、20 以上只能买 40/60/80、Business 用户按月买 20 的整数倍
-// 半价。规则全在服务端，客户端读 GET /v1/plans 的 extra 块来显示；这些 case
+// 最多同时持有 2 个、20 以上只能买 40/60/80（Business 半价后来取消了，一律
+// 原价）。规则全在服务端，客户端读 GET /v1/plans 的 extra 块来显示；这些 case
 // 盯的是「读到了就照着显示」和「被拒了能看懂」。
 describe("LlmGatewaySubscriptionDock 加量包规则", () => {
   // 一个单位的价：charge / list / 每月或每周折算。
@@ -2185,25 +2240,12 @@ describe("LlmGatewaySubscriptionDock 加量包规则", () => {
         bulk_step_units: 20,
         requires_plan: true,
         max_concurrent_paid_packs: 2,
-        business_rate: {
-          plan_id: "business",
-          discount_bps: 5000,
-          unit_step: 20,
-          month_periods_only: true,
-          prices: [
-            price("1m", 10, 20),
-            price("3m", 30, 60),
-            price("6m", 60, 120),
-            price("12m", 120, 240),
-          ],
-        },
         eligibility,
       },
     });
   }
   const canBuy = {
     plan_in_force: true,
-    business_rate: false,
     active_paid_packs: 0,
     can_buy: true,
   };
@@ -2219,49 +2261,22 @@ describe("LlmGatewaySubscriptionDock 加量包规则", () => {
     return await screen.findByRole("spinbutton");
   }
 
-  it("Business 用户选 20 单位按月：显示商务价（半价），按周仍原价", async () => {
-    mockCatalog({ ...canBuy, business_rate: true });
-    const input = await openExtra();
-    await userEvent.click(await screen.findByRole("button", { name: "20" }));
-    expect(input).toHaveValue(20);
-
-    expect(
-      await screen.findByText(
-        /你的 \$200 套餐享商务价：20 \/ 40 \/ 60 \/ 80 单位按月购买半价/,
-      ),
-    ).toBeTruthy();
-    // 1 个月：每单位商务价 $10，划掉的原价 $20。照搬目录，不乘单位数 ——
-    // 20 单位的实付以结账页的报价为准。
-    const month = screen.getByText("1 个月").closest("button")!;
-    expect(month.textContent).toContain("商务价");
-    expect(month.textContent).toContain("$10/单位");
-    expect(month.textContent).toContain("$20/单位");
-    expect(month.textContent).not.toContain("$200");
-    // 1 周：原价每单位 $5，没有角标。
-    const week = screen.getByText("1 周").closest("button")!;
-    expect(week.textContent).not.toContain("商务价");
-    expect(week.textContent).toContain("$5/单位");
-  });
-
-  it("非 Business 用户：同样 20 单位按月是原价，只给一句说明", async () => {
+  it("20 单位按月：每单位原价，没有商务价", async () => {
     mockCatalog(canBuy);
     await openExtra();
     await userEvent.click(await screen.findByRole("button", { name: "20" }));
-    expect(
-      await screen.findByText(
-        /\$200 套餐用户按月购买 20 \/ 40 \/ 60 \/ 80 单位享商务价/,
-      ),
-    ).toBeTruthy();
+    // 照搬目录里一个单位的价，不乘单位数 —— 20 单位的实付以结账页的报价为准。
     const month = screen.getByText("1 个月").closest("button")!;
-    expect(month.textContent).not.toContain("商务价");
     expect(month.textContent).toContain("$20/单位");
-    expect(month.textContent).not.toContain("$10/单位");
+    expect(month.textContent).not.toContain("$400");
+    expect(screen.queryByText(/商务价/)).toBeNull();
+    const week = screen.getByText("1 周").closest("button")!;
+    expect(week.textContent).toContain("$5/单位");
   });
 
   it("没有付费套餐：置灰并说明赠送额度不算，可以直接去订阅", async () => {
     mockCatalog({
       plan_in_force: false,
-      business_rate: false,
       active_paid_packs: 0,
       can_buy: false,
       reason: "subscription_required",
@@ -2280,7 +2295,6 @@ describe("LlmGatewaySubscriptionDock 加量包规则", () => {
   it("已持有 2 个加量包：置灰并说明上限", async () => {
     mockCatalog({
       plan_in_force: true,
-      business_rate: false,
       active_paid_packs: 2,
       can_buy: false,
       reason: "extra_pack_limit",
@@ -3205,26 +3219,28 @@ describe("LlmGatewaySubscriptionDock 按厂商购买", () => {
   const VENDOR_CATALOG: gateway.GatewayPlanCatalog = {
     ...CATALOG,
     vendors: ["claude", "openai"],
+    // Claude 最长一个月（套餐只有 1 个月，加量包 1–3 周或 1 个月），GPT 不限。
+    periods: CATALOG.periods.map((p) => ({
+      ...p,
+      vendors: p.days <= 30 ? ["claude", "openai"] : ["openai"],
+    })),
     extra: {
       ...CATALOG.extra,
       requires_plan: true,
       // 老字段是 Claude 那一份，按厂商挑之后不该再被读到。
       eligibility: {
         plan_in_force: true,
-        business_rate: false,
         active_paid_packs: 0,
         can_buy: true,
       },
       eligibility_by_vendor: {
         claude: {
           plan_in_force: true,
-          business_rate: false,
           active_paid_packs: 0,
           can_buy: true,
         },
         openai: {
           plan_in_force: false,
-          business_rate: false,
           active_paid_packs: 0,
           can_buy: false,
           reason: "subscription_required",
@@ -3311,6 +3327,36 @@ describe("LlmGatewaySubscriptionDock 按厂商购买", () => {
     await waitFor(() => expect(createOrder).toHaveBeenCalled());
     expect(createOrder.mock.calls[0][5]).toBe("openai");
     expect(await screen.findByText(/GPT \$100 套餐/)).toBeTruthy();
+  });
+
+  it("Claude 套餐只卖 1 个月，GPT 照旧能选多月", async () => {
+    seedClaudeOnly();
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("Claude"));
+    await userEvent.click(await screen.findByText("$100"));
+    expect(await screen.findByText("1 个月")).toBeTruthy();
+    expect(screen.queryByText("3 个月")).toBeNull();
+    expect(screen.queryByText("12 个月")).toBeNull();
+
+    await userEvent.click(screen.getByText("返回"));
+    await userEvent.click(screen.getByText("返回"));
+    await userEvent.click(await screen.findByText("GPT"));
+    await userEvent.click(await screen.findByText("$100"));
+    expect(await screen.findByText("12 个月")).toBeTruthy();
+  });
+
+  it("Claude 加量包最长 1 个月，周包保留", async () => {
+    seedClaudeOnly();
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("Claude"));
+    await userEvent.click(await screen.findByText("购买加量包"));
+    expect(await screen.findByText("1 周")).toBeTruthy();
+    expect(screen.getByText("3 周")).toBeTruthy();
+    expect(screen.getByText("1 个月")).toBeTruthy();
+    expect(screen.queryByText("3 个月")).toBeNull();
+    expect(screen.queryByText("12 个月")).toBeNull();
   });
 
   it("选了 Claude 时意图卡片按 Claude 那份档位说「更换 / 续费」", async () => {

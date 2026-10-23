@@ -6,8 +6,8 @@
 
 // Plans mirror the gateway seed SKUs, named by their monthly price. **价格本身
 // 不在这里** —— 档位卡片上的金额取 GET /v1/plans 的 price_usd_micros。The 5h /
-// weekly quota windows shown here mirror the server derivation (default 1×/5×
-// of price; business overrides with 2×/10×) — the server stays authoritative.
+// weekly quota windows shown here mirror the server derivation (1×/5× of
+// price for every tier) — the server stays authoritative.
 //
 // **这两个额度字段永远不直接显示给用户。** 它们只用来推导「N× Starter」这样的
 // 相对描述（见 tierBlurb / extraUnitsBlurb）。用户不需要知道我们的窗口是多少
@@ -35,14 +35,15 @@ export const TIERS: PlanTier[] = [
   {
     id: "business",
     label: "$200",
-    usage5hUSD: 400,
-    usageWeekUSD: 2000,
+    usage5hUSD: 200,
+    usageWeekUSD: 1000,
   },
 ];
 
 // 一份额度是 Starter 的几倍。倍数是**精确**的而非近似：starter 是 5h $20 /
-// 周 $100，pro 两项各 5×，business 因为服务端给了 2×/10× 系数而是 20×，
-// 加量包 1 单位 = $20/月 = 恰好 1×。两个窗口的倍数一致，所以取 5h 的即可。
+// 周 $100，pro 两项各 5×，business 10×，加量包 1 单位 = $20/月 = 恰好 1×。
+// 两个窗口的倍数一致，所以取 5h 的即可。（business 曾经是 20×，那时买的
+// 套餐到期前仍是 20×，账号屏按 grant 自己的额度显示，见 PlanSections。）
 //
 // 从字段推导而不是写死字符串：以后调价改系数，文案自动跟随。
 export function starterMultiple(usage5hUSD: number): number {
@@ -64,7 +65,7 @@ export function tierDescription(tier: PlanTier): string {
   return tierBlurb(tier);
 }
 
-// 倍数取整显示。目录三档都是整数倍（5×/20×），小数分支给两种情况兜底：将来
+// 倍数取整显示。目录三档都是整数倍（5×/10×），小数分支给两种情况兜底：将来
 // 调系数，以及账户页把 admin 发的任意额度也加进总和时（那个和几乎必然不是整数）。
 export function formatMultiple(n: number): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(1);

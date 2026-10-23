@@ -584,17 +584,9 @@ export interface GatewayCatalogPeriod {
   // 只用来画「9折」角标，不拿来算价。
   discount_bps: number;
   extra_only: boolean;
-}
-
-// 加量包的商务价：Business 套餐生效中、单位数是 unit_step 的整数倍、按月买，
-// 实付按 discount_bps 打折（5000 = 半价）。额度不变 —— 折的只是价钱。
-// prices 只列按月的周期，周付不在其中（周付永远原价）。
-export interface GatewayExtraBusinessRate {
-  plan_id: string;
-  discount_bps: number;
-  unit_step: number;
-  month_periods_only: boolean;
-  prices: GatewayPeriodPrice[];
+  // 能买这个周期的厂商，套餐和加量包都算。Claude 最长一个月，GPT 不限。
+  // 老服务端不发 —— 那边所有周期对所有厂商开放。读的时候走 periodOpenTo()。
+  vendors?: string[];
 }
 
 // 这个用户此刻能不能买加量包。**只是提示**：报价和下单两个端点会重新校验一切，
@@ -604,14 +596,13 @@ export interface GatewayExtraBusinessRate {
 // 赠送额度不算）或 extra_pack_limit（加量包已到同时持有上限）。
 export interface GatewayExtraEligibility {
   plan_in_force: boolean;
-  business_rate: boolean;
   active_paid_packs: number;
   can_buy: boolean;
   reason?: "subscription_required" | "extra_pack_limit" | string;
 }
 
-// 目录里的加量包 SKU。prices 之后的字段是加商务价时一起加的，老网关不发，
-// 所以全部可选；缺省时客户端退回老规则（1–max_units 任选、无前置、无商务价）。
+// 目录里的加量包 SKU。prices 之后的字段老网关不发，所以全部可选；缺省时客户端
+// 退回老规则（1–max_units 任选、无前置条件）。
 // prices 是**一个单位**的各周期价格，N 单位的实付以结账页的 quote 为准。
 export interface GatewayExtraCatalog {
   unit_price_micros: number;
@@ -622,7 +613,6 @@ export interface GatewayExtraCatalog {
   bulk_step_units?: number;
   requires_plan?: boolean;
   max_concurrent_paid_packs?: number;
-  business_rate?: GatewayExtraBusinessRate;
   // 只在已登录的 GET /v1/plans 上有；服务端读买家状态失败时也会省略。
   // 按厂商卖之后它只是 Claude 那一份，给不认识厂商的老客户端用。
   eligibility?: GatewayExtraEligibility;

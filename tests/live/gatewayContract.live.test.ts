@@ -118,7 +118,7 @@ describe(`live gateway contract (${BASE})`, () => {
     const afterUpgrade = await settle("business");
     // 原地改写：grant_id 不变，否则周窗口和 5h 块被白送一次重置。
     expect((await plans())[0].grant_id).toBe(grantId);
-    expect(afterUpgrade.subscription.usage_micros_per_5h).toBe(400_000_000);
+    expect(afterUpgrade.subscription.usage_micros_per_5h).toBe(200_000_000);
 
     // 3) 找零进余额，且能用于下一笔购买。
     const bal = await fetchGatewayBalance();

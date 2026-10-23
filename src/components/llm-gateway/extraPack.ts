@@ -1,11 +1,10 @@
 // 加量包的购买规则：能买多大、能不能买、按哪个价显示。纯函数，没有状态。
 //
 // 规则全部来自服务端目录（GET /v1/plans 的 extra 块），这里只是读它。字段缺
-// 失（老网关）时退回老规则：1–max_units 任选、没有前置条件、没有商务价。
+// 失（老网关）时退回老规则：1–max_units 任选、没有前置条件。
 //
 // 这里**没有任何金额计算**。周期行上显示的是服务端给的「一个单位多少钱」
-// 原样照搬（商务价取 business_rate 的那一份），不乘单位数、不打折。N 单位的
-// 实付以结账页的报价为准。
+// 原样照搬，不乘单位数、不打折。N 单位的实付以结账页的报价为准。
 
 import type {
   GatewayExtraCatalog,
@@ -139,7 +138,7 @@ export function extraUnitsRuleText(rules: ExtraUnitRules): string {
 /**
  * 买某一家的加量包时该看的那份目录：eligibility 换成这一家的。
  *
- * 加量包按厂商卖，能不能买、享不享商务价都要看同一家（或未绑定）的生效套餐，
+ * 加量包按厂商卖，能不能买要看同一家（或未绑定）的生效套餐，
  * 所以下面这些函数读到的 eligibility 必须先按厂商挑好。没有 vendor（老服务端，
  * 目录不列厂商）或目录没有 eligibility_by_vendor 时原样返回 —— 那边只有一份。
  * 有 eligibility_by_vendor 却没有这一家，就当「不知道」，不拿 Claude 那份顶替。
@@ -198,61 +197,4 @@ export function extraErrorMessage(
       return `加量包单位数不可用：${extraUnitsRuleText(extraUnitRules(extra))}`;
   }
   return null;
-}
-
-// --- 价格 --------------------------------------------------------------------
-
-export interface ExtraPeriodPrice {
-  /** **一个单位**、这个周期的实付（micro-USD），服务端原值。 */
-  chargeMicros: number;
-  /** 同一个单位按原价是多少。商务价时比 chargeMicros 高。 */
-  listMicros: number;
-  businessRate: boolean;
-}
-
-/**
- * N 个单位时，某个周期每单位的显示价。单位数只决定用不用商务价，不参与
- * 乘法。商务价只在三件事同时成立时用：服务端说这个
- * 用户享受（eligibility.business_rate）、单位数是 unit_step 的整数倍、这个
- * 周期出现在 business_rate.prices 里（服务端只列按月的周期）。
- *
- * 拿不到目录、或目录里没有这个周期，返回 null —— 那就不显示价格，和老版本
- * 一样等结账页的报价。
- */
-export function extraPeriodPrice(
-  extra: GatewayExtraCatalog | null | undefined,
-  units: number,
-  periodKey: string,
-): ExtraPeriodPrice | null {
-  if (!extra || !Number.isInteger(units) || units < 1) return null;
-  const rate = extra.business_rate;
-  if (
-    rate &&
-    extra.eligibility?.business_rate &&
-    rate.unit_step > 0 &&
-    units % rate.unit_step === 0
-  ) {
-    const p = rate.prices?.find((x) => x.period === periodKey);
-    if (p) {
-      return {
-        chargeMicros: p.charge_micros,
-        listMicros: p.list_micros,
-        businessRate: true,
-      };
-    }
-  }
-  const list = extra.prices?.find((x) => x.period === periodKey);
-  if (!list) return null;
-  return {
-    chargeMicros: list.charge_micros,
-    listMicros: list.list_micros,
-    businessRate: false,
-  };
-}
-
-/** discount_bps → 角标文案。5000 是「半价」，其他按「X折」。 */
-export function businessRateLabel(discountBps: number): string {
-  if (discountBps === 5000) return "半价";
-  const tenths = discountBps / 1000;
-  return `${Number.isInteger(tenths) ? tenths : tenths.toFixed(1)}折`;
 }

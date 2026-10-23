@@ -1,11 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   bulkExtraSizes,
-  businessRateLabel,
   extraBlockedMessage,
   extraErrorMessage,
   extraForVendor,
-  extraPeriodPrice,
   extraUnitRules,
   extraUnitsRuleText,
   isValidExtraUnits,
@@ -17,8 +15,7 @@ import {
 } from "@/components/llm-gateway/extraPack";
 import type { GatewayExtraCatalog } from "@/lib/api/llm-gateway";
 
-// 服务端目录 extra 块的样本，数字取自 llm_gateway 的 pricesFor /
-// businessRatePrices：1 单位 $20/月，商务价半价、只列按月的周期。
+// 服务端目录 extra 块的样本，数字取自 llm_gateway 的 pricesFor：1 单位 $20/月。
 const M = 1_000_000;
 function price(period: string, charge: number, list = charge) {
   return {
@@ -48,21 +45,8 @@ function catalog(
     bulk_step_units: 20,
     requires_plan: true,
     max_concurrent_paid_packs: 2,
-    business_rate: {
-      plan_id: "business",
-      discount_bps: 5000,
-      unit_step: 20,
-      month_periods_only: true,
-      prices: [
-        price("1m", 10, 20),
-        price("3m", 30, 60),
-        price("6m", 60, 120),
-        price("12m", 120, 240),
-      ],
-    },
     eligibility: {
       plan_in_force: true,
-      business_rate: false,
       active_paid_packs: 0,
       can_buy: true,
     },
@@ -152,7 +136,6 @@ describe("加量包能不能买", () => {
       catalog({
         eligibility: {
           plan_in_force: false,
-          business_rate: false,
           active_paid_packs: 0,
           can_buy: false,
           reason: "subscription_required",
@@ -167,7 +150,6 @@ describe("加量包能不能买", () => {
       catalog({
         eligibility: {
           plan_in_force: true,
-          business_rate: false,
           active_paid_packs: 2,
           can_buy: false,
           reason: "extra_pack_limit",
@@ -190,11 +172,10 @@ describe("加量包能不能买", () => {
   });
 });
 
-// 按厂商卖之后，能不能买、享不享商务价都看同一家的那一份 eligibility。
+// 按厂商卖之后，能不能买看同一家的那一份 eligibility。
 describe("按厂商挑加量包的 eligibility", () => {
   const gptNoPlan = {
     plan_in_force: false,
-    business_rate: false,
     active_paid_packs: 0,
     can_buy: false,
     reason: "subscription_required",
@@ -225,56 +206,5 @@ describe("按厂商挑加量包的 eligibility", () => {
     expect(
       extraBlockedMessage(extraForVendor(byVendor, "openai"), "openai"),
     ).toBe("需要先订阅 GPT 套餐才能购买 GPT 加量包（赠送额度不算）");
-  });
-});
-
-describe("加量包显示价", () => {
-  const business = catalog({
-    eligibility: {
-      plan_in_force: true,
-      business_rate: true,
-      active_paid_packs: 0,
-      can_buy: true,
-    },
-  });
-
-  it("Business 用户、20 的整数倍、按月：取商务价，不乘单位数", () => {
-    expect(extraPeriodPrice(business, 20, "1m")).toEqual({
-      chargeMicros: 10 * M,
-      listMicros: 20 * M,
-      businessRate: true,
-    });
-    expect(extraPeriodPrice(business, 40, "12m")).toEqual({
-      chargeMicros: 120 * M,
-      listMicros: 240 * M,
-      businessRate: true,
-    });
-  });
-
-  it("按周、或不是 20 的整数倍：原价", () => {
-    expect(extraPeriodPrice(business, 20, "1w")).toEqual({
-      chargeMicros: 5 * M,
-      listMicros: 5 * M,
-      businessRate: false,
-    });
-    expect(extraPeriodPrice(business, 19, "1m")).toEqual({
-      chargeMicros: 20 * M,
-      listMicros: 20 * M,
-      businessRate: false,
-    });
-  });
-
-  it("不是 Business：原价", () => {
-    expect(extraPeriodPrice(catalog(), 20, "1m")?.businessRate).toBe(false);
-    expect(extraPeriodPrice(catalog(), 20, "1m")?.chargeMicros).toBe(20 * M);
-  });
-
-  it("没有目录：不显示价格", () => {
-    expect(extraPeriodPrice(null, 20, "1m")).toBeNull();
-  });
-
-  it("折扣角标", () => {
-    expect(businessRateLabel(5000)).toBe("半价");
-    expect(businessRateLabel(8000)).toBe("8折");
   });
 });
