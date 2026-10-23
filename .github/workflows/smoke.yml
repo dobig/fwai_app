@@ -1,0 +1,56 @@
+name: smoke
+
+# Builds the app on macOS, launches it, and fails if it isn't idle when left
+# alone (scripts/ci/macos-idle-smoke.sh). Kept out of ci.yml so that one stays
+# a couple of minutes: this needs a real Rust build and a real window server.
+#
+# It exists because the bugs it catches are invisible everywhere else. v1.9.0
+# shipped a resize → isMaximized → resize loop that only happens against
+# AppKit with the simple-mode (non-resizable, overlay title bar) window: jsdom
+# never sees it, `cargo test` never sees it, and on a dev machine it looks like
+# "the app is a bit sluggish today". Here it reads 100% CPU on an idle app.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-idle:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install the Rust toolchain
+        run: rustup show # rust-toolchain.toml pins the channel + components
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: macos-smoke
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build the app
+        # Debug + no bundle: no signing or updater key needed, and the binary
+        # still embeds the built frontend exactly like a release does.
+        run: pnpm tauri build --debug --no-bundle
+
+      - name: Leave it idle and check it stays idle
+        run: |
+          sw_vers
+          ./scripts/ci/macos-idle-smoke.sh src-tauri/target/debug/fwai_app

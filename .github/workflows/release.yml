@@ -118,6 +118,14 @@ jobs:
         # user's machine.
         run: ./scripts/build-macos-release.sh
 
+      - name: Leave the signed app idle and check it stays idle
+        # The exact binary users will run (the runner is arm64), checked before
+        # anything is uploaded: an app that pegs a core when left alone must not
+        # reach the draft. Same check smoke.yml runs on every PR.
+        run: |
+          sw_vers
+          ./scripts/ci/macos-idle-smoke.sh src-tauri/target/aarch64-apple-darwin/release/bundle/macos/fwai_app.app
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
