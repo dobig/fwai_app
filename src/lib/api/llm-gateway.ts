@@ -53,7 +53,7 @@ export interface GatewaySubscriptionPlan {
   // admin 发放/兑换码签发时填的用户可见标题（如「新春回馈」）。自助购买的
   // grant 永远没有，老服务端也不返回 —— 服务端用 omitempty，所以这里是可选。
   // 只有额外额度（role=extra）会有：订阅层那一行没有放标题的位置。
-  // 有值时顶替额度描述，没有则回落到按 tier 推导的描述（见 planDescription）。
+  // 服务端算 description 时已经把它考虑进去了，客户端不再自己读。
   title?: string;
   usage_micros_per_5h: number;
   usage_micros_per_week: number;
@@ -66,6 +66,14 @@ export interface GatewaySubscriptionPlan {
   // 这份额度绑定的厂商。缺省（omitempty）是绑定之前买的，两家的模型都能用；
   // 老服务端也不返回。
   vendor?: string;
+  // 以下是服务端写好的展示文案（见网关 CONTRACT「Display copy」）。规则一变
+  // 文案就跟着变，所以不在客户端拼：
+  //   label         档位名（「$200」「加量包」「专属额度」）
+  //   description   额度描述，按这张 grant **自己的**额度算（「20× Starter 用量」）
+  //   pending_text  排队中的订阅层那一整句，日期是 {valid_from} 占位符
+  label?: string;
+  description?: string;
+  pending_text?: string;
 }
 
 // 缺失的 role 按 subscription 处理：老服务端下所有套餐都落在「我的套餐」块里，
@@ -86,6 +94,8 @@ export interface GatewaySubscriptionStatus {
   valid_until?: string;
   // 老版本服务端不返回这个字段，所以可能是 undefined。
   plans?: GatewaySubscriptionPlan[];
+  // 「总用量 15× Starter（含额外额度）」，服务端写好的整句。
+  usage_text?: string;
 }
 
 export interface GatewayLoginResult extends GatewayTokens {
@@ -572,14 +582,23 @@ export interface GatewayPeriodPrice {
 
 export interface GatewayCatalogPlan {
   id: string;
+  // 档位名，就是月价（「$200」）。
   name: string;
   price_usd_micros: number;
   // 这一档卖的周期，按服务端顺序。不含只卖给加量包的周付档。
   prices: GatewayPeriodPrice[];
+  // 服务端写好的展示文案：档位卡片下那行小字（「5× Starter 用量」）、选周期
+  // 那一屏的说明（「Starter · 适合大部分普通用户」）、卡片角标（「最受欢迎」，
+  // 没有就是空串）。
+  blurb?: string;
+  description?: string;
+  badge?: string;
 }
 
 export interface GatewayCatalogPeriod {
   key: string;
+  // 「1 周」「1 个月」。
+  label?: string;
   days: number;
   // 只用来画「9折」角标，不拿来算价。
   discount_bps: number;
@@ -613,6 +632,10 @@ export interface GatewayExtraCatalog {
   bulk_step_units?: number;
   requires_plan?: boolean;
   max_concurrent_paid_packs?: number;
+  // 单位数规则的一句话（「可选 1–20，或 40、60、80」），和单位数选好之后
+  // 那一行（「{units} 单位 = {units}× Starter 的用量…」，{units} 由客户端填）。
+  units_rule_text?: string;
+  units_text?: string;
   // 只在已登录的 GET /v1/plans 上有；服务端读买家状态失败时也会省略。
   // 按厂商卖之后它只是 Claude 那一份，给不认识厂商的老客户端用。
   eligibility?: GatewayExtraEligibility;
@@ -628,6 +651,33 @@ export interface GatewayPlanCatalog {
   // 能买的厂商，按购买屏的顺序。报价和下单必须带其中一个，否则 400
   // vendor_required。老服务端不发 —— 那边没有厂商这回事，请求体里也不带。
   vendors?: string[];
+  // 每一家叫什么、额度给哪些 app 用。购买流程里的厂商名一律取这里。
+  vendor_details?: GatewayVendorDetail[];
+  // 购买屏上陈述规则的那些句子，服务端按当前登录用户写好。
+  copy?: GatewayPurchaseCopy;
+}
+
+export interface GatewayVendorDetail {
+  id: string;
+  label: string;
+  blurb: string;
+}
+
+export interface GatewayPurchaseCopy {
+  // 选厂商那一步下面的说明。
+  vendor_note?: string;
+  // 加量包怎么生效（加量包页标题、二维码页）。
+  extra_effect?: string;
+  // 按厂商、按这个用户此刻的状态写的意图卡片文案。extra_blocked 非空表示
+  // 这一家的加量包现在买不了，内容就是原因。
+  by_vendor?: Record<string, GatewayVendorPurchaseCopy>;
+}
+
+export interface GatewayVendorPurchaseCopy {
+  subscription_title?: string;
+  subscription_hint?: string;
+  extra_hint?: string;
+  extra_blocked?: string;
 }
 
 // fetchPlanCatalog 读购买屏要显示的全部价格。老网关的 /v1/plans 没有 prices /
@@ -704,6 +754,18 @@ export interface GatewayPlanQuote {
   resulting_balance_micros: number; // 换档后账户余额
   current_tier: string;
   target_tier: string;
+  // 服务端写好的结账页文案。日期是占位符（{new_valid_from} / {new_valid_until}），
+  // 客户端按本地时区填，见 fillServerText。
+  //   headline   结账页主文案：这一单会发生什么
+  //   summary    一句话说买的是什么（「换档到 Claude $200」），二维码页和零元单
+  //              成功页用
+  //   notice     需要醒目提示的风险（排队不退款），没有就是空串
+  //   confirm_*  需要二次确认时的弹窗标题和正文，不需要时为空
+  headline?: string;
+  summary?: string;
+  notice?: string;
+  confirm_title?: string;
+  confirm_message?: string;
 }
 
 // fetchPlanQuote 问服务端「现在下这一单会发生什么」。**纯只读** —— 不建订单、
@@ -750,10 +812,12 @@ export interface GatewayPlanOrder extends Omit<GatewayNativeOrder, "code_url"> {
   amount_due_micros?: number;
   new_valid_until?: string;
   resulting_balance_micros?: number;
+  // 零元单带着报价的文案快照，语义同 GatewayPlanQuote.summary。
+  summary?: string;
 }
 
 // createPlanOrder opens a WeChat Native order for a plan bought for one
-// `period` (see PERIODS). The gateway computes the price authoritatively and,
+// `period` (a key from the catalog's periods). The gateway computes the price authoritatively and,
 // on the verified paid callback, grants the period's days.
 //
 // units 只在 asExtra 时有意义：加量包买几个单位。目录三档（starter/pro/

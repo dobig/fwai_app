@@ -138,15 +138,9 @@ describe(`plan epic 联调 (${BASE})`, () => {
     // （队列非空时续费会吸收它，那时抵扣不为 0 —— 见 #199。）
     expect(q.credit_applied_micros).toBe(0);
 
-    // 客户端这一侧：actionHeadline 的 switch 没有 default，漏 case 是编译错误，
-    // 但「编译过了」不等于「文案对」。断言用户读到的那句话。
-    render(
-      <PlanCheckout
-        quote={q}
-        currentValidUntil={before.valid_until}
-        onConfirm={() => {}}
-      />,
-    );
+    // 客户端这一侧：主文案是服务端写进报价的 headline，客户端原样显示。
+    // 断言用户读到的那句话。
+    render(<PlanCheckout quote={q} onConfirm={() => {}} />);
     expect(screen.getByText(/续费/)).toBeTruthy();
     expect(screen.queryByText(/到期后.*自动切换/)).toBeNull();
   });

@@ -6,82 +6,36 @@
 // 解法就是在付款前把抵扣额、新到期日、剩余余额、实付金额四个数字**同时**
 // 摆出来。所以这四个数字不折叠、不藏进「详情」。
 //
-// 这里**不做任何金额计算**，四个数字全部来自服务端 quote。
+// 这里**不做任何金额计算**，四个数字全部来自服务端 quote；主文案和风险提示
+// 也是 quote 里服务端写好的句子。
 
 import { AlertTriangle, Loader2 } from "lucide-react";
 import type { GatewayPlanQuote } from "@/lib/api/llm-gateway";
-import {
-  formatMicrosUSD,
-  formatPlanDate,
-  planLabel,
-  TIERS,
-  tierBlurb,
-  vendorLabel,
-} from "./planCatalog";
+import { fillServerText, formatMicrosUSD, formatPlanDate } from "./planCatalog";
 
 interface PlanCheckoutProps {
   quote: GatewayPlanQuote;
-  /** 当前生效订阅的到期日，用于 queue 文案里的「什么时候切换」。 */
-  currentValidUntil?: string;
-  /** 这一单买给哪一家。老服务端不分厂商时不传。 */
-  vendor?: string;
+  /** 这一单买给哪一家的显示名。老服务端不分厂商时不传。 */
+  vendorName?: string;
   busy?: boolean;
   onConfirm: () => void;
 }
 
-/** 主文案。排队与否、立即与否，全部由服务端的 action 决定。 */
-function actionHeadline(
-  quote: GatewayPlanQuote,
-  currentValidUntil?: string,
-): string {
-  switch (quote.action) {
-    case "upgrade_now":
-      // 只说金额，不说「剩余 X 天」—— 天数得从抵扣额反推，和服务端的取整
-      // 规则对不上时反而制造客诉。说「剩余价值」而不是「剩余时长」：这笔抵扣
-      // 里还可能含着一个已付费但没开始的排队档，那部分和时长无关。
-      return `立即升级到 ${planLabel(quote.target_tier)}，旧套餐剩余价值已折算抵扣 ${formatMicrosUSD(quote.credit_applied_micros)}`;
-    case "renew": {
-      // 续费本身不作废任何时长，抵扣通常是 0，说「抵扣 $0」只会让用户以为亏了。
-      // 但用户排了一个降档又回头续费时不是 0：那张排队单会被全额折进来。
-      const head = `续费 ${planLabel(quote.target_tier)}，有效期延长至 ${formatPlanDate(quote.new_valid_until)}`;
-      return quote.credit_applied_micros > 0
-        ? `${head}，已排队套餐的费用折算抵扣 ${formatMicrosUSD(quote.credit_applied_micros)}`
-        : head;
-    }
-    case "queue": {
-      // 优先用服务端算好的生效日。currentValidUntil 是老服务端（不发
-      // new_valid_from）的兜底，它取的是**当前生效档**的到期日 —— 服务端现在排
-      // 的正是这个日子（排队单会被替换而不是串在后面），两者一致。
-      const when = formatPlanDate(quote.new_valid_from ?? currentValidUntil);
-      const whenText = when ? `（${when}）` : "";
-      // 买的就是手上这一档却排队，只有一种情况：手上那张是按旧额度买的
-      // （business 曾是 20×，现在是 10×）。得说清当前这期不受影响、新的
-      // 一期是现行额度，否则用户会以为续费变成了降档。
-      const tier = TIERS.find((t) => t.id === quote.target_tier);
-      const head =
-        quote.current_tier === quote.target_tier && tier
-          ? `当前套餐按原额度用到到期${whenText}，之后开始新的一期 ${planLabel(quote.target_tier)}（${tierBlurb(tier)}）`
-          : `当前套餐到期后${whenText}自动切换到 ${planLabel(quote.target_tier)}`;
-      // 抵扣在降档里通常是 0，但用户改主意时不是：上一个排队单已付的钱会全额
-      // 折进来。不说这一句，用户看到「实付 $0」会以为下错了单。
-      return quote.credit_applied_micros > 0
-        ? `${head}，已排队套餐的费用折算抵扣 ${formatMicrosUSD(quote.credit_applied_micros)}`
-        : head;
-    }
-    case "activate_now":
-      return `立即生效：${planLabel(quote.target_tier)}`;
-    case "extra":
-      return "加量包立即生效，与当前套餐额度叠加";
-  }
-}
-
 export function PlanCheckout({
   quote,
-  currentValidUntil,
-  vendor,
+  vendorName,
   busy,
   onConfirm,
 }: PlanCheckoutProps) {
+  // 主文案和风险提示都是服务端按 action 写好的：升档抵扣多少、续费延到哪天、
+  // 排队什么时候切换、同一档为什么排队……这些说法每一条都对应一条规则，规则
+  // 改了文案就得改，所以不在客户端拼。日期是占位符，按本地时区填。
+  const dates = {
+    new_valid_from: formatPlanDate(quote.new_valid_from),
+    new_valid_until: formatPlanDate(quote.new_valid_until),
+  };
+  const headline = fillServerText(quote.headline, dates);
+  const notice = fillServerText(quote.notice, dates);
   // 两笔抵扣分两行，因为它们是两回事：套餐折抵是这次换档现算出来的（旧档剩余
   // 价值 + 被吸收的排队档），余额抵扣花的是账户里本来就有的钱。这一行原先只有
   // 一个「余额抵扣」，读的却是 credit_applied_micros —— 于是升档时几百刀的套餐
@@ -125,13 +79,15 @@ export function PlanCheckout({
         确认订单
         {/* 付款前最后一次说清买的是哪一家 —— 换档、续费都只作用于这一家，
             另一家的套餐不受影响。 */}
-        {vendor && ` · ${vendorLabel(vendor)}`}
+        {vendorName && ` · ${vendorName}`}
       </div>
       <div className="rounded-xl border-[1.5px] border-border px-3 py-2.5 text-[11px] leading-relaxed">
-        <div className="text-xs font-semibold leading-relaxed">
-          {actionHeadline(quote, currentValidUntil)}
-        </div>
-        <div className="mt-2 space-y-1">
+        {headline && (
+          <div className="mb-2 text-xs font-semibold leading-relaxed">
+            {headline}
+          </div>
+        )}
+        <div className="space-y-1">
           {rows.map((row) => (
             <div key={row.label}>
               <div className="flex items-center justify-between gap-2">
@@ -154,16 +110,12 @@ export function PlanCheckout({
         </div>
       </div>
 
-      {/* 排队单没有取消端点，也不退现金 —— 但**不是锁死**：再买任何一档时，
-          这笔钱会全额折成抵扣。原来这里写的是「不可撤销」，那句话会让想改主意的
-          用户不敢下单，而事实上他随时能改。仍然保留警告色和二次确认：钱是真要
-          付出去的，只是它以后只能花在购买上，换不回现金。 */}
-      {quote.action === "queue" && (
+      {/* 需要醒目提示的风险（目前是排队单的「不退款，但改主意时全额折抵」）。
+          有没有、说什么都由服务端决定；保留警告色 —— 钱是真要付出去的。 */}
+      {notice && (
         <div className="mt-2 flex items-start gap-1.5 rounded-lg bg-amber-500/10 px-2.5 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-none" />
-          <span>
-            此操作不退款。切换前当前套餐照常可用；之后如果改主意，这笔费用会全额折算抵扣新套餐。
-          </span>
+          <span>{notice}</span>
         </div>
       )}
 

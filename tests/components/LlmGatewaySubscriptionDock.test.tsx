@@ -62,11 +62,61 @@ function seedActivePlan() {
   localStorage.setItem(LOGIN_KEY, JSON.stringify(login));
 }
 
+const TIER_LABELS: Record<string, string> = {
+  starter: "$20",
+  pro: "$100",
+  business: "$200",
+  extra: "加量包",
+};
+
+/**
+ * 服务端给一种 action 写的结账页文案，照网关的样子写一份像样的。结账页上的
+ * 句子全部来自报价（网关 CONTRACT「Display copy」），这里的 case 断言的是
+ * 「客户端原样显示、把日期占位符按本地时区填上」，不是这些句子本身。
+ */
+function serverQuoteCopy(
+  action: gateway.GatewayPlanQuote["action"],
+  targetTier: string,
+): Partial<gateway.GatewayPlanQuote> {
+  const label = TIER_LABELS[targetTier] ?? targetTier;
+  switch (action) {
+    case "upgrade_now":
+      return {
+        headline: `立即升级到 ${label}，旧套餐剩余价值已折算抵扣 $0`,
+        summary: `换档到 ${label}`,
+      };
+    case "renew":
+      return {
+        headline: `续费 ${label}，有效期延长至 {new_valid_until}`,
+        summary: `${label} 续费`,
+      };
+    case "queue":
+      return {
+        headline: `当前套餐到期后（{new_valid_from}）自动切换到 ${label}`,
+        summary: `排队切换到 ${label}`,
+        notice:
+          "此操作不退款。切换前当前套餐照常可用；之后如果改主意，这笔费用会全额折算抵扣新套餐。",
+        confirm_title: "确认排队切换套餐？",
+        confirm_message: `当前套餐到期后（{new_valid_from}）自动切换到 ${label}。\n\n此操作不退款。\n\n切换前当前套餐照常可用，额度不受影响。`,
+      };
+    case "extra":
+      return {
+        headline: "加量包立即生效，与当前套餐额度叠加",
+        summary: "加量包 2 单位",
+      };
+    default:
+      return { headline: `立即生效：${label}`, summary: `${label} 套餐` };
+  }
+}
+
 /**
  * 桩一次服务端报价。付款前必须先拿到报价 —— 拿不到就不放行，所以凡是走到
- * 下单的 case 都要先桩这个。
+ * 下单的 case 都要先桩这个。文案按 action 补一份服务端会给的（patch 里写了
+ * 的以 patch 为准）。
  */
 function mockQuote(patch: Partial<gateway.GatewayPlanQuote> = {}) {
+  const action = patch.action ?? "activate_now";
+  const target = patch.target_tier ?? "pro";
   return vi.spyOn(gateway, "fetchPlanQuote").mockResolvedValue({
     action: "activate_now",
     credit_applied_micros: 0,
@@ -76,6 +126,7 @@ function mockQuote(patch: Partial<gateway.GatewayPlanQuote> = {}) {
     resulting_balance_micros: 0,
     current_tier: "",
     target_tier: "pro",
+    ...serverQuoteCopy(action, target),
     ...patch,
   });
 }
@@ -111,36 +162,116 @@ function tierPrices(monthly: number): gateway.GatewayPeriodPrice[] {
   ];
 }
 
+// 目录里服务端写好的展示文案（网关 CONTRACT「Display copy」），照线上的样子。
+const COPY: gateway.GatewayPurchaseCopy = {
+  vendor_note: "两家的套餐互相独立，额度只能用于对应的模型",
+  extra_effect: "立即生效，与当前套餐额度叠加",
+  by_vendor: {
+    claude: {
+      subscription_title: "更换 / 续费套餐",
+      subscription_hint: "升档、续费立即生效，降档到期后生效",
+      extra_hint: "立即生效，额度叠加，不影响当前套餐",
+      extra_blocked: "",
+    },
+    openai: {
+      subscription_title: "订阅套餐",
+      subscription_hint: "按月付费，立即生效",
+      extra_hint: "需先订阅 GPT 套餐，赠送额度不算",
+      extra_blocked: "需要先订阅 GPT 套餐才能购买 GPT 加量包（赠送额度不算）",
+    },
+  },
+};
+
 const CATALOG: gateway.GatewayPlanCatalog = {
   plans: [
     {
       id: "starter",
-      name: "Starter",
+      name: "$20",
       price_usd_micros: 20_000_000,
       prices: tierPrices(20),
+      blurb: "Starter",
+      description: "Starter · 适合大部分普通用户",
+      badge: "",
     },
     {
       id: "pro",
-      name: "Pro",
+      name: "$100",
       price_usd_micros: 100_000_000,
       prices: tierPrices(100),
+      blurb: "5× Starter 用量",
+      description: "5× Starter 用量",
+      badge: "最受欢迎",
     },
     {
       id: "business",
-      name: "Business",
+      name: "$200",
       price_usd_micros: 200_000_000,
       prices: tierPrices(200),
+      blurb: "10× Starter 用量",
+      description: "10× Starter 用量",
+      badge: "",
     },
   ],
   periods: [
-    { key: "1w", days: 7, discount_bps: 10000, extra_only: true },
-    { key: "2w", days: 14, discount_bps: 10000, extra_only: true },
-    { key: "3w", days: 21, discount_bps: 10000, extra_only: true },
-    { key: "1m", days: 30, discount_bps: 10000, extra_only: false },
-    { key: "3m", days: 90, discount_bps: 10000, extra_only: false },
-    { key: "6m", days: 180, discount_bps: 9500, extra_only: false },
-    { key: "12m", days: 360, discount_bps: 9000, extra_only: false },
+    {
+      key: "1w",
+      label: "1 周",
+      days: 7,
+      discount_bps: 10000,
+      extra_only: true,
+    },
+    {
+      key: "2w",
+      label: "2 周",
+      days: 14,
+      discount_bps: 10000,
+      extra_only: true,
+    },
+    {
+      key: "3w",
+      label: "3 周",
+      days: 21,
+      discount_bps: 10000,
+      extra_only: true,
+    },
+    {
+      key: "1m",
+      label: "1 个月",
+      days: 30,
+      discount_bps: 10000,
+      extra_only: false,
+    },
+    {
+      key: "3m",
+      label: "3 个月",
+      days: 90,
+      discount_bps: 10000,
+      extra_only: false,
+    },
+    {
+      key: "6m",
+      label: "6 个月",
+      days: 180,
+      discount_bps: 9500,
+      extra_only: false,
+    },
+    {
+      key: "12m",
+      label: "12 个月",
+      days: 360,
+      discount_bps: 9000,
+      extra_only: false,
+    },
   ],
+  vendor_details: [
+    {
+      id: "claude",
+      label: "Claude",
+      blurb: "Claude 系列模型 · Claude Code / Desktop",
+    },
+    { id: "openai", label: "GPT", blurb: "GPT 系列模型 · Codex" },
+  ],
+  copy: COPY,
   extra: {
     unit_price_micros: 20_000_000,
     max_units: 99,
@@ -153,6 +284,9 @@ const CATALOG: gateway.GatewayPlanCatalog = {
       catalogPrice("6m", 120, 120, 20),
       catalogPrice("12m", 240, 240, 20),
     ],
+    // 这份目录没有步长规则（老规则 1–99 任选），服务端的说明也就这么写。
+    units_rule_text: "请输入 1–99 的整数",
+    units_text: "{units} 单位 = {units}× Starter 的用量，叠加在当前套餐之上",
   },
 };
 
@@ -240,9 +374,28 @@ beforeEach(() => {
 describe("LlmGatewaySubscriptionDock 开启转发", () => {
   it("缓存说未开通、服务端说已开通时，直接开启转发而不是催购买", async () => {
     seedLoggedOutOfPlan();
+    const active = serverSaysActive();
     const fetchSub = vi
       .spyOn(gateway, "fetchGatewaySubscription")
-      .mockResolvedValue(serverSaysActive());
+      .mockResolvedValue({
+        ...active,
+        subscription: {
+          ...active.subscription,
+          // 徽标上的档位名是服务端给这张套餐写的 label。
+          plans: [
+            {
+              grant_id: "g_admin_starter",
+              tier: "starter",
+              label: "$20",
+              role: "subscription" as const,
+              usage_micros_per_5h: 20_000_000,
+              usage_micros_per_week: 100_000_000,
+              valid_from: "2026-07-01T00:00:00Z",
+              valid_until: "2099-01-01T00:00:00Z",
+            },
+          ],
+        },
+      });
 
     renderDock();
     await userEvent.click(await startButton());
@@ -253,8 +406,8 @@ describe("LlmGatewaySubscriptionDock 开启转发", () => {
       expect(providersApi.startForwarding).toHaveBeenCalled(),
     );
     expect(toasts.info).not.toHaveBeenCalledWith("请先购买会员再开启转发");
-    // 徽标同步刷新成管理员开的套餐。
-    expect(await screen.findByText("$20")).toBeInTheDocument();
+    // 徽标同步刷新成管理员开的套餐（「我的套餐」里那一行也是 $20）。
+    expect((await screen.findAllByText("$20")).length).toBeGreaterThan(0);
   });
 
   it("服务端确认没有套餐时，才提示购买", async () => {
@@ -602,6 +755,7 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
         {
           grant_id: "g_week",
           tier: "custom",
+          label: "专属额度",
           usage_micros_per_5h: 10_000_000,
           usage_micros_per_week: 50_000_000,
           valid_from: "2026-07-01T00:00:00Z",
@@ -610,6 +764,8 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
         {
           grant_id: "g_pro",
           tier: "pro",
+          label: "$100",
+          description: "5× Starter 用量",
           usage_micros_per_5h: 100_000_000,
           usage_micros_per_week: 500_000_000,
           valid_from: "2026-07-01T00:00:00Z",
@@ -618,6 +774,10 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
         {
           grant_id: "g_queued",
           tier: "pro",
+          label: "$100",
+          description: "5× Starter 用量",
+          pending_text:
+            "到期后自动切换到 $100 · 5× Starter 用量（生效于 {valid_from}）",
           usage_micros_per_5h: 100_000_000,
           usage_micros_per_week: 500_000_000,
           valid_from: "2026-07-31T00:00:00Z",
@@ -635,27 +795,30 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
 
     // 老服务端不返回 role，所有套餐都落在「我的套餐」块里。
     expect(await screen.findByText("我的套餐")).toBeTruthy();
-    // 不显示 5h/周的具体金额。这条 tier="custom"（admin 发的专属额度）
-    // 没有干净的倍数可言，档位名就是全部说明，不再补一句描述。
+    // 档位名和描述都是服务端写的。专属额度没有描述（服务端给空），不补一句。
     expect(screen.getByText("专属额度")).toBeTruthy();
     expect(screen.getAllByText("5× Starter 用量").length).toBe(1);
     // 排队中的那个要说清换的是哪一档、什么时候换，否则用户以为额度已经到账了。
     expect(screen.getByText(/到期后自动切换到 \$100/)).toBeTruthy();
   });
 
-  it("老 business（20×）按自己的额度显示，排队的新一期是 10×", async () => {
-    // business 从 20× 改成了 10×。改之前买的那张到期前仍是 20×，账户页得照
-    // 实说；再买一期是排队，新的那期按现行的 10×。
+  it("描述和排队那句原样来自服务端，日期按本地时区填", async () => {
+    // business 从 20× 改成了 10×：改之前买的那张到期前仍是 20×，再买一期是
+    // 排队、新的那期 10×。这些都是服务端按 grant 自己的额度写进 description /
+    // pending_text 的，客户端只照着显示 —— 倍数规则再改也不用发版。
     seedLoggedOutOfPlan();
     const login = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
     login.subscription = {
       active: true,
       tier: "business",
       valid_until: "2099-01-01T00:00:00Z",
+      usage_text: "总用量 20× Starter（服务端写的）",
       plans: [
         {
           grant_id: "g_old_biz",
           tier: "business",
+          label: "$200",
+          description: "20× Starter 用量",
           usage_micros_per_5h: 400_000_000,
           usage_micros_per_week: 2_000_000_000,
           valid_from: "2026-07-01T00:00:00Z",
@@ -664,6 +827,10 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
         {
           grant_id: "g_new_biz",
           tier: "business",
+          label: "$200",
+          description: "10× Starter 用量",
+          pending_text:
+            "Claude 到期后自动切换到 $200 · 10× Starter 用量（生效于 {valid_from}）",
           usage_micros_per_5h: 200_000_000,
           usage_micros_per_week: 1_000_000_000,
           valid_from: "2026-07-31T00:00:00Z",
@@ -677,8 +844,11 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
 
     expect(await screen.findByText("20× Starter 用量")).toBeTruthy();
     expect(
-      screen.getByText(/到期后自动切换到 \$200 · 10× Starter 用量/),
+      screen.getByText(
+        `Claude 到期后自动切换到 $200 · 10× Starter 用量（生效于 ${formatPlanDate("2026-07-31T00:00:00Z")}）`,
+      ),
     ).toBeTruthy();
+    expect(screen.getByText("总用量 20× Starter（服务端写的）")).toBeTruthy();
   });
 
   it("换档路径下单不带 as_extra", async () => {
@@ -701,9 +871,9 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
 
     renderDock();
     await userEvent.click(await screen.findByText("购买套餐"));
-    // 有生效套餐时先问意图，默认停在「更换 / 续费套餐」——粘住上一次选的
-    // 加量包会让来换档的人不看提示就买错东西。
-    expect(await screen.findByText("更换 / 续费套餐")).toBeTruthy();
+    // 有生效套餐时先问意图，默认停在订阅那一格——粘住上一次选的加量包会让
+    // 来换档的人不看提示就买错东西。
+    expect(await screen.findByText("选择套餐 · 微信支付")).toBeTruthy();
     await userEvent.click(await screen.findByText("$100"));
     mockQuote({ action: "upgrade_now" });
     await userEvent.click(await screen.findByText(/^下一步/));
@@ -714,7 +884,7 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     expect(createOrder.mock.calls[0][4]).toBe(false);
   });
 
-  it("没有生效套餐时照样问意图，且文案说的是「购买」而不是「更换」", async () => {
+  it("没有生效套餐时照样问意图，加量包入口也在", async () => {
     seedLoggedOutOfPlan();
     vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue({
       subscription: { active: false },
@@ -747,8 +917,8 @@ describe("LlmGatewaySubscriptionDock 套餐叠加", () => {
     // 的话这条路径在 UI 上根本走不到。
     expect(await screen.findByText("选择套餐 · 微信支付")).toBeTruthy();
     expect(screen.getByText("购买加量包")).toBeTruthy();
-    // 没有档位时说「更换 / 续费」是假的：那一单会是 activate_now。
-    expect(screen.getByText("订阅套餐")).toBeTruthy();
+    // 卡片上说「订阅」还是「更换 / 续费」由服务端按厂商写（见「按厂商购买」）。
+    // 这份目录不列厂商（老服务端），没有那句话，客户端也不自己编一句「更换」。
     expect(screen.queryByText("更换 / 续费套餐")).toBeNull();
     await userEvent.click(await screen.findByText("$100"));
     mockQuote();
@@ -923,11 +1093,10 @@ describe("LlmGatewaySubscriptionDock 换档结账页", () => {
     expect(screen.getByText(/确认（余额已够，无需付款）/)).toBeTruthy();
   });
 
-  it("queue 的切换日期取服务端的 new_valid_from，不是当前档到期日", async () => {
-    // 生效日一律以服务端算的为准，客户端不自己推。历史上两者真的会差一整个
-    // 周期（那时排队会排到订阅层最远的到期日），现在排队单改成被替换，两者
-    // 通常一致 —— 但「通常一致」不是「可以自己算」：周期、加量包、免费档都可能
-    // 让服务端选一个客户端猜不到的日子。这里用一个不一致的报价钉住这条规矩。
+  it("主文案原样来自服务端，日期占位符取同一份报价的字段按本地时区填", async () => {
+    // 排队什么时候切换、抵扣了多少、同一档为什么排队……这些说法都是服务端按
+    // 规则写进 headline 的，客户端不再自己拼。日期只填占位符：生效日取报价的
+    // new_valid_from，而不是当前档的到期日（两者可以差一整个周期）。
     await openCheckout({
       action: "queue",
       amount_due_micros: 20_000_000,
@@ -936,114 +1105,48 @@ describe("LlmGatewaySubscriptionDock 换档结账页", () => {
       new_valid_until: "2099-03-01T00:00:00Z",
       current_tier: "pro",
       target_tier: "starter",
+      headline:
+        "服务端说：{new_valid_from} 换成 $20，用到 {new_valid_until}，{unknown} 原样留着",
     });
 
     // 日期用同一个格式化函数算，免得把测试钉死在某个时区上。
-    const queueTail = formatPlanDate("2099-02-01T00:00:00Z");
-    const liveEnd = formatPlanDate("2099-01-01T00:00:00Z");
-    expect(queueTail).not.toBe(liveEnd);
-    expect(
-      await screen.findByText(`当前套餐到期后（${queueTail}）自动切换到 $20`),
-    ).toBeTruthy();
-    expect(screen.queryByText(new RegExp(`${liveEnd}.*自动切换`))).toBeNull();
-  });
-
-  it("同一档排队（老 business 再买）：说清当前这期不变、新的一期按现行额度", async () => {
-    await openCheckout({
-      action: "queue",
-      amount_due_micros: 200_000_000,
-      new_valid_from: "2099-01-01T00:00:00Z",
-      new_valid_until: "2099-01-31T00:00:00Z",
-      current_tier: "business",
-      target_tier: "business",
-    });
-
+    const from = formatPlanDate("2099-02-01T00:00:00Z");
+    const until = formatPlanDate("2099-03-01T00:00:00Z");
     expect(
       await screen.findByText(
-        `当前套餐按原额度用到到期（${formatPlanDate("2099-01-01T00:00:00Z")}），之后开始新的一期 $200（10× Starter 用量）`,
+        `服务端说：${from} 换成 $20，用到 ${until}，{unknown} 原样留着`,
       ),
     ).toBeTruthy();
   });
 
-  it("老服务端不发 new_valid_from 时退回当前档到期日", async () => {
-    await openCheckout({
-      action: "queue",
-      amount_due_micros: 20_000_000,
-      new_valid_until: "2099-02-01T00:00:00Z",
-      current_tier: "pro",
-      target_tier: "starter",
-    });
-
-    expect(
-      await screen.findByText(
-        `当前套餐到期后（${formatPlanDate("2099-01-01T00:00:00Z")}）自动切换到 $20`,
-      ),
-    ).toBeTruthy();
-  });
-
-  it("queue 抵扣非零时把抵扣额写进主文案", async () => {
-    // 用户先排了一个 $20 降档，又改主意排 $100。服务端把那 $20 全额折成抵扣，
-    // 实付只剩 $80。主文案不提这件事的话，用户会以为自己第二次又付了全款 ——
-    // 「余额抵扣」那一行写的是 -$20，光看它分不清抵扣的是余额还是上一单。
-    await openCheckout({
-      action: "queue",
-      credit_applied_micros: 20_000_000,
-      amount_due_micros: 80_000_000,
-      new_valid_from: "2099-01-01T00:00:00Z",
-      new_valid_until: "2099-02-01T00:00:00Z",
-      current_tier: "business",
-      target_tier: "pro",
-    });
-
-    expect(
-      await screen.findByText(
-        /自动切换到 \$100，已排队套餐的费用折算抵扣 \$20/,
-      ),
-    ).toBeTruthy();
-  });
-
-  it("queue 抵扣为零时不提抵扣", async () => {
-    // 绝大多数降档是这条路径。写「抵扣 $0」只会让用户以为自己亏了。
-    await openCheckout({
-      action: "queue",
-      credit_applied_micros: 0,
-      amount_due_micros: 20_000_000,
-      new_valid_from: "2099-01-01T00:00:00Z",
-      current_tier: "pro",
-      target_tier: "starter",
-    });
-
-    expect(await screen.findByText(/自动切换到 \$20$/)).toBeTruthy();
-    // 主文案里不能出现抵扣那一句。（下面那条琥珀色警告里有「折算抵扣」四个字，
-    // 那是在说「以后改主意钱不会白付」，跟这一单的抵扣额是两回事。）
-    expect(screen.queryByText(/已排队套餐的费用折算抵扣/)).toBeNull();
-  });
-
-  it("queue 弹二次确认，取消则不下单", async () => {
+  it("服务端要求二次确认时先弹窗，提示和弹窗的字都是服务端给的", async () => {
     const createOrder = vi.spyOn(gateway, "createPlanOrder");
     await openCheckout({
       action: "queue",
       credit_applied_micros: 0,
       amount_due_micros: 20_000_000,
+      new_valid_from: "2099-01-01T00:00:00Z",
       new_valid_until: "2099-02-01T00:00:00Z",
       resulting_balance_micros: 0,
       current_tier: "pro",
       target_tier: "starter",
+      notice: "服务端的风险提示：钱不退现金，改主意时折抵",
+      confirm_title: "服务端的确认标题？",
+      confirm_message: "服务端的确认正文：{new_valid_from} 起切换",
     });
 
-    expect(await screen.findByText(/自动切换到 \$20/)).toBeTruthy();
-    // 「不退款」仍然成立（换不回现金），「不可撤销」不成立了：再买别的档时
-    // 这笔钱会全额折成抵扣。文案说错哪一边都会劝退一批用户。
-    expect(screen.getByText(/此操作不退款/)).toBeTruthy();
-    expect(screen.getByText(/全额折算抵扣新套餐/)).toBeTruthy();
-    expect(screen.queryByText(/不可撤销/)).toBeNull();
+    // 钱是真要付出去的，一行小字挡不住误操作 —— 但说什么由服务端定。
+    expect(
+      await screen.findByText("服务端的风险提示：钱不退现金，改主意时折抵"),
+    ).toBeTruthy();
 
     await userEvent.click(screen.getByText(/^微信支付/));
-    // 钱是真要付出去的，一行小字挡不住误操作。
-    expect(await screen.findByText("确认排队切换套餐？")).toBeTruthy();
+    expect(await screen.findByText("服务端的确认标题？")).toBeTruthy();
     expect(
-      screen.getAllByText(/切换前当前套餐照常可用/).length,
-    ).toBeGreaterThan(0);
+      screen.getByText(
+        `服务端的确认正文：${formatPlanDate("2099-01-01T00:00:00Z")} 起切换`,
+      ),
+    ).toBeTruthy();
 
     await userEvent.click(screen.getByText("再想想"));
     expect(createOrder).not.toHaveBeenCalled();
@@ -1073,11 +1176,26 @@ describe("LlmGatewaySubscriptionDock 换档结账页", () => {
     await waitFor(() => expect(createOrder).toHaveBeenCalled());
   });
 
-  it("activate_now / extra 各有自己的文案", async () => {
+  it("服务端没给 notice / confirm_title 时不提示风险、不弹确认", async () => {
+    const createOrder = vi.spyOn(gateway, "createPlanOrder").mockResolvedValue({
+      order_id: "pay_a",
+      code_url: "weixin://wxpay/bizpayurl?pr=a",
+      plan_id: "business",
+      period: "1m",
+      duration_days: 30,
+      months: 1,
+      amount_credits: 200_000_000,
+      amount_cents: 144000,
+      exchange_rate: 7.2,
+      currency: "CNY",
+    } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
     await openCheckout({ action: "activate_now", target_tier: "business" });
     expect(await screen.findByText(/立即生效：\$200/)).toBeTruthy();
-    // 立即生效不该出现那条不退款的警告——它只属于排队。
+    // 那条不退款的警告和二次确认要不要出现，看的是服务端给没给，不是 action。
     expect(screen.queryByText(/此操作不退款/)).toBeNull();
+    await userEvent.click(screen.getByText(/^微信支付/));
+    await waitFor(() => expect(createOrder).toHaveBeenCalled());
+    expect(screen.queryByText("确认切换")).toBeNull();
   });
 
   it("报价失败不放行付款", async () => {
@@ -1293,9 +1411,12 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
     localStorage.setItem(LOGIN_KEY, JSON.stringify(login));
   }
 
+  // label / description 是服务端写好的（网关 CONTRACT「Display copy」）。
   const subPlan = {
     grant_id: "g_pro",
     tier: "pro",
+    label: "$100",
+    description: "5× Starter 用量",
     role: "subscription",
     usage_micros_per_5h: 100_000_000,
     usage_micros_per_week: 500_000_000,
@@ -1318,6 +1439,8 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
       {
         grant_id: "g_x1",
         tier: "extra",
+        label: "加量包",
+        description: "1× Starter 用量",
         role: "extra",
         usage_micros_per_5h: 20_000_000,
         usage_micros_per_week: 100_000_000,
@@ -1327,6 +1450,8 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
       {
         grant_id: "g_x2",
         tier: "extra",
+        label: "加量包",
+        description: "2× Starter 用量",
         role: "extra",
         usage_micros_per_5h: 40_000_000,
         usage_micros_per_week: 200_000_000,
@@ -1356,6 +1481,8 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
       {
         grant_id: "g_queued",
         tier: "starter",
+        label: "$20",
+        pending_text: "到期后自动切换到 $20 · Starter（生效于 {valid_from}）",
         role: "subscription",
         usage_micros_per_5h: 20_000_000,
         usage_micros_per_week: 100_000_000,
@@ -1370,14 +1497,17 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
     expect(await screen.findByText(/到期后自动切换到 \$20/)).toBeTruthy();
   });
 
-  // 额外额度的描述有三级回落：title > extra 的倍数 > custom 的档位名。
-  // 三条一起测，因为它们是同一个函数的三个分支，分开写会让「谁顶替谁」看不出来。
-  it("额外额度描述：有 title 用 title，没有则回落到倍数/专属额度", async () => {
+  // 额外额度的描述有三级回落：admin 写的 title > 加量包的倍数 > 专属额度不写
+  // 描述。这条规则在服务端（description 已经是回落后的结果），客户端照着显示：
+  // 有就显示，空就不显示，绝不自己从额度推一个出来。
+  it("额外额度：名字和描述原样用服务端的，空描述不补", async () => {
     seedPlans([
       subPlan,
       {
         grant_id: "g_gift",
         tier: "custom",
+        label: "专属额度",
+        description: "新春回馈",
         role: "extra",
         title: "新春回馈",
         usage_micros_per_5h: 37_000_000,
@@ -1388,6 +1518,8 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
       {
         grant_id: "g_gift2",
         tier: "custom",
+        label: "专属额度",
+        description: "",
         role: "extra",
         usage_micros_per_5h: 37_000_000,
         usage_micros_per_week: 412_000_000,
@@ -1397,6 +1529,8 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
       {
         grant_id: "g_x1",
         tier: "extra",
+        label: "加量包",
+        description: "2× Starter 用量",
         role: "extra",
         usage_micros_per_5h: 40_000_000,
         usage_micros_per_week: 200_000_000,
@@ -1406,32 +1540,36 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
     ]);
     renderDock();
 
-    // (a) title 顶替额度描述。
     expect(await screen.findByText("新春回馈")).toBeTruthy();
-    // (b) 无 title 的 custom 只剩档位名 —— 5h/周互不成比例，算不出干净的倍数。
     expect(screen.getAllByText("专属额度").length).toBe(2);
-    // (c) 无 title 的真加量包按单位数换算成 Starter 倍数。
     expect(screen.getByText("2× Starter 用量")).toBeTruthy();
-    // 礼物的额度绝不能泄露成金额。
+    // 礼物的额度绝不能泄露成金额，也不能被客户端换算成一个倍数。
     expect(screen.queryByText(/\$37/)).toBeNull();
+    expect(screen.queryByText(/1\.85×/)).toBeNull();
   });
 
   it("顶部额度上限仍是总和，并标明含加量包", async () => {
-    seedPlans([
-      subPlan,
-      {
-        grant_id: "g_x1",
-        tier: "extra",
-        role: "extra",
-        usage_micros_per_5h: 40_000_000,
-        usage_micros_per_week: 200_000_000,
-        valid_from: "2026-07-01T00:00:00Z",
-        valid_until: "2026-07-20T00:00:00Z",
-      },
-    ]);
+    seedPlans(
+      [
+        subPlan,
+        {
+          grant_id: "g_x1",
+          tier: "extra",
+          label: "加量包",
+          description: "2× Starter 用量",
+          role: "extra",
+          usage_micros_per_5h: 40_000_000,
+          usage_micros_per_week: 200_000_000,
+          valid_from: "2026-07-01T00:00:00Z",
+          valid_until: "2026-07-20T00:00:00Z",
+        },
+      ],
+      // 总和那句由服务端写：只显示订阅层自己的 5× 是错的，实际卡用户的是
+      // 7× 这个总和。
+      { usage_text: "总用量 7× Starter（含额外额度）" },
+    );
     renderDock();
 
-    // 只显示订阅层自己的 5× 是错的 —— 实际卡用户的是 7× 这个总和。
     expect(
       await screen.findByText(/总用量 7× Starter（含额外额度）/),
     ).toBeTruthy();
@@ -1446,6 +1584,8 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
       {
         grant_id: "g_x1",
         tier: "extra",
+        label: "加量包",
+        description: "2× Starter 用量",
         role: "extra",
         usage_micros_per_5h: 40_000_000,
         usage_micros_per_week: 200_000_000,
@@ -1471,6 +1611,8 @@ describe("LlmGatewaySubscriptionDock 账号屏分组", () => {
         ...legacy,
         grant_id: "g_starter",
         tier: "starter",
+        label: "$20",
+        description: "Starter · 适合大部分普通用户",
         usage_micros_per_5h: 20_000_000,
         usage_micros_per_week: 100_000_000,
       },
@@ -1616,7 +1758,8 @@ describe("LlmGatewaySubscriptionDock 新端连老网关", () => {
     renderDock();
 
     expect(await screen.findByText("我的套餐")).toBeTruthy();
-    expect(screen.getByText("5× Starter 用量")).toBeTruthy();
+    // 老网关不发 description，客户端不自己从额度推一句「5×」出来。
+    expect(screen.queryByText("5× Starter 用量")).toBeNull();
     // 空标题比没有标题更让人困惑：用户会以为额外额度没加载出来。
     expect(screen.queryByText("额外额度")).toBeNull();
   });
@@ -2180,6 +2323,67 @@ describe("LlmGatewaySubscriptionDock 购买屏价格来自服务端", () => {
     expect(screen.queryByText("$570")).toBeNull();
   });
 
+  it("档位、周期、厂商的文案也原样来自目录，不用本地的说法", async () => {
+    // 每个字段都给一个本地不可能写出来的值：屏幕上出现的如果是「最受欢迎」
+    // 「5× Starter 用量」「1 个月」「Claude 系列模型」，就说明客户端还留着
+    // 自己那一份。
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
+      serverSaysActive(),
+    );
+    vi.spyOn(gateway, "fetchPlanCatalog").mockResolvedValue({
+      ...CATALOG,
+      vendors: ["claude"],
+      vendor_details: [
+        { id: "claude", label: "克劳德", blurb: "服务端写的厂商说明" },
+      ],
+      copy: {
+        ...COPY,
+        vendor_note: "服务端写的厂商须知",
+        by_vendor: {
+          claude: {
+            subscription_title: "服务端的订阅卡标题",
+            subscription_hint: "服务端的订阅卡说明",
+            extra_hint: "服务端的加量包卡说明",
+            extra_blocked: "",
+          },
+        },
+      },
+      plans: CATALOG.plans.map((p) =>
+        p.id === "pro"
+          ? {
+              ...p,
+              blurb: "服务端写的 Pro 小字",
+              description: "服务端写的 Pro 说明",
+              badge: "店长推荐",
+            }
+          : { ...p, badge: "" },
+      ),
+      periods: CATALOG.periods.map((p) =>
+        p.key === "1m" ? { ...p, label: "整整一个月" } : p,
+      ),
+    });
+
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    expect(await screen.findByText("克劳德")).toBeTruthy();
+    expect(screen.getByText("服务端写的厂商说明")).toBeTruthy();
+    expect(screen.getByText("服务端写的厂商须知")).toBeTruthy();
+
+    await userEvent.click(screen.getByText("克劳德"));
+    expect(await screen.findByText("服务端的订阅卡标题")).toBeTruthy();
+    expect(screen.getByText("服务端的订阅卡说明")).toBeTruthy();
+    expect(screen.getByText("服务端的加量包卡说明")).toBeTruthy();
+    expect(screen.getByText("店长推荐")).toBeTruthy();
+    expect(screen.getByText("服务端写的 Pro 小字")).toBeTruthy();
+    expect(screen.queryByText("最受欢迎")).toBeNull();
+
+    await userEvent.click(screen.getByText("$100"));
+    expect(await screen.findByText("服务端写的 Pro 说明")).toBeTruthy();
+    expect(screen.getByText("整整一个月")).toBeTruthy();
+    expect(screen.queryByText("1 个月")).toBeNull();
+  });
+
   it("拿不到目录时不显示任何价格，给重试", async () => {
     seedActivePlan();
     vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
@@ -2220,11 +2424,16 @@ describe("LlmGatewaySubscriptionDock 加量包规则", () => {
           charge / Number(period.slice(0, -1)),
         );
   }
+  // 能不能买、为什么不能买的句子是服务端按用户状态写的，和 eligibility 一起
+  // 下发；这里两样一起桩。目录列了厂商，openExtra 会先选 Claude。
   function mockCatalog(
     eligibility: gateway.GatewayExtraEligibility,
+    claudeCopy: gateway.GatewayVendorPurchaseCopy = COPY.by_vendor!.claude,
   ): ReturnType<typeof vi.spyOn> {
     return vi.spyOn(gateway, "fetchPlanCatalog").mockResolvedValue({
       ...CATALOG,
+      vendors: ["claude"],
+      copy: { ...COPY, by_vendor: { claude: claudeCopy } },
       extra: {
         unit_price_micros: 20_000_000,
         max_units: 99,
@@ -2240,7 +2449,11 @@ describe("LlmGatewaySubscriptionDock 加量包规则", () => {
         bulk_step_units: 20,
         requires_plan: true,
         max_concurrent_paid_packs: 2,
+        units_rule_text: "可选 1–20，或 40、60、80",
+        units_text:
+          "{units} 单位 = {units}× Starter 的用量，叠加在当前套餐之上",
         eligibility,
+        eligibility_by_vendor: { claude: eligibility },
       },
     });
   }
@@ -2250,13 +2463,14 @@ describe("LlmGatewaySubscriptionDock 加量包规则", () => {
     can_buy: true,
   };
 
-  async function openExtra() {
+  async function openExtra(pickVendor = true) {
     seedActivePlan();
     vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue(
       serverSaysActive(),
     );
     renderDock();
     await userEvent.click(await screen.findByText("购买套餐"));
+    if (pickVendor) await userEvent.click(await screen.findByText("Claude"));
     await userEvent.click(await screen.findByText("购买加量包"));
     return await screen.findByRole("spinbutton");
   }
@@ -2274,31 +2488,52 @@ describe("LlmGatewaySubscriptionDock 加量包规则", () => {
     expect(week.textContent).toContain("$5/单位");
   });
 
-  it("没有付费套餐：置灰并说明赠送额度不算，可以直接去订阅", async () => {
-    mockCatalog({
-      plan_in_force: false,
-      active_paid_packs: 0,
-      can_buy: false,
-      reason: "subscription_required",
-    });
+  it("没有付费套餐：置灰并显示服务端写的原因，可以直接去订阅", async () => {
+    mockCatalog(
+      {
+        plan_in_force: false,
+        active_paid_packs: 0,
+        can_buy: false,
+        reason: "subscription_required",
+      },
+      {
+        subscription_title: "订阅套餐",
+        subscription_hint: "按月付费，立即生效",
+        extra_hint: "服务端：先订 Claude 套餐，送的额度不算",
+        extra_blocked: "服务端：需要先订阅 Claude 套餐才能买 Claude 加量包",
+      },
+    );
     await openExtra();
     expect(
-      await screen.findByText("需要先订阅套餐才能购买加量包（赠送额度不算）"),
+      await screen.findByText(
+        "服务端：需要先订阅 Claude 套餐才能买 Claude 加量包",
+      ),
     ).toBeTruthy();
     expect(screen.getByText(/^下一步/).closest("button")).toBeDisabled();
+    // 「去订阅」按钮看的是 reason（机器字段），不是那句话。
     await userEvent.click(screen.getByText("去订阅套餐"));
-    expect(await screen.findByText("选择套餐 · 微信支付")).toBeTruthy();
-    // 意图卡片上那一格也说了实话。
-    expect(screen.getByText("需先订阅套餐，赠送额度不算")).toBeTruthy();
+    expect(await screen.findByText(/选择套餐 · 微信支付/)).toBeTruthy();
+    // 意图卡片上那一格也是服务端的话。
+    expect(
+      screen.getByText("服务端：先订 Claude 套餐，送的额度不算"),
+    ).toBeTruthy();
   });
 
   it("已持有 2 个加量包：置灰并说明上限", async () => {
-    mockCatalog({
-      plan_in_force: true,
-      active_paid_packs: 2,
-      can_buy: false,
-      reason: "extra_pack_limit",
-    });
+    mockCatalog(
+      {
+        plan_in_force: true,
+        active_paid_packs: 2,
+        can_buy: false,
+        reason: "extra_pack_limit",
+      },
+      {
+        ...COPY.by_vendor!.claude,
+        extra_hint: "已持有 2 个，到期后可再买",
+        extra_blocked:
+          "已持有 2 个加量包，最多同时持有 2 个，等其中一个到期后再买",
+      },
+    );
     await openExtra();
     expect(
       await screen.findByText(
@@ -2329,23 +2564,26 @@ describe("LlmGatewaySubscriptionDock 加量包规则", () => {
     expect(input).toHaveValue(80);
   });
 
-  it("报价被拒（409 extra_pack_limit / subscription_required）：显示人话并重拉目录", async () => {
+  it("报价被拒（409 extra_pack_limit / subscription_required）：显示服务端的 message 并重拉目录", async () => {
     const cat = mockCatalog(canBuy);
     await openExtra();
     await screen.findByRole("button", { name: "80" });
     vi.spyOn(gateway, "fetchPlanQuote").mockRejectedValue(
       new GatewayApiError(409, "subscription_required", {
         error: "subscription_required",
+        message: "服务端：套餐刚到期，先续上 Claude 套餐再买加量包",
       }),
     );
     await userEvent.click(screen.getByText(/^下一步/));
     expect(
-      await screen.findByText("需要先订阅套餐才能购买加量包（赠送额度不算）"),
+      await screen.findByText(
+        "服务端：套餐刚到期，先续上 Claude 套餐再买加量包",
+      ),
     ).toBeTruthy();
     await waitFor(() => expect(cat).toHaveBeenCalledTimes(2));
   });
 
-  it("下单被拒（400 invalid_extra_units）：toast 说清可选的单位数", async () => {
+  it("下单被拒（400 invalid_extra_units）：toast 显示服务端的 message", async () => {
     mockCatalog(canBuy);
     await openExtra();
     await screen.findByRole("button", { name: "80" });
@@ -2353,6 +2591,7 @@ describe("LlmGatewaySubscriptionDock 加量包规则", () => {
     vi.spyOn(gateway, "createPlanOrder").mockRejectedValue(
       new GatewayApiError(400, "invalid_extra_units", {
         error: "invalid_extra_units",
+        message: "加量包单位数不可用：可选 1–20，或 40、60、80",
       }),
     );
     await userEvent.click(screen.getByText(/^下一步/));
@@ -2367,7 +2606,7 @@ describe("LlmGatewaySubscriptionDock 加量包规则", () => {
   it("目录不带新规则字段（老网关）：按老规则 1–99 任选，也不拦", async () => {
     // CATALOG 的 extra 只有 #45 时的三个字段：没有步长、没有 eligibility。
     vi.spyOn(gateway, "fetchPlanCatalog").mockResolvedValue(CATALOG);
-    const input = await openExtra();
+    const input = await openExtra(false);
     await userEvent.clear(input);
     await userEvent.type(input, "57");
     await userEvent.tab();
@@ -3252,6 +3491,8 @@ describe("LlmGatewaySubscriptionDock 按厂商购买", () => {
   const claudePro = {
     grant_id: "g_claude_pro",
     tier: "pro",
+    label: "$100",
+    description: "5× Starter 用量",
     role: "subscription",
     vendor: "claude",
     usage_micros_per_5h: 100_000_000,
@@ -3317,7 +3558,8 @@ describe("LlmGatewaySubscriptionDock 按厂商购买", () => {
     expect(screen.queryByText("更换 / 续费套餐")).toBeNull();
 
     await userEvent.click(await screen.findByText("$100"));
-    const quote = mockQuote();
+    // 二维码页那行「买的是什么」取报价的 summary，服务端会带上厂商名。
+    const quote = mockQuote({ summary: "GPT $100 套餐" });
     await userEvent.click(await screen.findByText(/^下一步/));
     await waitFor(() => expect(quote).toHaveBeenCalled());
     expect(quote.mock.calls[0][4]).toBe("openai");
