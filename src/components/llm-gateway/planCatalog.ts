@@ -52,16 +52,12 @@ export function vendorLabel(
 }
 
 /**
- * 账号卡片右上角那个档位名。服务端在每张套餐上写了 label，标量的 tier 对应
- * 哪张就用哪张的；对不上（老服务端没有 plans）时退回 tier 本身 —— 那是一个
- * 不好看但不说错话的值。
+ * 账号卡片右上角那个档位名，服务端写好的 label。老服务端没有时退回 tier
+ * 本身 —— 不好看但不说错话。
  */
 export function subscriptionLabel(sub?: GatewaySubscriptionStatus): string {
   if (!sub?.tier) return "会员";
-  const plan = (sub.plans ?? []).find(
-    (p) => !p.pending && p.tier === sub.tier && p.label,
-  );
-  return plan?.label ?? sub.tier;
+  return sub.label || sub.tier;
 }
 
 // micro-USD → 美元。1e6 = $1。整份客户端只有这一个换算入口 —— 两处各自

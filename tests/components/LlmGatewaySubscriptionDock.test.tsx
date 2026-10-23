@@ -3719,4 +3719,21 @@ describe("LlmGatewaySubscriptionDock 按厂商购买", () => {
     expect(screen.getByText("Claude")).toBeTruthy();
     expect(screen.getByText("通用")).toBeTruthy();
   });
+
+  it("厂商标签用服务端写的 vendor_label", async () => {
+    seedClaudeOnly([
+      { ...claudePro, vendor_label: "Claude（服务端）" },
+      {
+        ...claudePro,
+        grant_id: "g_old",
+        tier: "starter",
+        vendor: undefined,
+        vendor_label: "两家通用",
+      },
+    ]);
+    renderDock();
+
+    expect(await screen.findByText("Claude（服务端）")).toBeTruthy();
+    expect(screen.getByText("两家通用")).toBeTruthy();
+  });
 });

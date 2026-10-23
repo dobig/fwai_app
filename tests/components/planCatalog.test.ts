@@ -37,34 +37,10 @@ describe("vendorLabel", () => {
 });
 
 describe("subscriptionLabel", () => {
-  it("取标量 tier 对应那张生效套餐的 label，对不上时退回 tier", () => {
+  it("用服务端写的 label，老服务端没有时退回 tier", () => {
     expect(
-      subscriptionLabel({
-        active: true,
-        tier: "pro",
-        plans: [
-          {
-            grant_id: "q",
-            tier: "pro",
-            label: "排队的那张",
-            pending: true,
-            usage_micros_per_5h: 0,
-            usage_micros_per_week: 0,
-            valid_from: "",
-            valid_until: "",
-          },
-          {
-            grant_id: "g",
-            tier: "pro",
-            label: "$100",
-            usage_micros_per_5h: 0,
-            usage_micros_per_week: 0,
-            valid_from: "",
-            valid_until: "",
-          },
-        ],
-      }),
-    ).toBe("$100");
+      subscriptionLabel({ active: true, tier: "pro", label: "专业版 $100" }),
+    ).toBe("专业版 $100");
     expect(subscriptionLabel({ active: true, tier: "pro" })).toBe("pro");
     expect(subscriptionLabel({ active: false })).toBe("会员");
   });

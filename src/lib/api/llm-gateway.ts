@@ -69,9 +69,11 @@ export interface GatewaySubscriptionPlan {
   // 以下是服务端写好的展示文案（见网关 CONTRACT「Display copy」）。规则一变
   // 文案就跟着变，所以不在客户端拼：
   //   label         档位名（「$200」「加量包」「专属额度」）
+  //   vendor_label  厂商标签（「Claude」「GPT」，没绑定的是「通用」）
   //   description   额度描述，按这张 grant **自己的**额度算（「20× Starter 用量」）
   //   pending_text  排队中的订阅层那一整句，日期是 {valid_from} 占位符
   label?: string;
+  vendor_label?: string;
   description?: string;
   pending_text?: string;
 }
@@ -94,6 +96,8 @@ export interface GatewaySubscriptionStatus {
   valid_until?: string;
   // 老版本服务端不返回这个字段，所以可能是 undefined。
   plans?: GatewaySubscriptionPlan[];
+  // 生效档位的名字（「$200」），账号卡片右上角用。
+  label?: string;
   // 「总用量 15× Starter（含额外额度）」，服务端写好的整句。
   usage_text?: string;
 }

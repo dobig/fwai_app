@@ -47,7 +47,7 @@ function VendorTag({
   if (!show) return null;
   return (
     <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-medium text-muted-foreground">
-      {plan.vendor ? vendorLabel(plan.vendor) : "通用"}
+      {plan.vendor_label || (plan.vendor ? vendorLabel(plan.vendor) : "通用")}
     </span>
   );
 }
