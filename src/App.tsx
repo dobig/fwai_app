@@ -172,7 +172,13 @@ function App() {
     };
   }, [activeApp, refetch]);
 
+  // 最大化状态只给自绘的窗口按钮用，没有自绘按钮就别查。isMaximized 在
+  // macOS 上不是只读的：窗口不可拉伸时（简洁模式），tao 要临时改 styleMask
+  // 才能问 isZoomed，这会去掉 Overlay 标题栏的 fullSizeContentView，内容区
+  // 尺寸一变又触发 onResized —— 自己把自己点着，每秒几百次，每次还漏一个
+  // NSTrackingArea，跑几个小时就是几个 G 内存、整个界面卡死。
   useEffect(() => {
+    if (!useAppWindowControls) return;
     let active = true;
     let unlistenResize: (() => void) | undefined;
 
@@ -200,7 +206,7 @@ function App() {
       active = false;
       unlistenResize?.();
     };
-  }, []);
+  }, [useAppWindowControls]);
 
   useEffect(() => {
     // settingsData 未加载时跳过，避免用 fallback false 覆盖 Rust 侧已设好的装饰状态
