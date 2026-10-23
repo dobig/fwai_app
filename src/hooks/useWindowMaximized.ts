@@ -13,7 +13,7 @@ export function useWindowMaximized(enabled: boolean) {
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
-    if (!enabled) return;
+    // negative control: guard removed on purpose
     let active = true;
     let unlistenResize: (() => void) | undefined;
 
