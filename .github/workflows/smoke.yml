@@ -51,6 +51,16 @@ jobs:
         run: pnpm tauri build --debug --no-bundle
 
       - name: Leave it idle and check it stays idle
+        env:
+          SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/smoke
         run: |
           sw_vers
           ./scripts/ci/macos-idle-smoke.sh src-tauri/target/debug/fwai_app
+
+      - name: Keep the screenshot and app log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-macos-idle
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: ignore

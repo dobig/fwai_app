@@ -66,6 +66,12 @@ tracking_areas() {
   # pipefail would take the whole script down with it.
   { heap "$1" 2>/dev/null || true; } | awk '$4 == "NSTrackingArea" {n = $1} END {print n}'
 }
+here="$(cd "$(dirname "$0")" && pwd)"
+# Where the window is and how big the screen is: when the check passes on a
+# build that should fail, this is the first thing to look at.
+window_info() { swift "$here/window-info.swift" "$1" 2>&1 | sed 's/^/  /' || true; }
+artifacts="${SMOKE_ARTIFACT_DIR:-}"
+[[ -n "$artifacts" ]] && mkdir -p "$artifacts"
 
 echo "launching $bin (HOME=$home)"
 HOME="$home" "$bin" >"$log" 2>&1 &
@@ -79,10 +85,14 @@ if ! kill -0 "$pid" 2>/dev/null; then
   exit 1
 fi
 
+echo "after settle:"; window_info "$pid"
+[[ -n "$artifacts" ]] && screencapture -x "$artifacts/after-settle.png" 2>/dev/null || true
 cpu0="$(cpu_secs "$pid")"; rss0="$(rss_mb "$pid")"; areas0="$(tracking_areas "$pid")"
 sleep "$WINDOW_SECS"
 kill -0 "$pid" 2>/dev/null || { echo "app exited while idle" >&2; cat "$log" >&2; exit 1; }
 cpu1="$(cpu_secs "$pid")"; rss1="$(rss_mb "$pid")"; areas1="$(tracking_areas "$pid")"
+echo "after idle:"; window_info "$pid"
+[[ -n "$artifacts" ]] && cp "$log" "$artifacts/app.log"
 
 cpu_pct="$(awk -v a="$cpu0" -v b="$cpu1" -v w="$WINDOW_SECS" 'BEGIN {printf "%d", (b - a) / w * 100}')"
 rss_growth=$((rss1 - rss0))
