@@ -84,6 +84,7 @@ import {
   type GatewayUsage,
   type GatewayUsageWindow,
   type GatewayUserProfile,
+  type GatewayVendor,
 } from "@/lib/api/llm-gateway";
 import { useClientUpgradeSignal } from "@/lib/clientUpgrade";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -98,6 +99,8 @@ import {
   planLabel,
   tierBlurb,
   tierDescription,
+  vendorBlurb,
+  vendorLabel,
 } from "./planCatalog";
 // 周期的名字和天数。价格一律来自服务端：周期列表取 GET /v1/plans 的成品价，
 // 结账页取 quote 的 amount_due_micros，二维码页取下单响应的 amount_credits。
@@ -107,6 +110,7 @@ import {
   bulkExtraSizes,
   extraBlockedMessage,
   extraErrorMessage,
+  extraForVendor,
   extraPeriodPrice,
   extraUnitRules,
   extraUnitsRuleText,
@@ -237,6 +241,25 @@ type PurchaseIntent = "subscription" | "extra";
 // 契约已在 llm_gateway#189 的评论里写死：as_extra 时服务端强制改写为 extra，
 // quote.target_tier 和 grant 的 plan_id 回读都是 "extra"。
 const EXTRA_PLAN_ID = "extra";
+
+// 转发的 app 吃哪一家的额度：Claude Code 和 Claude Desktop 走 Claude，Codex
+// 走 GPT。
+function vendorForApp(app: ForwardableApp): GatewayVendor {
+  return app === "codex" ? "openai" : "claude";
+}
+
+// 生效的套餐里有没有能给这一家用的额度：绑定这一家的，或者绑定之前买的（两家
+// 通用）。只持有另一家的额度时服务端会把请求打回 402 vendor_not_covered，转发
+// 开了也用不了。plans 为空（老服务端）时分辨不了，只看 active。
+function subscriptionCoversVendor(
+  sub: GatewaySubscriptionStatus,
+  vendor: string,
+): boolean {
+  if (!sub.active) return false;
+  const live = (sub.plans ?? []).filter((p) => !p.pending);
+  if (live.length === 0) return true;
+  return live.some((p) => !p.vendor || p.vendor === vendor);
+}
 
 // 已确定要买什么，等着结账页确认的那一单。quote 和下单参数绑在一起存，
 // 免得用户在结账页停留时改了别处的选择、付款用的却是另一份报价。
@@ -403,6 +426,9 @@ export function LlmGatewaySubscriptionDock({
   // 换档/续费还是补额度。默认订阅层 —— 大多数人要的是换档或续费，
   // 而买错方向的代价不对称：想换档买成加量包的话，旧档照常计费到期。
   const [intent, setIntent] = useState<PurchaseIntent>("subscription");
+  // 买给哪一家。购买流程的第一步，只在目录列了厂商（服务端按厂商卖）时才问；
+  // 老服务端没有这一步。
+  const [vendor, setVendor] = useState<string | null>(null);
   // 加量包买几个单位。
   const [extraUnitsInput, setExtraUnitsInput] = useState("1");
   // 结账页。选完档位和周期后拉一次 quote，把抵扣额/新到期日/剩余余额/实付
@@ -509,6 +535,23 @@ export function LlmGatewaySubscriptionDock({
     planList.length > 0
       ? planList.some((p) => planRole(p) === "subscription" && !p.pending)
       : isActive;
+  // 这一单发给服务端的厂商：选了，而且目录里有这一家。目录不列厂商（老服务端）
+  // 时是 undefined，请求体里也就不带 —— 从转发那边预选进来的也一样。
+  const catalogVendors = catalog?.vendors ?? [];
+  const purchaseVendor =
+    vendor && catalogVendors.includes(vendor) ? vendor : undefined;
+  // 购买屏文案里的「Claude 」前缀，老服务端下是空串。
+  const vendorPrefix = purchaseVendor ? `${vendorLabel(purchaseVendor)} ` : "";
+  // 有没有**这一家**的订阅层，用途同 hasActiveSubscriptionTier（只决定文案）。
+  // 绑定之前买的档位不参与任何一家的换档 —— 买哪家都是新开一份 —— 所以不算。
+  const purchaseHasTier = purchaseVendor
+    ? planList.some(
+        (p) =>
+          planRole(p) === "subscription" &&
+          !p.pending &&
+          p.vendor === purchaseVendor,
+      )
+    : hasActiveSubscriptionTier;
   // Treat a login saved before this field existed as verified: those accounts
   // were backfilled verified by migration 0020, and defaulting to "unverified"
   // would show an existing paying customer a badge telling them to verify an
@@ -1021,7 +1064,15 @@ requires_openai_auth = true`,
       return;
     }
     // 组织成员的 active 由服务端按当前项目算：当前项目有额度才为 true。
-    if (isActive) {
+    // 个人用户还要看额度是不是这个 app 那一家的：只买了 Claude 的人开 Codex
+    // 转发，开了也只会收到 402。组织成员的额度按项目算，不在这里按厂商拦。
+    const appVendor = vendorForApp(app);
+    const covered = (sub: GatewaySubscriptionStatus | undefined) =>
+      Boolean(sub) &&
+      (isOrgMember
+        ? Boolean(sub?.active)
+        : subscriptionCoversVendor(sub!, appVendor));
+    if (covered(subscription)) {
       await startForwarding(app);
       return;
     }
@@ -1035,7 +1086,7 @@ requires_openai_auth = true`,
     } finally {
       setFwdBusyApp(null);
     }
-    if (fresh?.subscription.active) {
+    if (fresh && covered(fresh.subscription)) {
       await startForwarding(app);
       return;
     }
@@ -1057,20 +1108,30 @@ requires_openai_auth = true`,
     }
     const memberOrg = orgNow === undefined ? org : orgNow;
     if (login && memberOrg) {
+      // 缓存还以为不是组织成员、于是按厂商拦下来的那一种：组织额度不分厂商。
+      if (fresh.subscription.active) {
+        await startForwarding(app);
+        return;
+      }
       revealPanel();
       promptNoProjectAllowance(memberOrg);
       return;
     }
     // 服务端确认了确实没开通。未验证邮箱的话连购买屏都进不去，goToPurchase 会
     // 改道去验证屏并自己提示原因——这里就别再叠一条「请先购买会员」的 toast。
+    // 购买屏直接停在这个 app 那一家上，不用再选一次厂商。
     if (login && fresh.user?.email_verified === false) {
       revealPanel();
-      await goToPurchase(fresh);
+      await goToPurchase(fresh, "subscription", appVendor);
       return;
     }
-    toast.info("请先购买会员再开启转发");
+    toast.info(
+      fresh.subscription.active
+        ? `当前套餐不含 ${vendorLabel(appVendor)} 额度，${APP_DISPLAY_NAME[app]} 需要 ${vendorLabel(appVendor)} 套餐`
+        : "请先购买会员再开启转发",
+    );
     revealPanel();
-    await goToPurchase(fresh);
+    await goToPurchase(fresh, "subscription", appVendor);
   }
 
   // 主界面卡片 → 面板。监听器只挂一次，经 ref 调最新的那份闭包（login、
@@ -1674,10 +1735,12 @@ requires_openai_auth = true`,
   // 到任何已有套餐的线索，一路点下去会开出一张真实的微信订单——重复付钱。
   // 这一次刷新同时把 emailVerified 也校准了，所以放在验证拦截之前。
   // `known` 是调用方刚读到的订阅（读失败则为 null），传进来就不再重复请求；
-  // 省略则在这里读一次。
+  // 省略则在这里读一次。`presetVendor` 跳过选厂商那一步（目录里没有这一家时
+  // 照样会问）。
   async function goToPurchase(
     known?: SubscriptionRead | null,
     nextIntent: PurchaseIntent = "subscription",
+    presetVendor: string | null = null,
   ) {
     // 版本太老时服务端会拒单/算错账，进购买屏只会让人走到最后一步才失败。
     // UI 上已经把入口禁掉了，这里是兜底 —— goToPurchase 还有别的调用点
@@ -1713,6 +1776,7 @@ requires_openai_auth = true`,
     // 意图不粘住上一次的选择：加量包是少数意图，下一次来换档的人不看提示
     // 就点下去会买错东西。只有从「再买一个加量包」进来时才预置成 extra。
     setIntent(nextIntent);
+    setVendor(presetVendor);
     setScreen("purchase");
     void loadCatalog();
   }
@@ -1721,14 +1785,16 @@ requires_openai_auth = true`,
   // 目录里没有 eligibility（未带登录态、服务端读买家状态失败）时按本地有没有
   // 订阅层说一句不承诺的话。
   function extraIntentDesc(): string {
-    const extra = catalog?.extra;
+    const extra = catalog
+      ? extraForVendor(catalog.extra, purchaseVendor)
+      : null;
     switch (extra?.eligibility?.reason) {
       case "subscription_required":
-        return "需先订阅套餐，赠送额度不算";
+        return `需先订阅${purchaseVendor ? ` ${vendorLabel(purchaseVendor)} ` : ""}套餐，赠送额度不算`;
       case "extra_pack_limit":
         return `已持有 ${extra.max_concurrent_paid_packs ?? 2} 个，到期后可再买`;
     }
-    if (hasActiveSubscriptionTier) return "立即生效，额度叠加，不影响当前套餐";
+    if (purchaseHasTier) return "立即生效，额度叠加，不影响当前套餐";
     // 老网关：目录里没有 requires_plan，那边确实不需要先买套餐。
     if (extra && extra.requires_plan === undefined) {
       return "立即生效，额度叠加，无需先买套餐";
@@ -1741,7 +1807,12 @@ requires_openai_auth = true`,
   // 页面上的「为什么不能买」跟上。不是这几个码返回 null。
   function extraPurchaseErrorMessage(error: unknown): string | null {
     const code = gatewayErrorCode(error);
-    const message = extraErrorMessage(code, catalog?.extra);
+    const message = extraErrorMessage(
+      code,
+      catalog ? extraForVendor(catalog.extra, purchaseVendor) : null,
+      undefined,
+      purchaseVendor,
+    );
     if (
       message &&
       (code === "subscription_required" || code === "extra_pack_limit")
@@ -1812,6 +1883,19 @@ requires_openai_auth = true`,
     }
   }
 
+  // 400 vendor_required / invalid_vendor：手上那份目录是服务端开始按厂商卖之前
+  // 拉的，或者选的那一家下架了。重拉目录、退回选厂商那一步。
+  function handleVendorRejected(error: unknown): boolean {
+    const code = gatewayErrorCode(error);
+    if (code !== "vendor_required" && code !== "invalid_vendor") return false;
+    toast.error("请重新选择购买 Claude 还是 GPT");
+    setVendor(null);
+    setSelectedTier(null);
+    setCheckout(null);
+    void loadCatalog();
+    return true;
+  }
+
   // 选完档位和周期后拉报价，进结账页。
   //
   // **拉不到报价就不放行付款**：没有报价意味着客户端不知道点下去会发生什么
@@ -1837,6 +1921,7 @@ requires_openai_auth = true`,
         periodKey,
         asExtra ? units : undefined,
         asExtra,
+        purchaseVendor,
       );
       setQuoteSupported(true);
       setCheckout({ planId, period: periodKey, units, asExtra, quote });
@@ -1856,6 +1941,7 @@ requires_openai_auth = true`,
         return;
       }
       if (handleOrgMemberPurchaseBlocked(error)) return;
+      if (handleVendorRejected(error)) return;
       setQuoteError(
         (asExtra ? extraPurchaseErrorMessage(error) : null) ??
           (error instanceof Error ? error.message : "获取报价失败，请重试"),
@@ -1908,6 +1994,7 @@ requires_openai_auth = true`,
         asExtra ? units : undefined,
         undefined,
         asExtra,
+        purchaseVendor,
       );
       // 零元单：抵扣额 ≥ 新套餐价，服务端不下微信单，响应里没有 code_url。
       //
@@ -1951,6 +2038,7 @@ requires_openai_auth = true`,
         return;
       }
       if (handleOrgMemberPurchaseBlocked(error)) return;
+      if (handleVendorRejected(error)) return;
       // 管理员在控制台暂停了接单（套餐和加量包都一样）。
       if (gatewayErrorCode(error) === "orders_closed") {
         toast.error("暂停购买，请稍后再来");
@@ -2686,6 +2774,11 @@ requires_openai_auth = true`,
                 // 加量包那条路径没有档位选择这一层，直接退回账号屏；
                 // 订阅层则先退回档位列表。
                 if (intent === "extra" || !selectedTier) {
+                  // 选厂商是第一步，选过了就先退回那一步。
+                  if (purchaseVendor) {
+                    setVendor(null);
+                    return;
+                  }
                   setScreen("account");
                   return;
                 }
@@ -2710,12 +2803,12 @@ requires_openai_auth = true`,
                 <div className="text-xs leading-relaxed text-muted-foreground">
                   已用账户余额完成
                   {settled.action === "extra"
-                    ? "加量包购买"
+                    ? `${vendorPrefix}加量包购买`
                     : settled.action === "renew"
                       ? // 续费不是换档：档位一个字都没变，变的只是到期日。
                         // 说「换档到 pro」会让刚续了 pro 的人以为自己动错了档。
-                        `${planLabel(settled.targetTier)} 续费`
-                      : `换档到 ${planLabel(settled.targetTier)}`}
+                        `${vendorPrefix}${planLabel(settled.targetTier)} 续费`
+                      : `换档到 ${vendorPrefix}${planLabel(settled.targetTier)}`}
                   ，未产生新的付款。
                 </div>
                 <div className="w-full rounded-xl border border-border px-3 py-2.5 text-[11px] leading-relaxed">
@@ -2753,8 +2846,8 @@ requires_openai_auth = true`,
                 <h4 className="text-[15px] font-semibold">微信扫码支付</h4>
                 <div className="text-xs text-muted-foreground">
                   {pending.asExtra
-                    ? `加量包 ${pending.units ?? 0} 单位`
-                    : `${planLabel(pending.planId)} 套餐`}{" "}
+                    ? `${vendorPrefix}加量包 ${pending.units ?? 0} 单位`
+                    : `${vendorPrefix}${planLabel(pending.planId)} 套餐`}{" "}
                   · {findPeriod(pending.period).label} ·{" "}
                   {formatMicrosUSD(pending.amountMicros)}
                 </div>
@@ -2785,6 +2878,7 @@ requires_openai_auth = true`,
               <PlanCheckout
                 quote={checkout.quote}
                 currentValidUntil={subscription?.valid_until}
+                vendor={purchaseVendor}
                 busy={busy}
                 onConfirm={handleCheckoutConfirm}
               />
@@ -2807,6 +2901,58 @@ requires_openai_auth = true`,
                   <Loader2 className="h-4 w-4 animate-spin" />
                 )}
               </div>
+            ) : catalogVendors.length > 0 && !purchaseVendor ? (
+              // 第一步：买给哪一家。Claude 和 GPT 是两份独立的订阅，换档、续费、
+              // 加量包都只作用于选中的这一家，所以在一切之前先问。
+              <>
+                <div className="mb-2 text-xs font-medium text-muted-foreground">
+                  选择要购买的模型
+                </div>
+                <div className="flex flex-col gap-2">
+                  {catalogVendors.map((v) => {
+                    const held = planList.find(
+                      (p) =>
+                        planRole(p) === "subscription" &&
+                        !p.pending &&
+                        p.vendor === v,
+                    );
+                    return (
+                      <button
+                        key={v}
+                        type="button"
+                        onClick={() => {
+                          setVendor(v);
+                          setSelectedTier(null);
+                          setSelectedPeriod(DEFAULT_PERIOD);
+                          setQuoteError(null);
+                        }}
+                        className="flex items-center justify-between rounded-xl border-[1.5px] border-border px-3 py-2.5 text-left transition hover:border-primary/60"
+                      >
+                        <div>
+                          <div className="text-sm font-semibold">
+                            {vendorLabel(v)}
+                          </div>
+                          {vendorBlurb(v) && (
+                            <div className="text-[11px] text-muted-foreground">
+                              {vendorBlurb(v)}
+                            </div>
+                          )}
+                        </div>
+                        {/* 已经有这一家的档位就说出来：点进去是换档 / 续费，
+                            不是再开一份。 */}
+                        {held && (
+                          <span className="flex-none text-[11px] text-muted-foreground">
+                            当前 {planLabel(held.tier)}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                  两家的套餐互相独立，额度只能用于对应的模型
+                </div>
+              </>
             ) : intent === "subscription" && selectedTier ? (
               (() => {
                 const tier = TIERS.find((t) => t.id === selectedTier);
@@ -2826,6 +2972,7 @@ requires_openai_auth = true`,
                 return (
                   <>
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
+                      {vendorPrefix}
                       {tier?.label} 套餐 · 选择购买时长
                     </div>
                     {tier && (
@@ -2915,7 +3062,7 @@ requires_openai_auth = true`,
               // 的角标搬过来会让用户以为 12 个月的加量包也打 9 折。唯一的折扣
               // 是商务价，它有自己的角标和说明，条件是服务端说了算。
               (() => {
-                const extra = catalog.extra;
+                const extra = extraForVendor(catalog.extra, purchaseVendor);
                 const rules = extraUnitRules(extra);
                 const units = parseExtraUnits(extraUnitsInput, rules);
                 const options = extra.prices;
@@ -2924,7 +3071,7 @@ requires_openai_auth = true`,
                   DEFAULT_PERIOD;
                 // 不能买的原因（没有付费套餐 / 加量包已到上限）。目录里没有
                 // eligibility 时是 null，不拦 —— 报价那一步服务端会再说一次。
-                const blocked = extraBlockedMessage(extra);
+                const blocked = extraBlockedMessage(extra, purchaseVendor);
                 const noPlan =
                   extra.eligibility?.reason === "subscription_required";
                 const rate = extra.business_rate;
@@ -2941,7 +3088,8 @@ requires_openai_auth = true`,
                 return (
                   <>
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
-                      购买加量包 · 立即生效，与当前套餐额度叠加
+                      购买{purchaseVendor && ` ${vendorLabel(purchaseVendor)} `}
+                      加量包 · 立即生效，与当前套餐额度叠加
                     </div>
                     {blocked && (
                       <div className="mb-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
@@ -3167,10 +3315,10 @@ requires_openai_auth = true`,
                           // activate_now，用户没有东西可换也没有东西可续。
                           // 不能叫「购买套餐」：打开这个面板的入口按钮就是
                           // 这四个字，两处同名会让人以为点错了地方。
-                          title: hasActiveSubscriptionTier
+                          title: purchaseHasTier
                             ? "更换 / 续费套餐"
                             : "订阅套餐",
-                          desc: hasActiveSubscriptionTier
+                          desc: purchaseHasTier
                             ? "升档、续费立即生效，降档到期后生效"
                             : "按月付费，立即生效",
                         },
@@ -3206,6 +3354,7 @@ requires_openai_auth = true`,
                   </div>
                 )}
                 <div className="mb-2 text-xs font-medium text-muted-foreground">
+                  {purchaseVendor && `${vendorLabel(purchaseVendor)} · `}
                   选择套餐 · 微信支付
                 </div>
                 <div className="grid grid-cols-3 gap-2">

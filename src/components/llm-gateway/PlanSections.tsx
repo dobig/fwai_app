@@ -11,6 +11,7 @@ import {
   starterMultiple,
   tierDescription,
   TIERS,
+  vendorLabel,
 } from "./planCatalog";
 
 // 账号屏的套餐区。分两块是因为加了 grant 角色之后，平铺显示分不清哪张是
@@ -52,6 +53,24 @@ function planDescription(plan: GatewaySubscriptionPlan): string {
   return known ? tierDescription(known) : "";
 }
 
+// 一份额度是哪一家的。只在有套餐绑了厂商时才标：老服务端、或者手上全是绑定
+// 之前买的套餐，标出一排「通用」只是噪音。一旦有绑定的，没绑定的那几份就得
+// 标「通用」—— 不然用户会以为它也只给某一家用。
+function VendorTag({
+  plan,
+  show,
+}: {
+  plan: GatewaySubscriptionPlan;
+  show: boolean;
+}) {
+  if (!show) return null;
+  return (
+    <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-medium text-muted-foreground">
+      {plan.vendor ? vendorLabel(plan.vendor) : "通用"}
+    </span>
+  );
+}
+
 export function PlanSections({
   subscription,
   onSwitchPlan,
@@ -66,6 +85,7 @@ export function PlanSections({
   // 服务端已按 valid_until 排好序，客户端不重排 —— 那个顺序表达的是
   // 「先扣哪一层」，重排会让用户对不上账。
   const extras = plans.filter((p) => planRole(p) === "extra");
+  const showVendor = plans.some((p) => p.vendor);
 
   // 老服务端连 plans 都不返回：没有可列的套餐，有效期由账号卡在套餐名下面
   // 显示（见 LlmGatewaySubscriptionDock）。
@@ -101,6 +121,7 @@ export function PlanSections({
                 className="flex items-center justify-between gap-2 rounded-lg bg-muted/40 px-2.5 py-1.5 text-[11px]"
               >
                 <span className="flex items-center gap-1.5 font-medium">
+                  <VendorTag plan={p} show={showVendor} />
                   {planLabel(p.tier)}
                   {planDescription(p) && (
                     <span className="text-muted-foreground">
@@ -122,6 +143,8 @@ export function PlanSections({
             key={p.grant_id}
             className="mt-1 rounded-lg border border-dashed border-border px-2.5 py-1.5 text-[11px] leading-relaxed text-muted-foreground"
           >
+            {/* Claude 和 GPT 各排各的队，得说清是哪一家到期后切换。 */}
+            {showVendor && p.vendor ? `${vendorLabel(p.vendor)} ` : ""}
             到期后自动切换到 {planLabel(p.tier)}（生效于{" "}
             {formatPlanDate(p.valid_from)}）
           </div>
@@ -169,6 +192,7 @@ export function PlanSections({
                 className="flex items-center justify-between gap-2 rounded-lg bg-muted/40 px-2.5 py-1.5 text-[11px]"
               >
                 <span className="flex items-center gap-1.5 font-medium">
+                  <VendorTag plan={p} show={showVendor} />
                   {/* 档位名而不是又一句「加量包」：块标题已经说过了，
                       重复一遍反而看不出这几张之间的差别。 */}
                   {planLabel(p.tier)}

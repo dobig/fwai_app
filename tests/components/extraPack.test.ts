@@ -4,6 +4,7 @@ import {
   businessRateLabel,
   extraBlockedMessage,
   extraErrorMessage,
+  extraForVendor,
   extraPeriodPrice,
   extraUnitRules,
   extraUnitsRuleText,
@@ -186,6 +187,44 @@ describe("加量包能不能买", () => {
       "加量包单位数不可用：可选 1–20，或 40、60、80",
     );
     expect(extraErrorMessage("create_payment_failed")).toBeNull();
+  });
+});
+
+// 按厂商卖之后，能不能买、享不享商务价都看同一家的那一份 eligibility。
+describe("按厂商挑加量包的 eligibility", () => {
+  const gptNoPlan = {
+    plan_in_force: false,
+    business_rate: false,
+    active_paid_packs: 0,
+    can_buy: false,
+    reason: "subscription_required",
+  };
+  const byVendor = catalog({
+    eligibility_by_vendor: {
+      claude: catalog().eligibility!,
+      openai: gptNoPlan,
+    },
+  });
+
+  it("换成这一家的那一份，不读老字段（那是 Claude 的）", () => {
+    expect(extraForVendor(byVendor, "openai").eligibility).toEqual(gptNoPlan);
+    expect(extraBlockedMessage(extraForVendor(byVendor, "claude"))).toBeNull();
+  });
+
+  it("目录里没有这一家时当「不知道」，不拿 Claude 那份顶替", () => {
+    expect(extraForVendor(byVendor, "gemini").eligibility).toBeUndefined();
+  });
+
+  it("没选厂商或老服务端没有 eligibility_by_vendor 时原样返回", () => {
+    expect(extraForVendor(byVendor, undefined)).toBe(byVendor);
+    const legacy = catalog();
+    expect(extraForVendor(legacy, "openai")).toBe(legacy);
+  });
+
+  it("没有这一家的套餐：说清要先订阅哪一家", () => {
+    expect(
+      extraBlockedMessage(extraForVendor(byVendor, "openai"), "openai"),
+    ).toBe("需要先订阅 GPT 套餐才能购买 GPT 加量包（赠送额度不算）");
   });
 });
 

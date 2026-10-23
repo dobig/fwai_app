@@ -11,6 +11,7 @@ import type {
   GatewayExtraCatalog,
   GatewayExtraEligibility,
 } from "@/lib/api/llm-gateway";
+import { vendorLabel } from "./planCatalog";
 
 // 老网关不发目录时的上限，与服务端 extraMaxUnits 一致。
 export const LEGACY_EXTRA_MAX_UNITS = 99;
@@ -136,6 +137,22 @@ export function extraUnitsRuleText(rules: ExtraUnitRules): string {
 // --- 能不能买 ----------------------------------------------------------------
 
 /**
+ * 买某一家的加量包时该看的那份目录：eligibility 换成这一家的。
+ *
+ * 加量包按厂商卖，能不能买、享不享商务价都要看同一家（或未绑定）的生效套餐，
+ * 所以下面这些函数读到的 eligibility 必须先按厂商挑好。没有 vendor（老服务端，
+ * 目录不列厂商）或目录没有 eligibility_by_vendor 时原样返回 —— 那边只有一份。
+ * 有 eligibility_by_vendor 却没有这一家，就当「不知道」，不拿 Claude 那份顶替。
+ */
+export function extraForVendor(
+  extra: GatewayExtraCatalog,
+  vendor: string | undefined,
+): GatewayExtraCatalog {
+  if (!vendor || !extra.eligibility_by_vendor) return extra;
+  return { ...extra, eligibility: extra.eligibility_by_vendor[vendor] };
+}
+
+/**
  * 不能买时给用户看的那句话；能买（或不知道）返回 null。
  *
  * 只认目录里的 eligibility。拿不到目录（老网关、网络失败）就当「不知道」，
@@ -143,10 +160,13 @@ export function extraUnitsRuleText(rules: ExtraUnitRules): string {
  */
 export function extraBlockedMessage(
   extra?: GatewayExtraCatalog | null,
+  vendor?: string,
 ): string | null {
   const e = extra?.eligibility;
   if (!e || e.can_buy) return null;
-  return extraErrorMessage(e.reason ?? "", extra, e) ?? "暂时无法购买加量包";
+  return (
+    extraErrorMessage(e.reason ?? "", extra, e, vendor) ?? "暂时无法购买加量包"
+  );
 }
 
 /**
@@ -157,12 +177,16 @@ export function extraErrorMessage(
   code: string,
   extra?: GatewayExtraCatalog | null,
   eligibility?: GatewayExtraEligibility,
+  vendor?: string,
 ): string | null {
   switch (code) {
     case "subscription_required":
       // 「赠送额度不算」要说出来：被赠送额度的用户手上明明有量，不说的话
-      // 他会以为自己算是有套餐的。
-      return "需要先订阅套餐才能购买加量包（赠送额度不算）";
+      // 他会以为自己算是有套餐的。按厂商卖时还要说是哪一家：手上有 Claude
+      // 套餐的人买 GPT 加量包被拒，只说「先订阅套餐」他会以为是服务端坏了。
+      return vendor
+        ? `需要先订阅 ${vendorLabel(vendor)} 套餐才能购买 ${vendorLabel(vendor)} 加量包（赠送额度不算）`
+        : "需要先订阅套餐才能购买加量包（赠送额度不算）";
     case "extra_pack_limit": {
       const limit = extra?.max_concurrent_paid_packs ?? 2;
       const held = eligibility?.active_paid_packs;
