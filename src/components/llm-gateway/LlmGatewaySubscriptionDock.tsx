@@ -92,28 +92,27 @@ import { PlanCheckout } from "./PlanCheckout";
 import { PlanSections } from "./PlanSections";
 import { ModelCapBar } from "./ModelCapBar";
 import { OrgProjectRow, ProjectPicker, currentOrgProject } from "./OrgProjects";
+// 价格和陈述规则的文案一律来自服务端：周期列表取 GET /v1/plans 的成品价和
+// 周期名，结账页取 quote 的 amount_due_micros 和 headline，二维码页取下单
+// 响应的 amount_credits。档位描述、能不能买的原因这些句子也在目录里。
 import {
-  TIERS,
+  fillServerText,
   formatMicrosUSD,
   formatPlanDate,
-  planLabel,
-  tierBlurb,
-  tierDescription,
-  vendorBlurb,
+  subscriptionLabel,
   vendorLabel,
 } from "./planCatalog";
-// 周期的名字和天数。价格一律来自服务端：周期列表取 GET /v1/plans 的成品价，
-// 结账页取 quote 的 amount_due_micros，二维码页取下单响应的 amount_credits。
-import { DEFAULT_PERIOD, findPeriod, periodDiscountLabel } from "./planPeriods";
 import {
-  businessRateLabel,
+  DEFAULT_PERIOD,
+  periodDiscountLabel,
+  periodInfo,
+  periodOpenTo,
+} from "./planPeriods";
+import {
   bulkExtraSizes,
-  extraBlockedMessage,
-  extraErrorMessage,
+  extraBlockedText,
   extraForVendor,
-  extraPeriodPrice,
   extraUnitRules,
-  extraUnitsRuleText,
   maxExtraUnits,
   nextExtraUnitsInput,
   parseExtraUnits,
@@ -197,6 +196,15 @@ function gatewayErrorStatus(error: unknown): number {
   return error instanceof GatewayApiError ? error.status : 0;
 }
 
+// 报价 / 下单被拒时服务端写好的那句话（错误体的 message）。「需要先订阅哪一家」
+// 「最多同时持有几个」「单位数可选哪些」都是规则，规则在服务端，所以客户端不
+// 再按错误码自己翻译；code 只用来决定要不要跳转、要不要重拉目录。
+function serverErrorMessage(error: unknown): string | null {
+  if (!(error instanceof GatewayApiError)) return null;
+  const message = error.body.message;
+  return typeof message === "string" && message ? message : null;
+}
+
 function emailErrorMessage(error: unknown, fallback: string): string {
   return EMAIL_ERROR_MESSAGES[gatewayErrorCode(error)] ?? fallback;
 }
@@ -219,11 +227,12 @@ interface PendingOrder {
   // 本地那套预览价不参与 —— 换档时它必然偏高（不含任何抵扣），而扫码扣的是
   // 服务端算出来的数，两个数字对不上是最伤信任的一类 bug。见 #13。
   amountMicros: number;
-  // 加量包买了几个单位，只给二维码页的文案用。订阅层不填。
-  units?: number;
-  // 这一单动的是加量包还是订阅层。只用于二维码页的文案 —— 排队与否由服务端
-  // 判定并通过 quote 的 action 表达，客户端不再自己选。
+  // 这一单动的是加量包还是订阅层。只决定二维码页要不要补一句加量包怎么
+  // 生效 —— 排队与否由服务端判定并通过 quote 的 action 表达。
   asExtra?: boolean;
+  // 二维码上方说买的是什么，取结账页那份报价的 summary（服务端写好的，如
+  // 「换档到 Claude $200」）。老服务端没有报价时为空。
+  summary?: string;
 }
 
 // 购买意图。订阅层走换档判定（服务端按档位高低决定立即生效还是排队），
@@ -281,7 +290,8 @@ interface CheckoutDraft {
 // 档、新到期日是哪天、还剩多少余额。只说「购买成功」的话，用户会以为没生效。
 interface SettledOrder {
   action: GatewayPlanQuote["action"];
-  targetTier: string;
+  // 服务端写好的「买的是什么」，如「Claude $200 续费」。
+  summary?: string;
   newValidUntil?: string;
   resultingBalanceMicros?: number;
 }
@@ -525,33 +535,23 @@ export function LlmGatewaySubscriptionDock({
   // 在前——那也是先被扣额度的那一层。老服务端不返回这个字段，取空数组，
   // 展示逻辑会退回单套餐那一行。
   const planList = subscription?.plans ?? [];
-  // 有没有生效的**订阅层**。这个标志**只决定文案**：有档位时说「更换 /
-  // 续费」，没有时说「购买」。「能不能买加量包」不看它 —— 那个前置（必须有
-  // 生效的付费套餐，赠送额度不算）由服务端判定，客户端读目录里的
-  // eligibility（见 catalog），不在本地复刻：赠送额度、admin 发的档位
-  // 算不算，本地判断不准。
-  // 老服务端不返回 role 也不返回 plans，退回看 isActive。
-  const hasActiveSubscriptionTier =
-    planList.length > 0
-      ? planList.some((p) => planRole(p) === "subscription" && !p.pending)
-      : isActive;
   // 这一单发给服务端的厂商：选了，而且目录里有这一家。目录不列厂商（老服务端）
   // 时是 undefined，请求体里也就不带 —— 从转发那边预选进来的也一样。
   const catalogVendors = catalog?.vendors ?? [];
   const purchaseVendor =
     vendor && catalogVendors.includes(vendor) ? vendor : undefined;
-  // 购买屏文案里的「Claude 」前缀，老服务端下是空串。
-  const vendorPrefix = purchaseVendor ? `${vendorLabel(purchaseVendor)} ` : "";
-  // 有没有**这一家**的订阅层，用途同 hasActiveSubscriptionTier（只决定文案）。
-  // 绑定之前买的档位不参与任何一家的换档 —— 买哪家都是新开一份 —— 所以不算。
-  const purchaseHasTier = purchaseVendor
-    ? planList.some(
-        (p) =>
-          planRole(p) === "subscription" &&
-          !p.pending &&
-          p.vendor === purchaseVendor,
-      )
-    : hasActiveSubscriptionTier;
+  // 购买屏里这一家的显示名，取目录的 vendor_details。老服务端下没有厂商。
+  const purchaseVendorName = purchaseVendor
+    ? vendorLabel(purchaseVendor, catalog?.vendor_details)
+    : undefined;
+  const vendorPrefix = purchaseVendorName ? `${purchaseVendorName} ` : "";
+  // 意图卡片、加量包横幅上的句子：服务端按这个用户、这一家此刻的状态写好的
+  // （有没有档位决定说「更换 / 续费」还是「订阅」，能不能买加量包、为什么不能）。
+  // 这些判断曾经在客户端做，但「赠送额度算不算」「admin 发的档位算不算」本地
+  // 判断不准，说法也随规则变，所以整句交给服务端。
+  const vendorCopy = purchaseVendor
+    ? catalog?.copy?.by_vendor?.[purchaseVendor]
+    : undefined;
   // Treat a login saved before this field existed as verified: those accounts
   // were backfilled verified by migration 0020, and defaulting to "unverified"
   // would show an existing paying customer a badge telling them to verify an
@@ -1781,45 +1781,15 @@ requires_openai_auth = true`,
     void loadCatalog();
   }
 
-  // 意图卡片上「购买加量包」那一格的小字。优先听服务端的 eligibility；
-  // 目录里没有 eligibility（未带登录态、服务端读买家状态失败）时按本地有没有
-  // 订阅层说一句不承诺的话。
-  function extraIntentDesc(): string {
-    const extra = catalog
-      ? extraForVendor(catalog.extra, purchaseVendor)
-      : null;
-    switch (extra?.eligibility?.reason) {
-      case "subscription_required":
-        return `需先订阅${purchaseVendor ? ` ${vendorLabel(purchaseVendor)} ` : ""}套餐，赠送额度不算`;
-      case "extra_pack_limit":
-        return `已持有 ${extra.max_concurrent_paid_packs ?? 2} 个，到期后可再买`;
-    }
-    if (purchaseHasTier) return "立即生效，额度叠加，不影响当前套餐";
-    // 老网关：目录里没有 requires_plan，那边确实不需要先买套餐。
-    if (extra && extra.requires_plan === undefined) {
-      return "立即生效，额度叠加，无需先买套餐";
-    }
-    return "需先订阅套餐，额度叠加在套餐之上";
-  }
-
-  // 加量包被服务端拒绝时的人话。subscription_required / extra_pack_limit
-  // 说明本地的 eligibility 过期了（比如套餐刚好到期），顺手重拉一次目录，让
-  // 页面上的「为什么不能买」跟上。不是这几个码返回 null。
-  function extraPurchaseErrorMessage(error: unknown): string | null {
+  // 报价 / 下单被拒时给用户看的那句话：服务端写好的 message。
+  // subscription_required / extra_pack_limit 说明本地的目录过期了（比如套餐
+  // 刚好到期），顺手重拉一次，让页面上的「为什么不能买」跟上。
+  function purchaseErrorMessage(error: unknown): string | null {
     const code = gatewayErrorCode(error);
-    const message = extraErrorMessage(
-      code,
-      catalog ? extraForVendor(catalog.extra, purchaseVendor) : null,
-      undefined,
-      purchaseVendor,
-    );
-    if (
-      message &&
-      (code === "subscription_required" || code === "extra_pack_limit")
-    ) {
+    if (code === "subscription_required" || code === "extra_pack_limit") {
       void loadCatalog();
     }
-    return message;
+    return serverErrorMessage(error);
   }
 
   // 兑换码。服务端做归一化和全部校验，这里只负责把错误码翻成人话 ——
@@ -1943,7 +1913,7 @@ requires_openai_auth = true`,
       if (handleOrgMemberPurchaseBlocked(error)) return;
       if (handleVendorRejected(error)) return;
       setQuoteError(
-        (asExtra ? extraPurchaseErrorMessage(error) : null) ??
+        purchaseErrorMessage(error) ??
           (error instanceof Error ? error.message : "获取报价失败，请重试"),
       );
     } finally {
@@ -1951,10 +1921,13 @@ requires_openai_auth = true`,
     }
   }
 
-  /** 结账页点确认。排队要到下个周期才生效且不退现金，先弹二次确认。 */
+  /**
+   * 结账页点确认。哪些单要二次确认（目前是排队：下个周期才生效且不退现金）
+   * 由服务端决定 —— 它在报价里给了 confirm_title 就弹。
+   */
   function handleCheckoutConfirm() {
     if (!checkout) return;
-    if (checkout.quote.action === "queue") {
+    if (checkout.quote.confirm_title) {
       setConfirmQueue(true);
       return;
     }
@@ -1977,7 +1950,7 @@ requires_openai_auth = true`,
       return;
     }
     if (asExtra && units === undefined) {
-      toast.error(extraUnitsRuleText(extraUnitRules(catalog?.extra)));
+      toast.error(catalog?.extra.units_rule_text || "加量包单位数不可用");
       return;
     }
     setBusy(true);
@@ -2009,7 +1982,7 @@ requires_openai_auth = true`,
         await onActivated();
         setSettled({
           action: order.action ?? checkout?.quote.action ?? "activate_now",
-          targetTier: checkout?.quote.target_tier ?? planId,
+          summary: order.summary ?? checkout?.quote.summary,
           newValidUntil:
             order.new_valid_until ?? checkout?.quote.new_valid_until,
           resultingBalanceMicros:
@@ -2025,8 +1998,8 @@ requires_openai_auth = true`,
         planId,
         period: periodKey,
         amountMicros: order.amount_credits,
-        units: asExtra ? units : undefined,
         asExtra,
+        summary: checkout?.quote.summary,
       });
     } catch (error) {
       // The server is the real gate — goToPurchase only intercepts early, and a
@@ -2039,14 +2012,15 @@ requires_openai_auth = true`,
       }
       if (handleOrgMemberPurchaseBlocked(error)) return;
       if (handleVendorRejected(error)) return;
-      // 管理员在控制台暂停了接单（套餐和加量包都一样）。
-      if (gatewayErrorCode(error) === "orders_closed") {
+      const message = purchaseErrorMessage(error);
+      // 管理员在控制台暂停了接单（套餐和加量包都一样）。老服务端不带 message
+      // 时的兜底。
+      if (!message && gatewayErrorCode(error) === "orders_closed") {
         toast.error("暂停购买，请稍后再来");
         return;
       }
       toast.error(
-        (asExtra ? extraPurchaseErrorMessage(error) : null) ??
-          (error instanceof Error ? error.message : "购买失败"),
+        message ?? (error instanceof Error ? error.message : "购买失败"),
       );
     } finally {
       setBusy(false);
@@ -2400,7 +2374,7 @@ requires_openai_auth = true`,
                         : "bg-muted text-muted-foreground"
                     }`}
                   >
-                    {isActive ? planLabel(subscription?.tier) : "未开通"}
+                    {isActive ? subscriptionLabel(subscription) : "未开通"}
                   </span>
                   {/* 老服务端不返回 plans 时，有效期只有这一个数：放在套餐名
                       下面，不单独占一行。有 plans 时每条套餐自己带到期日，
@@ -2800,15 +2774,11 @@ requires_openai_auth = true`,
                     ? "切换已安排"
                     : "已完成，无需付款"}
                 </h4>
+                {/* 买的是什么由服务端的 summary 说（续费说「续费」、换档说
+                    「换档到」—— 说错了会让刚续了 pro 的人以为自己动错了档）。 */}
                 <div className="text-xs leading-relaxed text-muted-foreground">
                   已用账户余额完成
-                  {settled.action === "extra"
-                    ? `${vendorPrefix}加量包购买`
-                    : settled.action === "renew"
-                      ? // 续费不是换档：档位一个字都没变，变的只是到期日。
-                        // 说「换档到 pro」会让刚续了 pro 的人以为自己动错了档。
-                        `${vendorPrefix}${planLabel(settled.targetTier)} 续费`
-                      : `换档到 ${vendorPrefix}${planLabel(settled.targetTier)}`}
+                  {settled.summary ? `「${settled.summary}」` : "购买"}
                   ，未产生新的付款。
                 </div>
                 <div className="w-full rounded-xl border border-border px-3 py-2.5 text-[11px] leading-relaxed">
@@ -2845,17 +2815,19 @@ requires_openai_auth = true`,
               <div className="flex flex-col items-center gap-3 py-1 text-center">
                 <h4 className="text-[15px] font-semibold">微信扫码支付</h4>
                 <div className="text-xs text-muted-foreground">
-                  {pending.asExtra
-                    ? `${vendorPrefix}加量包 ${pending.units ?? 0} 单位`
-                    : `${vendorPrefix}${planLabel(pending.planId)} 套餐`}{" "}
-                  · {findPeriod(pending.period).label} ·{" "}
-                  {formatMicrosUSD(pending.amountMicros)}
+                  {[
+                    pending.summary,
+                    periodInfo(catalog?.periods, pending.period).label,
+                    formatMicrosUSD(pending.amountMicros),
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </div>
                 {/* 付款前再说一次这一单动的是哪一层。排队与否不在这里说 ——
                     那由服务端判定并通过 quote 的 action 表达（见 #11）。 */}
-                {pending.asExtra && (
+                {pending.asExtra && catalog?.copy?.extra_effect && (
                   <div className="-mt-1.5 text-[11px] text-muted-foreground">
-                    立即生效，与当前套餐额度叠加
+                    {catalog.copy.extra_effect}
                   </div>
                 )}
                 {pending.codeURL && (
@@ -2877,8 +2849,7 @@ requires_openai_auth = true`,
             ) : checkout ? (
               <PlanCheckout
                 quote={checkout.quote}
-                currentValidUntil={subscription?.valid_until}
-                vendor={purchaseVendor}
+                vendorName={purchaseVendorName}
                 busy={busy}
                 onConfirm={handleCheckoutConfirm}
               />
@@ -2930,37 +2901,47 @@ requires_openai_auth = true`,
                       >
                         <div>
                           <div className="text-sm font-semibold">
-                            {vendorLabel(v)}
+                            {vendorLabel(v, catalog.vendor_details)}
                           </div>
-                          {vendorBlurb(v) && (
-                            <div className="text-[11px] text-muted-foreground">
-                              {vendorBlurb(v)}
-                            </div>
-                          )}
+                          {(() => {
+                            const blurb = catalog.vendor_details?.find(
+                              (d) => d.id === v,
+                            )?.blurb;
+                            return (
+                              blurb && (
+                                <div className="text-[11px] text-muted-foreground">
+                                  {blurb}
+                                </div>
+                              )
+                            );
+                          })()}
                         </div>
                         {/* 已经有这一家的档位就说出来：点进去是换档 / 续费，
                             不是再开一份。 */}
                         {held && (
                           <span className="flex-none text-[11px] text-muted-foreground">
-                            当前 {planLabel(held.tier)}
+                            当前 {held.label || held.tier}
                           </span>
                         )}
                       </button>
                     );
                   })}
                 </div>
-                <div className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-                  两家的套餐互相独立，额度只能用于对应的模型
-                </div>
+                {catalog.copy?.vendor_note && (
+                  <div className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                    {catalog.copy.vendor_note}
+                  </div>
+                )}
               </>
             ) : intent === "subscription" && selectedTier ? (
               (() => {
-                const tier = TIERS.find((t) => t.id === selectedTier);
+                const tier = catalog.plans.find((p) => p.id === selectedTier);
                 // 这一屏的每一个数字都是服务端给的成品价。服务端只列这一档
-                // 卖的周期，周付档（只卖给加量包）本来就不在里面。
-                const options =
-                  catalog.plans.find((p) => p.id === selectedTier)?.prices ??
-                  [];
+                // 卖的周期，周付档（只卖给加量包）本来就不在里面；这一家买不了
+                // 的周期（Claude 只卖 1 个月）按 periods[].vendors 再滤掉。
+                const options = (tier?.prices ?? []).filter((p) =>
+                  periodOpenTo(catalog.periods, p.period, purchaseVendor),
+                );
                 // A tier switch can strand a weekly selection on a catalog
                 // tier that cannot buy one; fall back rather than send the
                 // server a period it will reject.
@@ -2973,16 +2954,17 @@ requires_openai_auth = true`,
                   <>
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
                       {vendorPrefix}
-                      {tier?.label} 套餐 · 选择购买时长
+                      {tier?.name} 套餐 · 选择购买时长
                     </div>
-                    {tier && (
+                    {/* 「适合谁」「几倍 Starter」是服务端写的 description。 */}
+                    {tier?.description && (
                       <div className="mb-2.5 rounded-lg bg-muted/40 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
-                        {tierDescription(tier)}
+                        {tier.description}
                       </div>
                     )}
                     <div className="flex flex-col gap-2">
                       {options.map((price) => {
-                        const p = findPeriod(price.period);
+                        const p = periodInfo(catalog.periods, price.period);
                         const badge = periodDiscountLabel(
                           catalog.periods.find((x) => x.key === price.period)
                             ?.discount_bps,
@@ -3009,7 +2991,8 @@ requires_openai_auth = true`,
                                 )}
                               </div>
                               <div className="text-[11px] text-muted-foreground">
-                                {perUnitLabel(price)} · {p.days} 天
+                                {perUnitLabel(price)}
+                                {p.days !== undefined && ` · ${p.days} 天`}
                               </div>
                             </div>
                             <div className="text-right">
@@ -3059,37 +3042,40 @@ requires_openai_auth = true`,
             ) : intent === "extra" ? (
               // 加量包路径：两个输入（买几个单位、买多久），**没有档位卡片、
               // 没有期限折扣角标** —— 加量包不吃 6/12 个月的折扣，把订阅那边
-              // 的角标搬过来会让用户以为 12 个月的加量包也打 9 折。唯一的折扣
-              // 是商务价，它有自己的角标和说明，条件是服务端说了算。
+              // 的角标搬过来会让用户以为 12 个月的加量包也打 9 折。
               (() => {
                 const extra = extraForVendor(catalog.extra, purchaseVendor);
                 const rules = extraUnitRules(extra);
                 const units = parseExtraUnits(extraUnitsInput, rules);
-                const options = extra.prices;
+                // Claude 的加量包最长 1 个月，GPT 不限 —— 同订阅那边一样按
+                // periods[].vendors 滤。
+                const options = extra.prices.filter((p) =>
+                  periodOpenTo(catalog.periods, p.period, purchaseVendor),
+                );
                 const period =
                   options.find((p) => p.period === selectedPeriod)?.period ??
                   DEFAULT_PERIOD;
-                // 不能买的原因（没有付费套餐 / 加量包已到上限）。目录里没有
-                // eligibility 时是 null，不拦 —— 报价那一步服务端会再说一次。
-                const blocked = extraBlockedMessage(extra, purchaseVendor);
+                // 不能买的原因（没有付费套餐 / 加量包已到上限），服务端写好的
+                // 句子。目录里没有 eligibility 时是 null，不拦 —— 报价那一步
+                // 服务端会再说一次。
+                const blocked = extraBlockedText(
+                  extra,
+                  catalog.copy,
+                  purchaseVendor,
+                );
                 const noPlan =
                   extra.eligibility?.reason === "subscription_required";
-                const rate = extra.business_rate;
-                const rateQualified = Boolean(
-                  rate && extra.eligibility?.business_rate,
-                );
                 // 20 以上可选的那几档，连同 20 本身做成快捷选项：输入框里一格
-                // 一格点到 80 太累，而这几档正好是商务价的整块。
+                // 一格点到 80 太累。
                 const bulk = bulkExtraSizes(rules);
                 const quickSizes = bulk.length > 0 ? [rules.step, ...bulk] : [];
-                const rateSizes = rate
-                  ? quickSizes.filter((n) => n % rate.unit_step === 0)
-                  : [];
                 return (
                   <>
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
-                      购买{purchaseVendor && ` ${vendorLabel(purchaseVendor)} `}
-                      加量包 · 立即生效，与当前套餐额度叠加
+                      购买{purchaseVendorName && ` ${purchaseVendorName} `}
+                      加量包
+                      {catalog.copy?.extra_effect &&
+                        ` · ${catalog.copy.extra_effect}`}
                     </div>
                     {blocked && (
                       <div className="mb-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
@@ -3171,58 +3157,40 @@ requires_openai_auth = true`,
                           ))}
                         </div>
                       )}
-                      {/* 额度用相对描述，不给具体金额 —— 理由同档位卡片
-                          （见 planDescription）。1 单位恒等于 1× Starter，
-                          所以 N 单位就是 N×，倍数是精确的。上面那行标签里的
-                          单价是**价格**不是额度，保留：用户得知道花多少钱。
-                          商务价折的只是价钱，额度照旧是 N×。 */}
-                      <div className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
-                        {units
-                          ? `${units} 单位 = ${units}× Starter 的用量，叠加在当前套餐之上`
-                          : "额度按单位线性叠加在当前套餐之上"}
-                      </div>
-                      {units === null ? (
-                        <div className="mt-1 text-[11px] font-medium text-red-500">
-                          {extraUnitsRuleText(rules)}
+                      {/* 额度用相对描述，不给具体金额 —— 「N 单位 = N×
+                          Starter」这句由服务端写（units_text，{units} 由这里
+                          填），单位数规则那句也是（units_rule_text）。上面那行
+                          标签里的单价是**价格**不是额度，保留：用户得知道花
+                          多少钱。 */}
+                      {units !== null && catalog.extra.units_text && (
+                        <div className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                          {fillServerText(catalog.extra.units_text, { units })}
                         </div>
-                      ) : (
-                        bulk.length > 0 && (
-                          <div className="mt-0.5 text-[10px] text-muted-foreground">
-                            {extraUnitsRuleText(rules)}
-                          </div>
-                        )
                       )}
+                      {catalog.extra.units_rule_text &&
+                        (units === null ? (
+                          <div className="mt-1 text-[11px] font-medium text-red-500">
+                            {catalog.extra.units_rule_text}
+                          </div>
+                        ) : (
+                          bulk.length > 0 && (
+                            <div className="mt-0.5 text-[10px] text-muted-foreground">
+                              {catalog.extra.units_rule_text}
+                            </div>
+                          )
+                        ))}
                     </div>
-                    {/* 商务价说明。对所有人都说：不是 Business 的用户也该知道
-                        有这回事；是的话说清楚他这一单享不享受（要整 20 单位、
-                        按月）。周付原价也要说，不然选了周付看到原价会以为坏了。 */}
-                    {rate && rateSizes.length > 0 && (
-                      <div
-                        className={`mb-2.5 rounded-lg px-3 py-2 text-[11px] leading-relaxed ${
-                          rateQualified
-                            ? "bg-green-500/10 text-green-700 dark:text-green-300"
-                            : "bg-muted/40 text-muted-foreground"
-                        }`}
-                      >
-                        {rateQualified
-                          ? `你的 ${planLabel(rate.plan_id)} 套餐享商务价：${rateSizes.join(" / ")} 单位按月购买${businessRateLabel(rate.discount_bps)}，按周购买仍为原价`
-                          : `${planLabel(rate.plan_id)} 套餐用户按月购买 ${rateSizes.join(" / ")} 单位享商务价（${businessRateLabel(rate.discount_bps)}）`}
-                      </div>
-                    )}
                     <div className="mb-1 text-xs font-medium text-muted-foreground">
                       购买时长
                     </div>
                     <div className="flex flex-col gap-2">
-                      {/* 周期全部开放：周付的限制只作用于订阅层。每行的价格是
-                          目录里「一个单位」的成品价（商务价取 business_rate
-                          的那一份），不乘单位数 —— N 单位的实付以结账页的报价
-                          为准，客户端不算钱。 */}
+                      {/* 周付只对加量包开放，订阅层不卖。每行的价格是目录里
+                          「一个单位」的成品价，不乘单位数 —— N 单位的实付以
+                          结账页的报价为准，客户端不算钱。单位数不合法时不显示
+                          价格，免得像是在给一个买不到的数报价。 */}
                       {options.map((listPrice) => {
-                        const p = findPeriod(listPrice.period);
-                        const price =
-                          units === null
-                            ? null
-                            : extraPeriodPrice(extra, units, listPrice.period);
+                        const p = periodInfo(catalog.periods, listPrice.period);
+                        const price = units === null ? null : listPrice;
                         return (
                           <button
                             key={listPrice.period}
@@ -3237,35 +3205,25 @@ requires_openai_auth = true`,
                             <div>
                               <div className="text-sm font-semibold">
                                 {p.label}
-                                {price?.businessRate && (
-                                  <span className="ml-1.5 rounded bg-green-600 px-1 py-0.5 text-[10px] font-bold text-white">
-                                    商务价
-                                  </span>
-                                )}
                               </div>
                               {price && (
                                 <div className="text-[11px] text-muted-foreground">
-                                  {p.days} 天
+                                  {p.days !== undefined && `${p.days} 天`}
                                 </div>
                               )}
                             </div>
                             {price ? (
                               <div className="text-right">
                                 <div className="text-[15px] font-bold">
-                                  {formatMicrosUSD(price.chargeMicros)}
+                                  {formatMicrosUSD(price.charge_micros)}
                                   <span className="text-[11px] font-normal text-muted-foreground">
                                     /单位
                                   </span>
                                 </div>
-                                {price.listMicros > price.chargeMicros && (
-                                  <div className="text-[11px] text-muted-foreground line-through">
-                                    {formatMicrosUSD(price.listMicros)}/单位
-                                  </div>
-                                )}
                               </div>
                             ) : (
                               <span className="text-[11px] text-muted-foreground">
-                                {p.days} 天
+                                {p.days !== undefined && `${p.days} 天`}
                               </span>
                             )}
                           </button>
@@ -3301,7 +3259,8 @@ requires_openai_auth = true`,
                     要求先有生效的付费套餐才能买加量包（赠送额度不算，见
                     llm_gateway#325）。不把入口藏掉，点进去能看到原因和「去订阅
                     套餐」—— 藏掉的话，被赠送额度的用户不知道加量包为什么没了。
-                    老网关的目录不带 requires_plan，那边仍是「无需先买套餐」。
+                    两张卡片上的字（「更换 / 续费」还是「订阅」、加量包为什么
+                    买不了）都是服务端按这个用户的状态写好的，见 vendorCopy。
 
                     老网关（探测到没有 quote 端点）仍然不问：那边不认 as_extra，
                     选了加量包只会买到一份并行叠加的普通套餐。 */}
@@ -3311,21 +3270,15 @@ requires_openai_auth = true`,
                       [
                         {
                           key: "subscription" as const,
-                          // 没有档位时说「更换 / 续费」是假的 —— 那一单会是
-                          // activate_now，用户没有东西可换也没有东西可续。
-                          // 不能叫「购买套餐」：打开这个面板的入口按钮就是
-                          // 这四个字，两处同名会让人以为点错了地方。
-                          title: purchaseHasTier
-                            ? "更换 / 续费套餐"
-                            : "订阅套餐",
-                          desc: purchaseHasTier
-                            ? "升档、续费立即生效，降档到期后生效"
-                            : "按月付费，立即生效",
+                          // 服务端没给标题（老网关）时只说「套餐」：说「更换
+                          // / 续费」可能是假的，那一单也许是 activate_now。
+                          title: vendorCopy?.subscription_title || "套餐",
+                          desc: vendorCopy?.subscription_hint ?? "",
                         },
                         {
                           key: "extra" as const,
                           title: "购买加量包",
-                          desc: extraIntentDesc(),
+                          desc: vendorCopy?.extra_hint ?? "",
                         },
                       ] as const
                     ).map((opt) => (
@@ -3354,43 +3307,40 @@ requires_openai_auth = true`,
                   </div>
                 )}
                 <div className="mb-2 text-xs font-medium text-muted-foreground">
-                  {purchaseVendor && `${vendorLabel(purchaseVendor)} · `}
+                  {purchaseVendorName && `${purchaseVendorName} · `}
                   选择套餐 · 微信支付
                 </div>
                 <div className="grid grid-cols-3 gap-2">
-                  {TIERS.map((tier) => (
+                  {catalog.plans.map((tier) => (
                     <button
                       key={tier.id}
                       type="button"
                       disabled={busy}
                       className={`relative rounded-xl border-[1.5px] bg-background px-2 py-3 text-center transition hover:-translate-y-0.5 hover:border-primary disabled:opacity-60 ${
-                        tier.id === "pro" ? "border-primary" : "border-border"
+                        tier.badge ? "border-primary" : "border-border"
                       }`}
                       onClick={() => {
                         setSelectedTier(tier.id);
                         setSelectedPeriod(DEFAULT_PERIOD);
                       }}
                     >
-                      {tier.id === "pro" && (
+                      {/* 角标（「最受欢迎」）推哪一档、写什么都是服务端的事。 */}
+                      {tier.badge && (
                         <span className="absolute -top-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-white">
-                          最受欢迎
+                          {tier.badge}
                         </span>
                       )}
                       <div className="my-0.5 text-xl font-bold tracking-tight">
-                        {(() => {
-                          const plan = catalog.plans.find(
-                            (p) => p.id === tier.id,
-                          );
-                          return plan
-                            ? formatMicrosUSD(plan.price_usd_micros)
-                            : "—";
-                        })()}
+                        {formatMicrosUSD(tier.price_usd_micros)}
                       </div>
                       {/* 额度用相对描述，不给具体金额 —— 「5h $400」对用户是
-                          个无从解读的数字，「20× Starter」才说明得了买哪档。 */}
-                      <div className="text-[10px] leading-relaxed text-muted-foreground">
-                        {tierBlurb(tier)}
-                      </div>
+                          个无从解读的数字，「10× Starter」才说明得了买哪档。
+                          那句话（blurb）由服务端按当前的额度规则写。 */}
+                      {tier.blurb && (
+                        <div className="text-[10px] leading-relaxed text-muted-foreground">
+                          {tier.blurb}
+                        </div>
+                      )}
                     </button>
                   ))}
                 </div>
@@ -3612,19 +3562,19 @@ requires_openai_auth = true`,
         )}
       </div>
 
-      {/* 排队生效的换档（降档或同档续费）服务端不提供取消端点，也不退现金。
-          页面上那行小字挡不住误操作，这里再拦一道，把三件事说清楚：什么时候
-          生效、钱不退现金但改主意时会折成抵扣、期间当前套餐照常可用。 */}
+      {/* 排队生效的换档服务端不提供取消端点，也不退现金。页面上那行小字挡
+          不住误操作，这里再拦一道。要不要拦、弹窗说什么（什么时候生效、钱不退
+          现金但改主意时会折成抵扣、期间当前套餐照常可用）都在报价的
+          confirm_title / confirm_message 里，日期按本地时区填。 */}
       <ConfirmDialog
         isOpen={confirmQueue}
-        title="确认排队切换套餐？"
+        title={checkout?.quote.confirm_title ?? ""}
         message={
           checkout
-            ? `当前套餐到期后${
-                formatPlanDate(subscription?.valid_until)
-                  ? `（${formatPlanDate(subscription?.valid_until)}）`
-                  : ""
-              }自动切换到 ${planLabel(checkout.quote.target_tier)}。\n\n此操作不退款。之后如果改主意再换别的套餐，这笔费用会全额折算抵扣。\n\n切换前当前套餐照常可用，额度不受影响。`
+            ? fillServerText(checkout.quote.confirm_message, {
+                new_valid_from: formatPlanDate(checkout.quote.new_valid_from),
+                new_valid_until: formatPlanDate(checkout.quote.new_valid_until),
+              })
             : ""
         }
         confirmText="确认切换"

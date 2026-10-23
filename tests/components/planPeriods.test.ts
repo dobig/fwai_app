@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
-  findPeriod,
   periodDiscountLabel,
+  periodInfo,
 } from "@/components/llm-gateway/planPeriods";
 
-// 这里只剩周期的显示信息。价格全部来自服务端，本文件不再有任何金额。
+// 这里只剩把服务端的周期信息读出来。价格和周期名全部来自服务端。
 describe("planPeriods", () => {
   it("折扣角标按服务端的 discount_bps 格式化", () => {
     expect(periodDiscountLabel(9000)).toBe("9折");
@@ -14,8 +14,27 @@ describe("planPeriods", () => {
     expect(periodDiscountLabel(undefined)).toBe("");
   });
 
-  it("未知周期退回 1 个月，不返回 undefined", () => {
-    // 服务端将来加了新周期、老客户端不认识时，宁可显示成月付也不要崩。
-    expect(findPeriod("99y").key).toBe("1m");
+  it("周期名和天数取服务端目录，取不到时名字退回 key", () => {
+    const periods = [
+      {
+        key: "1m",
+        label: "整整一个月",
+        days: 30,
+        discount_bps: 10000,
+        extra_only: false,
+      },
+      { key: "1w", days: 7, discount_bps: 10000, extra_only: true },
+    ];
+    expect(periodInfo(periods, "1m")).toEqual({
+      label: "整整一个月",
+      days: 30,
+    });
+    // 老服务端不发 label：显示 key，难看但不说错话。
+    expect(periodInfo(periods, "1w")).toEqual({ label: "1w", days: 7 });
+    expect(periodInfo(periods, "99y")).toEqual({
+      label: "99y",
+      days: undefined,
+    });
+    expect(periodInfo(undefined, "1m").label).toBe("1m");
   });
 });

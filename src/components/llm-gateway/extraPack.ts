@@ -1,17 +1,16 @@
-// 加量包的购买规则：能买多大、能不能买、按哪个价显示。纯函数，没有状态。
+// 加量包的购买规则：能买多大、能不能买。纯函数，没有状态。
 //
 // 规则全部来自服务端目录（GET /v1/plans 的 extra 块），这里只是读它。字段缺
-// 失（老网关）时退回老规则：1–max_units 任选、没有前置条件、没有商务价。
+// 失（老网关）时退回老规则：1–max_units 任选、没有前置条件。说明规则的句子
+// （单位数怎么选、为什么买不了）也是服务端写好的，这里不拼。
 //
 // 这里**没有任何金额计算**。周期行上显示的是服务端给的「一个单位多少钱」
-// 原样照搬（商务价取 business_rate 的那一份），不乘单位数、不打折。N 单位的
-// 实付以结账页的报价为准。
+// 原样照搬，不乘单位数、不打折。N 单位的实付以结账页的报价为准。
 
 import type {
   GatewayExtraCatalog,
-  GatewayExtraEligibility,
+  GatewayPurchaseCopy,
 } from "@/lib/api/llm-gateway";
-import { vendorLabel } from "./planCatalog";
 
 // 老网关不发目录时的上限，与服务端 extraMaxUnits 一致。
 export const LEGACY_EXTRA_MAX_UNITS = 99;
@@ -127,19 +126,12 @@ export function nextExtraUnitsInput(
   return nextRaw;
 }
 
-/** 单位数规则的一句话说明，用于输入框下的提示和 invalid_extra_units 报错。 */
-export function extraUnitsRuleText(rules: ExtraUnitRules): string {
-  const bulk = bulkExtraSizes(rules);
-  if (bulk.length === 0) return `请输入 1–${rules.max} 的整数`;
-  return `可选 1–${rules.step}，或 ${bulk.join("、")}`;
-}
-
 // --- 能不能买 ----------------------------------------------------------------
 
 /**
  * 买某一家的加量包时该看的那份目录：eligibility 换成这一家的。
  *
- * 加量包按厂商卖，能不能买、享不享商务价都要看同一家（或未绑定）的生效套餐，
+ * 加量包按厂商卖，能不能买要看同一家（或未绑定）的生效套餐，
  * 所以下面这些函数读到的 eligibility 必须先按厂商挑好。没有 vendor（老服务端，
  * 目录不列厂商）或目录没有 eligibility_by_vendor 时原样返回 —— 那边只有一份。
  * 有 eligibility_by_vendor 却没有这一家，就当「不知道」，不拿 Claude 那份顶替。
@@ -153,106 +145,23 @@ export function extraForVendor(
 }
 
 /**
- * 不能买时给用户看的那句话；能买（或不知道）返回 null。
+ * 这一家的加量包现在买不了时横幅上的那句话；能买（或不知道）返回 null。
  *
- * 只认目录里的 eligibility。拿不到目录（老网关、网络失败）就当「不知道」，
- * 不拦 —— 服务端会在报价那一步再校验，最坏是一个能看懂的 409 提示。
+ * 句子是服务端按这个用户的状态写好的（copy.by_vendor[v].extra_blocked），
+ * 客户端不再自己翻译 reason：「赠送额度不算」「最多同时持有几个」这些说法都是
+ * 规则，规则在服务端。服务端说不能买（eligibility.can_buy=false）却没给句子
+ * 时只说一句不承诺原因的话，按钮照样置灰。拿不到目录（老网关、网络失败）
+ * 就当「不知道」，不拦 —— 服务端会在报价那一步再校验。
  */
-export function extraBlockedMessage(
-  extra?: GatewayExtraCatalog | null,
-  vendor?: string,
+export function extraBlockedText(
+  extra: GatewayExtraCatalog | null | undefined,
+  copy: GatewayPurchaseCopy | undefined,
+  vendor: string | undefined,
 ): string | null {
-  const e = extra?.eligibility;
-  if (!e || e.can_buy) return null;
-  return (
-    extraErrorMessage(e.reason ?? "", extra, e, vendor) ?? "暂时无法购买加量包"
-  );
-}
-
-/**
- * 报价 / 下单被拒时的错误码 → 人话。不认识的码返回 null，调用方用原来的
- * 兜底文案。
- */
-export function extraErrorMessage(
-  code: string,
-  extra?: GatewayExtraCatalog | null,
-  eligibility?: GatewayExtraEligibility,
-  vendor?: string,
-): string | null {
-  switch (code) {
-    case "subscription_required":
-      // 「赠送额度不算」要说出来：被赠送额度的用户手上明明有量，不说的话
-      // 他会以为自己算是有套餐的。按厂商卖时还要说是哪一家：手上有 Claude
-      // 套餐的人买 GPT 加量包被拒，只说「先订阅套餐」他会以为是服务端坏了。
-      return vendor
-        ? `需要先订阅 ${vendorLabel(vendor)} 套餐才能购买 ${vendorLabel(vendor)} 加量包（赠送额度不算）`
-        : "需要先订阅套餐才能购买加量包（赠送额度不算）";
-    case "extra_pack_limit": {
-      const limit = extra?.max_concurrent_paid_packs ?? 2;
-      const held = eligibility?.active_paid_packs;
-      return held != null && held > 0
-        ? `已持有 ${held} 个加量包，最多同时持有 ${limit} 个，等其中一个到期后再买`
-        : `最多同时持有 ${limit} 个加量包，等其中一个到期后再买`;
-    }
-    case "invalid_extra_units":
-      return `加量包单位数不可用：${extraUnitsRuleText(extraUnitRules(extra))}`;
+  const text = vendor ? copy?.by_vendor?.[vendor]?.extra_blocked : undefined;
+  if (text) return text;
+  if (extra?.eligibility && !extra.eligibility.can_buy) {
+    return "暂时无法购买加量包";
   }
   return null;
-}
-
-// --- 价格 --------------------------------------------------------------------
-
-export interface ExtraPeriodPrice {
-  /** **一个单位**、这个周期的实付（micro-USD），服务端原值。 */
-  chargeMicros: number;
-  /** 同一个单位按原价是多少。商务价时比 chargeMicros 高。 */
-  listMicros: number;
-  businessRate: boolean;
-}
-
-/**
- * N 个单位时，某个周期每单位的显示价。单位数只决定用不用商务价，不参与
- * 乘法。商务价只在三件事同时成立时用：服务端说这个
- * 用户享受（eligibility.business_rate）、单位数是 unit_step 的整数倍、这个
- * 周期出现在 business_rate.prices 里（服务端只列按月的周期）。
- *
- * 拿不到目录、或目录里没有这个周期，返回 null —— 那就不显示价格，和老版本
- * 一样等结账页的报价。
- */
-export function extraPeriodPrice(
-  extra: GatewayExtraCatalog | null | undefined,
-  units: number,
-  periodKey: string,
-): ExtraPeriodPrice | null {
-  if (!extra || !Number.isInteger(units) || units < 1) return null;
-  const rate = extra.business_rate;
-  if (
-    rate &&
-    extra.eligibility?.business_rate &&
-    rate.unit_step > 0 &&
-    units % rate.unit_step === 0
-  ) {
-    const p = rate.prices?.find((x) => x.period === periodKey);
-    if (p) {
-      return {
-        chargeMicros: p.charge_micros,
-        listMicros: p.list_micros,
-        businessRate: true,
-      };
-    }
-  }
-  const list = extra.prices?.find((x) => x.period === periodKey);
-  if (!list) return null;
-  return {
-    chargeMicros: list.charge_micros,
-    listMicros: list.list_micros,
-    businessRate: false,
-  };
-}
-
-/** discount_bps → 角标文案。5000 是「半价」，其他按「X折」。 */
-export function businessRateLabel(discountBps: number): string {
-  if (discountBps === 5000) return "半价";
-  const tenths = discountBps / 1000;
-  return `${Number.isInteger(tenths) ? tenths : tenths.toFixed(1)}折`;
 }

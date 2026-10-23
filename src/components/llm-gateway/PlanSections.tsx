@@ -4,15 +4,7 @@ import {
   type GatewaySubscriptionPlan,
   type GatewaySubscriptionStatus,
 } from "@/lib/api/llm-gateway";
-import {
-  formatMultiple,
-  formatPlanDate,
-  planLabel,
-  starterMultiple,
-  tierDescription,
-  TIERS,
-  vendorLabel,
-} from "./planCatalog";
+import { fillServerText, formatPlanDate, vendorLabel } from "./planCatalog";
 
 // 账号屏的套餐区。分两块是因为加了 grant 角色之后，平铺显示分不清哪张是
 // 「我的档位」、哪张是临时补的加量包 —— 用户看到一堆并列的套餐，不知道点
@@ -30,27 +22,16 @@ export interface PlanSectionsProps {
   onBuyExtra?: () => void;
 }
 
-// 一份额度怎么描述给用户。**永远不显示 5h/周的具体金额** —— 那两个数字对
-// 用户没有意义，只会引出「$400 能用多久」这类回答不了的追问。
+// 一张套餐叫什么、怎么描述，都是服务端写好的（label / description）。描述
+// **永远不显示 5h/周的具体金额** —— 那两个数字对用户没有意义，只会引出
+// 「$400 能用多久」这类回答不了的追问 —— 而是「N× Starter 用量」这样的相对
+// 说法，且按这张 grant 自己的额度算，不按今天的目录：business 从 20× 改成
+// 10× 之后，改之前买的那张到期前仍是 20×。这条规则曾经在客户端实现过一遍，
+// 每改一次倍数就要发一版 app，所以搬去了服务端。
 //
-// 三级回落，顺序即优先级：
-//
-//   1. title  —— admin 发这份额度时写的标题（「新春回馈」）。他既然特地写了，
-//                就比任何自动生成的描述更贴切。
-//   2. extra  —— 真加量包。1 单位恒等于 $20 = 1× Starter，倍数是精确的。
-//   3. custom —— admin 直接发放/兑换码得来的专属额度。**不给倍数**：服务端只
-//                要求两个窗口都 > 0，彼此没有比例约束，硬算出「1.85× Starter」
-//                既难看又不准（5h 和周可能是完全不同的倍数）。这一档返回空串,
-//                因为 planLabel("custom") 已经是「专属额度」了,再来一句同样的
-//                话就成了「专属额度 专属额度」。调用方负责跳过空串。
-function planDescription(plan: GatewaySubscriptionPlan): string {
-  if (plan.title) return plan.title;
-  if (plan.tier === "extra") {
-    const n = starterMultiple(plan.usage_micros_per_5h / 1_000_000);
-    return `${formatMultiple(n)}× Starter 用量`;
-  }
-  const known = TIERS.find((t) => t.id === plan.tier);
-  return known ? tierDescription(known) : "";
+// 老服务端不发 label 时退回 tier 原值，不发 description 时不写描述。
+function planName(plan: GatewaySubscriptionPlan): string {
+  return plan.label || plan.tier;
 }
 
 // 一份额度是哪一家的。只在有套餐绑了厂商时才标：老服务端、或者手上全是绑定
@@ -66,7 +47,7 @@ function VendorTag({
   if (!show) return null;
   return (
     <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-medium text-muted-foreground">
-      {plan.vendor ? vendorLabel(plan.vendor) : "通用"}
+      {plan.vendor_label || (plan.vendor ? vendorLabel(plan.vendor) : "通用")}
     </span>
   );
 }
@@ -122,10 +103,10 @@ export function PlanSections({
               >
                 <span className="flex items-center gap-1.5 font-medium">
                   <VendorTag plan={p} show={showVendor} />
-                  {planLabel(p.tier)}
-                  {planDescription(p) && (
+                  {planName(p)}
+                  {p.description && (
                     <span className="text-muted-foreground">
-                      {planDescription(p)}
+                      {p.description}
                     </span>
                   )}
                 </span>
@@ -137,30 +118,26 @@ export function PlanSections({
           </div>
         )}
         {/* 排队中的套餐。不写成一行「待生效」标签而是完整一句话：用户需要
-            知道换的是哪一档、什么时候换，否则会以为额度已经到账了。 */}
+            知道换的是哪一档、什么时候换，否则会以为额度已经到账了。那句话
+            （含「哪一家」「新的一期是几倍」）由服务端写，日期按本地时区填。 */}
         {queued.map((p) => (
           <div
             key={p.grant_id}
             className="mt-1 rounded-lg border border-dashed border-border px-2.5 py-1.5 text-[11px] leading-relaxed text-muted-foreground"
           >
-            {/* Claude 和 GPT 各排各的队，得说清是哪一家到期后切换。 */}
-            {showVendor && p.vendor ? `${vendorLabel(p.vendor)} ` : ""}
-            到期后自动切换到 {planLabel(p.tier)}（生效于{" "}
-            {formatPlanDate(p.valid_from)}）
+            {p.pending_text
+              ? fillServerText(p.pending_text, {
+                  valid_from: formatPlanDate(p.valid_from),
+                })
+              : `${planName(p)} 待生效（${formatPlanDate(p.valid_from)}）`}
           </div>
         ))}
-        {/* 汇总的是服务端给的总额度（订阅层 + 所有额外额度），因为那才是实际
-            卡用户的值。只显示订阅层的话，买了加量包的人会以为钱白花了。
-            这里用倍数而不是金额 —— 理由同 planDescription。总和里可能混进
-            admin 发的任意额度，所以倍数会有小数，formatMultiple 负责收敛。 */}
-        {subscription.usage_micros_per_5h != null && (
+        {/* 总用量（订阅层 + 所有额外额度）是实际卡用户的值，只显示订阅层的话
+            买了加量包的人会以为钱白花了。整句由服务端写，用倍数不用金额 ——
+            理由同上面的描述。 */}
+        {subscription.usage_text && (
           <div className="mt-1 px-0.5 text-[10px] text-muted-foreground">
-            总用量{" "}
-            {formatMultiple(
-              starterMultiple(subscription.usage_micros_per_5h / 1_000_000),
-            )}
-            × Starter
-            {extras.length > 0 && "（含额外额度）"}
+            {subscription.usage_text}
           </div>
         )}
       </section>
@@ -195,10 +172,10 @@ export function PlanSections({
                   <VendorTag plan={p} show={showVendor} />
                   {/* 档位名而不是又一句「加量包」：块标题已经说过了，
                       重复一遍反而看不出这几张之间的差别。 */}
-                  {planLabel(p.tier)}
-                  {planDescription(p) && (
+                  {planName(p)}
+                  {p.description && (
                     <span className="text-muted-foreground">
-                      {planDescription(p)}
+                      {p.description}
                     </span>
                   )}
                   {p.pending && (

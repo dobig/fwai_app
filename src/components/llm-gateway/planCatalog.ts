@@ -1,100 +1,63 @@
-// 档位目录与展示格式化。从 LlmGatewaySubscriptionDock 抽出来的纯数据/纯函数，
+// 购买和账号屏共用的显示格式化。从 LlmGatewaySubscriptionDock 抽出来的纯函数，
 // 让 2000+ 行的主体不再继续长，也让这些规则能被单独测。
 //
-// 这里**没有任何付款金额的计算**。实付金额一律来自服务端的报价（见
-// fetchPlanQuote），本文件只负责「这个档位叫什么」「这个数字怎么显示」。
+// 这里**没有任何付款金额的计算**，也**没有陈述套餐规则的文案**。实付金额一律
+// 来自服务端的报价（见 fetchPlanQuote）；档位描述、倍数、周期名、能不能买的
+// 原因、结账页说明这些句子也都由服务端写好下发（网关 CONTRACT「Display
+// copy」）—— 规则一变就要跟着改的字放在客户端，等于每次调规则都得发一版 app。
+// 本文件只负责「这个数字怎么显示」和「把服务端的占位符填上」。
 
-// Plans mirror the gateway seed SKUs, named by their monthly price. **价格本身
-// 不在这里** —— 档位卡片上的金额取 GET /v1/plans 的 price_usd_micros。The 5h /
-// weekly quota windows shown here mirror the server derivation (default 1×/5×
-// of price; business overrides with 2×/10×) — the server stays authoritative.
-//
-// **这两个额度字段永远不直接显示给用户。** 它们只用来推导「N× Starter」这样的
-// 相对描述（见 tierBlurb / extraUnitsBlurb）。用户不需要知道我们的窗口是多少
-// 美元，那个数字对他毫无意义，只会引出「$100 能用多久」这类无法回答的追问。
-export interface PlanTier {
-  id: string;
-  label: string;
-  usage5hUSD: number;
-  usageWeekUSD: number;
+import type {
+  GatewaySubscriptionStatus,
+  GatewayVendorDetail,
+} from "@/lib/api/llm-gateway";
+
+/**
+ * 把服务端文案里的 {name} 占位符换成 values 里的值。没给值的占位符原样留着
+ * —— 宁可让用户看到一个花括号，也不要悄悄吞掉一半句子。text 缺失（老服务端）
+ * 返回空串，调用方据此不渲染那一行。
+ *
+ * 日期由调用方先用 formatPlanDate 格式化再传进来：服务端不知道用户在哪个
+ * 时区，所以日期在文案里只是占位符。
+ */
+export function fillServerText(
+  text: string | undefined,
+  values: Record<string, string | number | undefined> = {},
+): string {
+  if (!text) return "";
+  return text.replace(/\{(\w+)\}/g, (whole, name: string) => {
+    const v = values[name];
+    return v === undefined || v === "" ? whole : String(v);
+  });
 }
 
-export const TIERS: PlanTier[] = [
-  {
-    id: "starter",
-    label: "$20",
-    usage5hUSD: 20,
-    usageWeekUSD: 100,
-  },
-  {
-    id: "pro",
-    label: "$100",
-    usage5hUSD: 100,
-    usageWeekUSD: 500,
-  },
-  {
-    id: "business",
-    label: "$200",
-    usage5hUSD: 400,
-    usageWeekUSD: 2000,
-  },
-];
-
-// 一份额度是 Starter 的几倍。倍数是**精确**的而非近似：starter 是 5h $20 /
-// 周 $100，pro 两项各 5×，business 因为服务端给了 2×/10× 系数而是 20×，
-// 加量包 1 单位 = $20/月 = 恰好 1×。两个窗口的倍数一致，所以取 5h 的即可。
-//
-// 从字段推导而不是写死字符串：以后调价改系数，文案自动跟随。
-export function starterMultiple(usage5hUSD: number): number {
-  const base = TIERS[0].usage5hUSD;
-  return base > 0 ? usage5hUSD / base : 0;
-}
-
-// 选档卡片里的一行小字。三列窄卡片，只放得下一个短语。
-// Starter 是基准，说倍数没有意义（「1× Starter」是废话），改说它是什么。
-export function tierBlurb(tier: PlanTier): string {
-  if (tier.id === TIERS[0].id) return "Starter";
-  return `${formatMultiple(starterMultiple(tier.usage5hUSD))}× Starter 用量`;
-}
-
-// 选周期页的整行说明，比卡片宽得多，Starter 这里能把「适合谁」说完整 ——
-// 那句话正是大多数用户唯一需要读的一句。
-export function tierDescription(tier: PlanTier): string {
-  if (tier.id === TIERS[0].id) return "Starter · 适合大部分普通用户";
-  return tierBlurb(tier);
-}
-
-// 倍数取整显示。目录三档都是整数倍（5×/20×），小数分支给两种情况兜底：将来
-// 调系数，以及账户页把 admin 发的任意额度也加进总和时（那个和几乎必然不是整数）。
-export function formatMultiple(n: number): string {
-  return Number.isInteger(n) ? String(n) : n.toFixed(1);
-}
-
-export function planLabel(tier?: string): string {
-  if (!tier) return "会员";
-  // custom 不再能被购买（服务端只认目录三档），但 admin 直接发放和兑换码激活
-  // 得来的 grant 仍以 tier: "custom" 回读（NULL plan_id 的兜底），账号屏要显示
-  // 得出来。文案是「专属额度」而非「自选」—— 用户已经没有「自选」这个动作了，
-  // 那份额度是发给他的。
-  if (tier === "custom") return "专属额度";
-  if (tier === "extra") return "加量包";
-  const known = TIERS.find((t) => t.id === tier);
-  return known ? known.label : tier.charAt(0).toUpperCase() + tier.slice(1);
-}
-
-// 厂商的显示名。线上的 openai 对用户说 GPT —— 用户认的是模型，不是公司。
+// 厂商的显示名。目录到手时用服务端给的（vendor_details），这是购买流程里的
+// 正路；这张表只是兜底 —— 账号屏的厂商标签、开转发时的提示都可能在目录还没
+// 拉下来时出现。线上的 openai 对用户说 GPT：用户认的是模型，不是公司。
 // 不认识的值原样显示，服务端以后加一家时至少不会显示成空白。
-export function vendorLabel(vendor: string): string {
-  if (vendor === "claude") return "Claude";
-  if (vendor === "openai") return "GPT";
-  return vendor;
+const VENDOR_FALLBACK_LABELS: Record<string, string> = {
+  claude: "Claude",
+  openai: "GPT",
+};
+
+export function vendorLabel(
+  vendor: string,
+  details?: GatewayVendorDetail[],
+): string {
+  return (
+    details?.find((d) => d.id === vendor)?.label ??
+    VENDOR_FALLBACK_LABELS[vendor] ??
+    vendor
+  );
 }
 
-// 选厂商那一步卡片上的小字：这一家的额度给哪些 app 用。
-export function vendorBlurb(vendor: string): string {
-  if (vendor === "claude") return "Claude 系列模型 · Claude Code / Desktop";
-  if (vendor === "openai") return "GPT 系列模型 · Codex";
-  return "";
+/**
+ * 账号卡片右上角那个档位名，服务端写好的 label。老服务端没有时退回 tier
+ * 本身 —— 不好看但不说错话。
+ */
+export function subscriptionLabel(sub?: GatewaySubscriptionStatus): string {
+  if (!sub?.tier) return "会员";
+  return sub.label || sub.tier;
 }
 
 // micro-USD → 美元。1e6 = $1。整份客户端只有这一个换算入口 —— 两处各自
