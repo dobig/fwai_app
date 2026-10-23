@@ -3198,3 +3198,237 @@ describe("LlmGatewaySubscriptionDock Claude App 默认模型换代", () => {
     expect(providersApi.update).not.toHaveBeenCalled();
   });
 });
+
+// 服务端按厂商卖（llm_gateway#446）：Claude 和 GPT 是两份独立的订阅，报价和
+// 下单必须带 vendor。目录列了 vendors 时购买流程的第一步是选厂商。
+describe("LlmGatewaySubscriptionDock 按厂商购买", () => {
+  const VENDOR_CATALOG: gateway.GatewayPlanCatalog = {
+    ...CATALOG,
+    vendors: ["claude", "openai"],
+    extra: {
+      ...CATALOG.extra,
+      requires_plan: true,
+      // 老字段是 Claude 那一份，按厂商挑之后不该再被读到。
+      eligibility: {
+        plan_in_force: true,
+        business_rate: false,
+        active_paid_packs: 0,
+        can_buy: true,
+      },
+      eligibility_by_vendor: {
+        claude: {
+          plan_in_force: true,
+          business_rate: false,
+          active_paid_packs: 0,
+          can_buy: true,
+        },
+        openai: {
+          plan_in_force: false,
+          business_rate: false,
+          active_paid_packs: 0,
+          can_buy: false,
+          reason: "subscription_required",
+        },
+      },
+    },
+  };
+
+  const claudePro = {
+    grant_id: "g_claude_pro",
+    tier: "pro",
+    role: "subscription",
+    vendor: "claude",
+    usage_micros_per_5h: 100_000_000,
+    usage_micros_per_week: 500_000_000,
+    valid_from: "2026-07-01T00:00:00Z",
+    valid_until: "2099-01-01T00:00:00Z",
+  };
+
+  /** 已登录，手上只有一份绑定 Claude 的 Pro。服务端回读的也是这一份。 */
+  function seedClaudeOnly(plans: unknown[] = [claudePro]) {
+    seedLoggedOutOfPlan();
+    const login = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
+    const subscription = {
+      active: true,
+      tier: "pro",
+      valid_until: "2099-01-01T00:00:00Z",
+      plans,
+    };
+    login.subscription = subscription;
+    localStorage.setItem(LOGIN_KEY, JSON.stringify(login));
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue({
+      subscription: subscription as gateway.GatewaySubscriptionStatus,
+      user: login.user,
+    });
+  }
+
+  function mockOrder() {
+    return vi.spyOn(gateway, "createPlanOrder").mockResolvedValue({
+      order_id: "pay_v",
+      code_url: "weixin://wxpay/bizpayurl?pr=vendor",
+      plan_id: "pro",
+      period: "1m",
+      duration_days: 30,
+      months: 1,
+      amount_credits: 100_000_000,
+      amount_cents: 72000,
+      exchange_rate: 7.2,
+      currency: "CNY",
+    } as Awaited<ReturnType<typeof gateway.createPlanOrder>>);
+  }
+
+  beforeEach(() => {
+    vi.spyOn(gateway, "fetchPlanCatalog").mockResolvedValue(VENDOR_CATALOG);
+  });
+
+  it("第一步先选厂商，选了 GPT 之后报价和下单都带 openai", async () => {
+    seedClaudeOnly();
+    const createOrder = mockOrder();
+
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+
+    expect(await screen.findByText("选择要购买的模型")).toBeTruthy();
+    // 档位要等选完厂商才出现 —— 同一个 $100 在两家是两份不同的订阅。
+    expect(screen.queryByText("$100")).toBeNull();
+    // 已经有这一家的档位就说出来：点进去是换档，不是再开一份。
+    expect(screen.getByText("当前 $100")).toBeTruthy();
+
+    await userEvent.click(screen.getByText("GPT"));
+    expect(await screen.findByText("GPT · 选择套餐 · 微信支付")).toBeTruthy();
+    // 手上的 Pro 是 Claude 的，GPT 这边没有东西可换。
+    expect(screen.getByText("订阅套餐")).toBeTruthy();
+    expect(screen.queryByText("更换 / 续费套餐")).toBeNull();
+
+    await userEvent.click(await screen.findByText("$100"));
+    const quote = mockQuote();
+    await userEvent.click(await screen.findByText(/^下一步/));
+    await waitFor(() => expect(quote).toHaveBeenCalled());
+    expect(quote.mock.calls[0][4]).toBe("openai");
+    expect(await screen.findByText("确认订单 · GPT")).toBeTruthy();
+
+    await userEvent.click(await screen.findByText(/^微信支付/));
+    await waitFor(() => expect(createOrder).toHaveBeenCalled());
+    expect(createOrder.mock.calls[0][5]).toBe("openai");
+    expect(await screen.findByText(/GPT \$100 套餐/)).toBeTruthy();
+  });
+
+  it("选了 Claude 时意图卡片按 Claude 那份档位说「更换 / 续费」", async () => {
+    seedClaudeOnly();
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("Claude"));
+
+    expect(await screen.findByText("更换 / 续费套餐")).toBeTruthy();
+  });
+
+  it("从档位列表返回先回到选厂商那一步", async () => {
+    seedClaudeOnly();
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("GPT"));
+    await screen.findByText("GPT · 选择套餐 · 微信支付");
+
+    await userEvent.click(screen.getByText("返回"));
+    expect(await screen.findByText("选择要购买的模型")).toBeTruthy();
+  });
+
+  it("加量包看的是这一家的 eligibility：只有 Claude 套餐时 GPT 加量包买不了", async () => {
+    seedClaudeOnly();
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("GPT"));
+    expect(
+      await screen.findByText("需先订阅 GPT 套餐，赠送额度不算"),
+    ).toBeTruthy();
+    await userEvent.click(screen.getByText("购买加量包"));
+
+    expect(
+      await screen.findByText(
+        "需要先订阅 GPT 套餐才能购买 GPT 加量包（赠送额度不算）",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText(/^下一步/).closest("button")).toBeDisabled();
+  });
+
+  it("服务端回 vendor_required 时退回选厂商那一步", async () => {
+    seedClaudeOnly();
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+    await userEvent.click(await screen.findByText("Claude"));
+    await userEvent.click(await screen.findByText("$100"));
+    vi.spyOn(gateway, "fetchPlanQuote").mockRejectedValue(
+      new GatewayApiError(400, "vendor_required"),
+    );
+    await userEvent.click(await screen.findByText(/^下一步/));
+
+    await waitFor(() =>
+      expect(toasts.error).toHaveBeenCalledWith(
+        "请重新选择购买 Claude 还是 GPT",
+      ),
+    );
+    expect(await screen.findByText("选择要购买的模型")).toBeTruthy();
+  });
+
+  it("目录不列厂商（老服务端）时没有这一步，请求也不带 vendor", async () => {
+    vi.spyOn(gateway, "fetchPlanCatalog").mockResolvedValue(CATALOG);
+    seedClaudeOnly();
+    renderDock();
+    await userEvent.click(await screen.findByText("购买套餐"));
+
+    expect(await screen.findByText("选择套餐 · 微信支付")).toBeTruthy();
+    expect(screen.queryByText("选择要购买的模型")).toBeNull();
+    await userEvent.click(await screen.findByText("$100"));
+    const quote = mockQuote();
+    await userEvent.click(await screen.findByText(/^下一步/));
+    await waitFor(() => expect(quote).toHaveBeenCalled());
+    expect(quote.mock.calls[0][4]).toBeUndefined();
+  });
+
+  it("只有 Claude 套餐时开 Codex 转发：不开，直接带去买 GPT", async () => {
+    seedClaudeOnly();
+    renderDock("codex");
+    await userEvent.click(await startButton());
+
+    await waitFor(() =>
+      expect(toasts.info).toHaveBeenCalledWith(
+        "当前套餐不含 GPT 额度，Codex 需要 GPT 套餐",
+      ),
+    );
+    expect(providersApi.startForwarding).not.toHaveBeenCalled();
+    // 厂商已经按 app 预选好，不用再选一次。
+    expect(await screen.findByText("GPT · 选择套餐 · 微信支付")).toBeTruthy();
+  });
+
+  it("只有 Claude 套餐时开 Claude 转发照常", async () => {
+    seedClaudeOnly();
+    renderDock("claude");
+    await userEvent.click(await startButton());
+
+    await waitFor(() =>
+      expect(providersApi.startForwarding).toHaveBeenCalled(),
+    );
+  });
+
+  it("绑定之前买的套餐两家通用，开 Codex 转发不拦", async () => {
+    seedClaudeOnly([{ ...claudePro, vendor: undefined }]);
+    renderDock("codex");
+    await userEvent.click(await startButton());
+
+    await waitFor(() =>
+      expect(providersApi.startForwarding).toHaveBeenCalled(),
+    );
+  });
+
+  it("账号屏给每份套餐标上厂商，没绑定的标「通用」", async () => {
+    seedClaudeOnly([
+      claudePro,
+      { ...claudePro, grant_id: "g_old", tier: "starter", vendor: undefined },
+    ]);
+    renderDock();
+
+    expect(await screen.findByText("我的套餐")).toBeTruthy();
+    expect(screen.getByText("Claude")).toBeTruthy();
+    expect(screen.getByText("通用")).toBeTruthy();
+  });
+});

@@ -137,6 +137,22 @@ describe("fetchPlanQuote", () => {
     expect(requestBody()).toEqual({ period: "1m" });
   });
 
+  it("带上 vendor；没传时不发这个字段", async () => {
+    mockFetchOnce(200, quoteBody("activate_now"));
+    await fetchPlanQuote("extra", "1m", 2, true, "openai");
+    expect(requestBody()).toEqual({
+      period: "1m",
+      units: 2,
+      as_extra: true,
+      vendor: "openai",
+    });
+
+    // 老服务端不认 vendor：目录不列厂商时调用方不传，请求体里也就没有。
+    mockFetchOnce(200, quoteBody("activate_now"));
+    await fetchPlanQuote("pro", "1m");
+    expect(requestBody(1)).not.toHaveProperty("vendor");
+  });
+
   it("老服务端 404 抛出可识别的错误，不是静默返回 null", async () => {
     mockFetchOnce(404, { error: "not_found" });
 
@@ -182,6 +198,14 @@ describe("createPlanOrder", () => {
 
     expect(requestBody()).toEqual({ period: "1m" });
     expect(requestBody()).not.toHaveProperty("start_after_current");
+  });
+
+  it("vendor 和报价发的一样", async () => {
+    mockFetchOnce(200, orderBody);
+
+    await createPlanOrder("pro", "1m", undefined, undefined, false, "claude");
+
+    expect(requestBody()).toEqual({ period: "1m", vendor: "claude" });
   });
 
   it("asExtra 映射到 as_extra", async () => {

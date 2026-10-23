@@ -36,6 +36,11 @@ export interface GatewayAccountProfile {
   id: string;
 }
 
+// 套餐和加量包按上游厂商分开卖：Claude 和 GPT 是两份独立的订阅，各自换档、
+// 续费、排队，一份额度只付它那一家模型的钱（llm_gateway#445/#446）。值和服务端
+// 的 chargerate 家族一致 —— GPT 那一家在线上叫 openai。
+export type GatewayVendor = "claude" | "openai";
+
 // 一个 grant 的角色。subscription 是订阅层（同时只有一张生效，可换档），
 // extra 是临时加量包（叠加，自然到期，不参与换档判定）。
 export type GatewayPlanRole = "subscription" | "extra";
@@ -58,6 +63,9 @@ export interface GatewaySubscriptionPlan {
   // 老服务端不返回这个字段 —— 和 plans 本身可选是同一个先例。
   // 读取一律走 planRole()，别直接读这里。
   role?: GatewayPlanRole;
+  // 这份额度绑定的厂商。缺省（omitempty）是绑定之前买的，两家的模型都能用；
+  // 老服务端也不返回。
+  vendor?: string;
 }
 
 // 缺失的 role 按 subscription 处理：老服务端下所有套餐都落在「我的套餐」块里，
@@ -616,13 +624,20 @@ export interface GatewayExtraCatalog {
   max_concurrent_paid_packs?: number;
   business_rate?: GatewayExtraBusinessRate;
   // 只在已登录的 GET /v1/plans 上有；服务端读买家状态失败时也会省略。
+  // 按厂商卖之后它只是 Claude 那一份，给不认识厂商的老客户端用。
   eligibility?: GatewayExtraEligibility;
+  // 每个厂商各一份：加量包要有同一家（或未绑定）的生效套餐才能买。读的时候
+  // 走 extraForVendor()，别直接读这里。
+  eligibility_by_vendor?: Record<string, GatewayExtraEligibility>;
 }
 
 export interface GatewayPlanCatalog {
   plans: GatewayCatalogPlan[];
   periods: GatewayCatalogPeriod[];
   extra: GatewayExtraCatalog;
+  // 能买的厂商，按购买屏的顺序。报价和下单必须带其中一个，否则 400
+  // vendor_required。老服务端不发 —— 那边没有厂商这回事，请求体里也不带。
+  vendors?: string[];
 }
 
 // fetchPlanCatalog 读购买屏要显示的全部价格。老网关的 /v1/plans 没有 prices /
@@ -642,14 +657,25 @@ export async function fetchPlanCatalog(): Promise<GatewayPlanCatalog> {
 
 // 报价和下单共用的请求体。两边必须一模一样，否则结账页报的价和实际扣的
 // 就可能不是同一单。
+//
+// vendor 只在目录列了厂商时才传：老服务端不认这个字段。
+interface PurchaseBody {
+  period: string;
+  units?: number;
+  as_extra?: boolean;
+  vendor?: string;
+}
+
 function purchaseBody(
   period: string,
   units: number | undefined,
   asExtra: boolean,
-): { period: string; units?: number; as_extra?: boolean } {
-  const body: { period: string; units?: number; as_extra?: boolean } = {
-    period,
-  };
+  vendor: string | undefined,
+): PurchaseBody {
+  const body: PurchaseBody = { period };
+  if (vendor) {
+    body.vendor = vendor;
+  }
   if (asExtra) {
     body.as_extra = true;
     if (units !== undefined) {
@@ -701,8 +727,9 @@ export async function fetchPlanQuote(
   period = "1m",
   units?: number,
   asExtra = false,
+  vendor?: string,
 ): Promise<GatewayPlanQuote> {
-  const body = purchaseBody(period, units, asExtra);
+  const body = purchaseBody(period, units, asExtra, vendor);
   return await gatewayRequest<GatewayPlanQuote>(
     `/v1/plans/${encodeURIComponent(planId)}/quote`,
     { method: "POST", body: JSON.stringify(body) },
@@ -745,6 +772,9 @@ export interface GatewayPlanOrder extends Omit<GatewayNativeOrder, "code_url"> {
 // asExtra 决定这一单动的是哪一层：false（默认）是订阅层，服务端按档位高低
 // 自己判定立即换档还是排队；true 是加量包，永远立即生效并叠加。
 //
+// vendor 是买给哪一家（GatewayVendor）。换档、续费、排队都只看同一家的套餐，
+// 买 GPT 不会动 Claude 那一份。目录没列厂商（老服务端）时不传。
+//
 // @param startAfterCurrent @deprecated 服务端现在自己判定续费该排队，这个参数
 // 不再发送给服务端。位置留着不动是有意的 —— 把 asExtra 挪到第 4 位的话，还在
 // 传 startAfterCurrent 的调用点会照常通过类型检查，但那个 true 会被当成
@@ -755,9 +785,10 @@ export async function createPlanOrder(
   units?: number,
   startAfterCurrent?: boolean,
   asExtra = false,
+  vendor?: string,
 ): Promise<GatewayPlanOrder> {
   void startAfterCurrent;
-  const body = purchaseBody(period, units, asExtra);
+  const body = purchaseBody(period, units, asExtra, vendor);
   return await gatewayRequest<GatewayPlanOrder>(
     `/v1/plans/${encodeURIComponent(planId)}/orders`,
     { method: "POST", body: JSON.stringify(body) },

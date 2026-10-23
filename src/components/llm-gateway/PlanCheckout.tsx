@@ -10,12 +10,19 @@
 
 import { AlertTriangle, Loader2 } from "lucide-react";
 import type { GatewayPlanQuote } from "@/lib/api/llm-gateway";
-import { formatMicrosUSD, formatPlanDate, planLabel } from "./planCatalog";
+import {
+  formatMicrosUSD,
+  formatPlanDate,
+  planLabel,
+  vendorLabel,
+} from "./planCatalog";
 
 interface PlanCheckoutProps {
   quote: GatewayPlanQuote;
   /** 当前生效订阅的到期日，用于 queue 文案里的「什么时候切换」。 */
   currentValidUntil?: string;
+  /** 这一单买给哪一家。老服务端不分厂商时不传。 */
+  vendor?: string;
   busy?: boolean;
   onConfirm: () => void;
 }
@@ -61,6 +68,7 @@ function actionHeadline(
 export function PlanCheckout({
   quote,
   currentValidUntil,
+  vendor,
   busy,
   onConfirm,
 }: PlanCheckoutProps) {
@@ -105,6 +113,9 @@ export function PlanCheckout({
     <div>
       <div className="mb-2 text-xs font-medium text-muted-foreground">
         确认订单
+        {/* 付款前最后一次说清买的是哪一家 —— 换档、续费都只作用于这一家，
+            另一家的套餐不受影响。 */}
+        {vendor && ` · ${vendorLabel(vendor)}`}
       </div>
       <div className="rounded-xl border-[1.5px] border-border px-3 py-2.5 text-[11px] leading-relaxed">
         <div className="text-xs font-semibold leading-relaxed">

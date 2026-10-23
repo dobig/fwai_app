@@ -82,6 +82,21 @@ export function planLabel(tier?: string): string {
   return known ? known.label : tier.charAt(0).toUpperCase() + tier.slice(1);
 }
 
+// 厂商的显示名。线上的 openai 对用户说 GPT —— 用户认的是模型，不是公司。
+// 不认识的值原样显示，服务端以后加一家时至少不会显示成空白。
+export function vendorLabel(vendor: string): string {
+  if (vendor === "claude") return "Claude";
+  if (vendor === "openai") return "GPT";
+  return vendor;
+}
+
+// 选厂商那一步卡片上的小字：这一家的额度给哪些 app 用。
+export function vendorBlurb(vendor: string): string {
+  if (vendor === "claude") return "Claude 系列模型 · Claude Code / Desktop";
+  if (vendor === "openai") return "GPT 系列模型 · Codex";
+  return "";
+}
+
 // micro-USD → 美元。1e6 = $1。整份客户端只有这一个换算入口 —— 两处各自
 // 四舍五入的话，同一笔钱在两屏上会显示成不同的数字。
 //
