@@ -87,6 +87,34 @@ fi
 
 echo "after settle:"; window_info "$pid"
 [[ -n "$artifacts" ]] && screencapture -x "$artifacts/after-settle.png" 2>/dev/null || true
+
+# Poke it the way a user would before measuring. Whether a loop starts on its
+# own at launch depends on timing and screen size (on a 1024x768 runner it
+# didn't), so don't leave it to chance: dismiss the welcome dialog, open and
+# leave settings, and move/resize the window. Each step needs the
+# Accessibility permission; report what was refused instead of failing on it.
+poke() {
+  local what="$1" script="$2" out
+  if out="$(osascript -e "$script" 2>&1)"; then
+    echo "  poke ok:      $what"
+  else
+    echo "  poke refused: $what ($out)"
+  fi
+  sleep 2
+}
+ax_proc="first process whose unix id is $pid"
+echo "poking:"
+poke "bring to front" "tell application \"System Events\" to set frontmost of ($ax_proc) to true"
+poke "dismiss dialog (return)" "tell application \"System Events\" to key code 36"
+poke "open settings (cmd-,)" "tell application \"System Events\" to keystroke \",\" using command down"
+[[ -n "$artifacts" ]] && screencapture -x "$artifacts/settings.png" 2>/dev/null || true
+poke "leave settings (escape)" "tell application \"System Events\" to key code 53"
+poke "move window" "tell application \"System Events\" to set position of window 1 of ($ax_proc) to {40, 60}"
+poke "resize window" "tell application \"System Events\" to set size of window 1 of ($ax_proc) to {600, 500}"
+sleep 3
+echo "after poking:"; window_info "$pid"
+[[ -n "$artifacts" ]] && screencapture -x "$artifacts/after-poke.png" 2>/dev/null || true
+
 cpu0="$(cpu_secs "$pid")"; rss0="$(rss_mb "$pid")"; areas0="$(tracking_areas "$pid")"
 sleep "$WINDOW_SECS"
 kill -0 "$pid" 2>/dev/null || { echo "app exited while idle" >&2; cat "$log" >&2; exit 1; }
