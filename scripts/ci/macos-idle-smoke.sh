@@ -114,6 +114,14 @@ poke "resize window" "tell application \"System Events\" to set size of window 1
 sleep 3
 echo "after poking:"; window_info "$pid"
 [[ -n "$artifacts" ]] && screencapture -x "$artifacts/after-poke.png" 2>/dev/null || true
+# Don't pass by default: on a screen too short for the simple-mode window
+# (1024x768 runner) the window is pinned at full height and the very loop
+# this exists for cannot run. Fail so someone fixes the environment.
+if ! room="$(swift "$here/window-info.swift" "$pid" --check-room 2>&1 | tail -1)" \
+    || [[ "$room" == *"fills"* || "$room" == *"no on-screen"* ]]; then
+  echo "FAIL: can't exercise the app here: $room — give the machine a taller screen" >&2
+  exit 1
+fi
 
 cpu0="$(cpu_secs "$pid")"; rss0="$(rss_mb "$pid")"; areas0="$(tracking_areas "$pid")"
 sleep "$WINDOW_SECS"

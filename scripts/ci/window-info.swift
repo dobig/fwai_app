@@ -14,3 +14,24 @@ for w in list where (w[kCGWindowOwnerPID as String] as? Int) == pid {
   let on = w[kCGWindowIsOnscreen as String] as? Bool ?? false
   print("window layer=\(layer) onscreen=\(on) \(b["Width"]!)x\(b["Height"]!) @\(b["X"]!),\(b["Y"]!)")
 }
+
+// `--check-room`: exit 1 unless the app's main window is shorter than the
+// screen's usable height. A window squeezed to the full height can't change
+// size, so a resize feedback loop can't run in it and the smoke check would
+// pass no matter what.
+if CommandLine.arguments.contains("--check-room") {
+  let main = list.filter {
+    ($0[kCGWindowOwnerPID as String] as? Int) == pid && ($0[kCGWindowLayer as String] as? Int) == 0
+      && ($0[kCGWindowIsOnscreen as String] as? Bool) == true
+  }.compactMap { $0[kCGWindowBounds as String] as? [String: Any] }
+    .max { ($0["Height"] as! Double) < ($1["Height"] as! Double) }
+  guard let main, let usable = NSScreen.main?.visibleFrame.height else {
+    print("no on-screen window"); exit(1)
+  }
+  let height = main["Height"] as! Double
+  // The window frame includes its title bar; leave a margin for it.
+  if height >= usable - 2 {
+    print("window \(Int(height)) px fills the usable screen height \(Int(usable)) px")
+    exit(1)
+  }
+}

@@ -50,6 +50,13 @@ jobs:
         # still embeds the built frontend exactly like a release does.
         run: pnpm tauri build --debug --no-bundle
 
+      - name: Give the runner a screen the window fits on
+        # The runner boots at 1024x768, where the simple-mode window is pinned
+        # at full height and a resize loop physically can't run — the smoke
+        # check would pass a broken build. The script refuses to run on such a
+        # screen; this makes it tall enough.
+        run: ./scripts/ci/macos-tall-screen.sh
+
       - name: Leave it idle and check it stays idle
         env:
           SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/smoke
