@@ -83,7 +83,9 @@ lto = "thin"
 opt-level = "s"
 # 使用 unwind 以便 panic hook 能捕获 backtrace（abort 会直接终止无法捕获）
 panic = "unwind"
-strip = "symbols"
+# 只去掉调试信息，保留符号表：用户机器上的 .hang/.crash 报告和 sample 才能直接
+# 看到函数名，而不是一串 ???。压缩后安装包大约多 1.3 MB。
+strip = "debuginfo"
 
 [dev-dependencies]
 serial_test = "3"
