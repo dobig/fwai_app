@@ -34,13 +34,15 @@ pub use settings::{update_settings, AppSettings};
 pub use store::AppState;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 #[cfg(target_os = "macos")]
 use tauri::image::Image;
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::RunEvent;
 use tauri::{Emitter, Manager};
-use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+use tauri_plugin_window_state::StateFlags;
 
 /// 更新托盘菜单的Tauri命令
 #[tauri::command]
@@ -543,30 +545,22 @@ pub fn run() {
         // 处理退出请求（所有平台）
         if let RunEvent::ExitRequested { api, code, .. } = &event {
             // code 为 None 表示运行时自动触发（如隐藏窗口的 WebView 被回收导致无存活窗口），
-            // 此时应仅阻止退出、保持托盘后台运行；
-            // code 为 Some(_) 表示用户主动调用 app.exit() 退出（如托盘菜单"退出"），
-            // 此时执行清理后退出。
-            if code.is_none() {
+            // 此时应仅阻止退出、保持托盘后台运行。
+            let Some(code) = *code else {
                 log::info!("运行时触发退出请求（无存活窗口），阻止退出以保持托盘后台运行");
                 api.prevent_exit();
                 return;
-            }
+            };
 
-            log::info!("收到用户主动退出请求 (code={code:?})，开始清理...");
-            api.prevent_exit();
-
-            let app_handle = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                save_window_state_before_exit(&app_handle);
-                cleanup_before_exit(&app_handle).await;
-                log::info!("清理完成，退出应用");
-
-                // 短暂等待确保所有 I/O 操作（如数据库写入）刷新到磁盘
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-                // 使用 std::process::exit 避免再次触发 ExitRequested
-                std::process::exit(0);
-            });
+            // 用户主动退出（托盘"退出"、关窗口）或重启（装完更新）：不拦截，交给
+            // tauri 正常退出。window-state 插件会在 RunEvent::Exit 里于主线程保存
+            // 窗口状态，重启时 tauri 随后拉起新进程。
+            //
+            // 别在这里自己保存窗口状态再 process::exit：插件保存时一直持有缓存锁，
+            // 在主线程以外调用时每个窗口 getter 都要派回主线程等结果，而主线程处理
+            // 窗口事件、跑 Exit 钩子时也要拿这把锁，两边互等，应用卡死在"未响应"。
+            log::info!("收到退出请求 (code={code})，交给 tauri 退出");
+            start_exit_watchdog(app_handle, code);
             return;
         }
 
@@ -602,19 +596,6 @@ pub fn run() {
             let _ = (app_handle, event);
         }
     });
-}
-
-// ============================================================
-// 应用退出清理
-// ============================================================
-
-/// 应用退出前的清理工作
-///
-/// 在应用退出前检查代理服务器状态，如果正在运行则停止代理并恢复 Live 配置。
-/// 确保 Claude Code/Codex/Gemini 的配置不会处于损坏状态。
-/// 使用 stop_with_restore_keep_state 保留 settings 表中的代理状态，下次启动时自动恢复。
-pub async fn cleanup_before_exit(_app_handle: &tauri::AppHandle) {
-    // 本地代理已移除；退出前无需恢复 Live 配置。
 }
 
 // ============================================================
@@ -834,19 +815,34 @@ fn show_database_init_error_dialog(
 }
 
 // ============================================================
-// 在应用主动退出前显式持久化窗口状态
+// 退出兜底
 // ============================================================
 
 fn window_state_flags() -> StateFlags {
     StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED
 }
 
-/// 当前应用的退出路径会拦截 `ExitRequested` 并最终直接 `std::process::exit(0)`，
-/// 这里需要在真正结束进程前手动落盘，避免 window-state 插件的默认退出钩子被绕过。
-pub fn save_window_state_before_exit(app_handle: &tauri::AppHandle) {
-    if let Err(err) = app_handle.save_window_state(window_state_flags()) {
-        log::error!("退出前保存窗口状态失败: {err}");
-    } else {
-        log::info!("已在退出前保存窗口状态");
+/// 退出超过这个时长还没结束，就认定卡死了。
+const EXIT_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 退出流程卡住时的兜底：超时后直接结束进程，重启请求则直接拉起新进程。
+///
+/// 退出要经过各插件的 Exit 钩子，其中任何一个死锁都会让应用永远停在"未响应"，
+/// 用户只能强退。宁可丢掉这一次的窗口状态，也要让进程结束，并在日志里留下记录。
+fn start_exit_watchdog(app_handle: &tauri::AppHandle, code: i32) {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
     }
+
+    let env = app_handle.env();
+    std::thread::spawn(move || {
+        std::thread::sleep(EXIT_WATCHDOG_TIMEOUT);
+        log::error!("退出 {EXIT_WATCHDOG_TIMEOUT:?} 后仍未结束，强制结束进程 (code={code})");
+        log::logger().flush();
+        if code == tauri::RESTART_EXIT_CODE {
+            tauri::process::restart(&env);
+        }
+        std::process::exit(code);
+    });
 }
