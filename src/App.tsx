@@ -66,6 +66,7 @@ import { ForwardingAppCards } from "@/components/forwarding/ForwardingAppCards";
 import { Wordmark } from "@/components/Wordmark";
 import { LlmGatewaySubscriptionDock } from "@/components/llm-gateway/LlmGatewaySubscriptionDock";
 import { useCompactWindow } from "@/hooks/useCompactWindow";
+import { useWindowMaximized } from "@/hooks/useWindowMaximized";
 import { Button } from "@/components/ui/button";
 
 type View = "providers" | "settings";
@@ -81,11 +82,12 @@ function App() {
   const [currentView, setCurrentView] = useState<View>("providers");
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
   const [isAddOpen, setIsAddOpen] = useState(false);
-  const [isWindowMaximized, setIsWindowMaximized] = useState(false);
 
   const { data: settingsData } = useSettingsQuery();
   const useAppWindowControls =
     isLinux() && (settingsData?.useAppWindowControls ?? false);
+  const [isWindowMaximized, setIsWindowMaximized] =
+    useWindowMaximized(useAppWindowControls);
   const dragBarHeight = useAppWindowControls ? 32 : DEFAULT_DRAG_BAR_HEIGHT;
   const contentTopOffset = dragBarHeight + HEADER_HEIGHT;
   // 默认是简洁模式：主界面只有按 app 的转发卡片。供应商管理（列表、新增、
@@ -172,42 +174,6 @@ function App() {
       unsubscribe?.();
     };
   }, [activeApp, refetch]);
-
-  // 最大化状态只给自绘的窗口按钮用，没有自绘按钮就别查。isMaximized 在
-  // macOS 上不是只读的：窗口不可拉伸时（简洁模式），tao 要临时改 styleMask
-  // 才能问 isZoomed，这会去掉 Overlay 标题栏的 fullSizeContentView，内容区
-  // 尺寸一变又触发 onResized —— 自己把自己点着，每秒几百次，每次还漏一个
-  // NSTrackingArea，跑几个小时就是几个 G 内存、整个界面卡死。
-  useEffect(() => {
-    if (!useAppWindowControls) return;
-    let active = true;
-    let unlistenResize: (() => void) | undefined;
-
-    const setupWindowStateSync = async () => {
-      try {
-        const currentWindow = getCurrentWindow();
-        const syncWindowMaximizedState = async () => {
-          const maximized = await currentWindow.isMaximized();
-          if (active) {
-            setIsWindowMaximized(maximized);
-          }
-        };
-
-        await syncWindowMaximizedState();
-        unlistenResize = await currentWindow.onResized(() => {
-          void syncWindowMaximizedState();
-        });
-      } catch (error) {
-        console.error("[App] Failed to sync window maximized state", error);
-      }
-    };
-
-    void setupWindowStateSync();
-    return () => {
-      active = false;
-      unlistenResize?.();
-    };
-  }, [useAppWindowControls]);
 
   useEffect(() => {
     // settingsData 未加载时跳过，避免用 fallback false 覆盖 Rust 侧已设好的装饰状态
