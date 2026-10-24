@@ -448,6 +448,9 @@ pub fn run() {
                 }
             }
 
+            #[cfg(debug_assertions)]
+            start_smoke_exit(app.handle());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -820,6 +823,37 @@ fn show_database_init_error_dialog(
 
 fn window_state_flags() -> StateFlags {
     StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED
+}
+
+/// 冒烟测试用：设了 `FWAI_SMOKE_EXIT=quit|restart` 时，启动几秒后走一遍真实的
+/// 退出或重启路径，由 scripts/ci/macos-exit-smoke.sh 检查进程有没有按时结束。
+/// 只编进 debug 构建。
+#[cfg(debug_assertions)]
+fn start_smoke_exit(app_handle: &tauri::AppHandle) {
+    let Ok(mode) = std::env::var("FWAI_SMOKE_EXIT") else {
+        return;
+    };
+    // 重启出来的新进程会继承环境变量，不清掉它就会一直重启下去。
+    std::env::remove_var("FWAI_SMOKE_EXIT");
+
+    let app_handle = app_handle.clone();
+    std::thread::spawn(move || {
+        // 等窗口起来、事件开始流动，跟用户启动后再去点的时机一样。
+        std::thread::sleep(Duration::from_secs(8));
+        log::info!("冒烟测试：触发 {mode}");
+        match mode.as_str() {
+            // 托盘"退出"在主线程上调 app.exit(0)。
+            "quit" => {
+                let handle = app_handle.clone();
+                let _ = app_handle.run_on_main_thread(move || handle.exit(0));
+            }
+            // 装完更新后，install_app_update 在 tokio 线程上调 app.restart()。
+            "restart" => {
+                tauri::async_runtime::spawn(async move { app_handle.restart() });
+            }
+            other => log::error!("冒烟测试：不认识的 FWAI_SMOKE_EXIT={other}"),
+        }
+    });
 }
 
 /// 退出超过这个时长还没结束，就认定卡死了。
