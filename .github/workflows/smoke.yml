@@ -9,6 +9,8 @@ name: smoke
 # AppKit with the simple-mode (non-resizable, overlay title bar) window: jsdom
 # never sees it, `cargo test` never sees it, and on a dev machine it looks like
 # "the app is a bit sluggish today". Here it reads 100% CPU on an idle app.
+# The same build then quits and restarts (scripts/ci/macos-exit-smoke.sh):
+# up to v1.10.1 both deadlocked, which also only shows against AppKit.
 
 on:
   push:
@@ -63,6 +65,11 @@ jobs:
         run: |
           sw_vers
           ./scripts/ci/macos-idle-smoke.sh src-tauri/target/debug/fwai_app
+
+      - name: Quit and restart it, and check neither hangs
+        # The debug build's FWAI_SMOKE_EXIT hook walks the real quit and
+        # restart paths; up to v1.10.1 both deadlocked into Not Responding.
+        run: ./scripts/ci/macos-exit-smoke.sh src-tauri/target/debug/fwai_app
 
       - name: Keep the screenshot and app log
         if: always()
