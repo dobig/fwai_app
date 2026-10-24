@@ -40,6 +40,7 @@ import type { Provider } from "@/types";
 import {
   clearGatewayLogin,
   GATEWAY_LOGIN_CHANGED_EVENT,
+  GATEWAY_USAGE_CHANGED_EVENT,
   createPlanOrder,
   fetchPlanQuote,
   isPlanQuoteUnsupported,
@@ -567,9 +568,22 @@ export function LlmGatewaySubscriptionDock({
   const [usageFetchedAt, setUsageFetchedAt] = useState<number | null>(
     () => loadGatewayUsageCache()?.fetchedAt ?? null,
   );
-  // 超过 10 分钟未成功刷新即视为过时：变灰并标注时间，避免陈旧值被当成实时值。
+  // 后台定时刷新（GatewayUsagePoller）写了新用量时跟着换上。
+  useEffect(() => {
+    const sync = () => {
+      const cached = loadGatewayUsageCache();
+      if (!cached) return;
+      setUsage(cached.usage);
+      setUsageFetchedAt(cached.fetchedAt);
+    };
+    window.addEventListener(GATEWAY_USAGE_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(GATEWAY_USAGE_CHANGED_EVENT, sync);
+  }, []);
+  // 超过 30 分钟未成功刷新即视为过时：变灰并标注时间，避免陈旧值被当成实时值。
+  // 后台每 20 分钟刷新一次（USAGE_REFRESH_INTERVAL_MS），阈值要比一个周期长，
+  // 否则每一轮的后半段都会变灰；变灰只该表示后台刷新失败了。
   const usageIsStale =
-    usageFetchedAt != null && Date.now() - usageFetchedAt > 10 * 60 * 1000;
+    usageFetchedAt != null && Date.now() - usageFetchedAt > 30 * 60 * 1000;
   // 折叠的模型份额行上显示的数：所有模型族、两个窗口里用得最多的那个。
   const modelCapPeak = Math.max(
     0,
