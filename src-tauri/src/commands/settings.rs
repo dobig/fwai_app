@@ -42,9 +42,7 @@ pub async fn save_settings(settings: crate::settings::AppSettings) -> Result<boo
 /// 重启应用程序（当 app_config_dir 变更后使用）
 #[tauri::command]
 pub async fn restart_app(app: AppHandle) -> Result<bool, String> {
-    crate::save_window_state_before_exit(&app);
-
-    // 在后台延迟重启，让函数有时间返回响应
+    // 窗口状态由 window-state 插件在 RunEvent::Exit 里保存。在后台延迟重启，让函数有时间返回响应
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         app.restart();
