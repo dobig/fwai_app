@@ -1061,6 +1061,10 @@ export interface CachedGatewayUsage {
   fetchedAt: number; // epoch ms
 }
 
+// 用量缓存更新时广播。后台定时刷新（GatewayUsagePoller）不在网关面板那棵
+// 组件树里，面板靠这个事件跟上新数字。
+export const GATEWAY_USAGE_CHANGED_EVENT = "llm-gateway-usage-changed";
+
 export function saveGatewayUsageCache(usage: GatewayUsage): void {
   localStorage.setItem(
     USAGE_CACHE_KEY,
@@ -1069,6 +1073,9 @@ export function saveGatewayUsageCache(usage: GatewayUsage): void {
       fetchedAt: Date.now(),
     } satisfies CachedGatewayUsage),
   );
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(GATEWAY_USAGE_CHANGED_EVENT));
+  }
 }
 
 export function loadGatewayUsageCache(): CachedGatewayUsage | null {
