@@ -10,6 +10,9 @@
 //! <3p>/configLibrary/_meta.json          entries 登记 + appliedId 指向生效的那个
 //! ```
 //!
+//! Windows 上这四个文件写两套:MSIX 包容器里一套,传统 `%LOCALAPPDATA%`(或
+//! `%APPDATA%`)下一套,见 [`windows_targets_from_app_data`]。
+//!
 //! 只做直连(Direct):profile 里直接写供应商的 endpoint + key。上游 cc-switch 还有
 //! 一个 proxy 模式,靠本机路由服务把非 Claude 的模型名改写成 Desktop 认的名字;
 //! 那套依赖代理服务,不在这里。因此**只支持 Claude 系模型**,见
@@ -24,6 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::AppError;
@@ -118,14 +122,40 @@ fn linux_paths_from_config_dir(config_dir: &Path) -> DesktopPaths {
     paths_from_dirs(config_dir.join("Claude"), config_dir.join("Claude-3p"))
 }
 
-/// Windows:MSIX 安装(微软商店等打包版)优先,其次传统安装。
+/// 一套要写的 Desktop 目录。macOS / Linux 只有一套;Windows 上 MSIX 包容器和传统
+/// 目录各一套。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesktopTarget {
+    /// 快照和备份文件名里用来区分目标的键,要稳定:路径会随目录增减重新解析,键不会。
+    key: &'static str,
+    paths: DesktopPaths,
+}
+
+const DEFAULT_TARGET: &str = "default";
+const WINDOWS_MSIX_TARGET: &str = "msix";
+const WINDOWS_CLASSIC_TARGET: &str = "classic";
+
+/// Windows:MSIX 包容器(微软商店等打包版)和传统目录**两套都写**。
 ///
-/// MSIX 应用的 `%APPDATA%` / `%LOCALAPPDATA%` 被重定向进包容器,我们写到真实
-/// `%LOCALAPPDATA%\Claude-3p` 的文件它看不见——开关显示成功,Desktop 却还在用
-/// 自己那份。所以只要包容器在,就写进容器里。
-fn windows_paths_from_app_data(app_data: &Path, local_app_data: &Path) -> DesktopPaths {
-    windows_msix_paths(local_app_data)
-        .unwrap_or_else(|| windows_classic_paths_in_either(app_data, local_app_data))
+/// MSIX 应用的 `%APPDATA%` / `%LOCALAPPDATA%` 被重定向进包容器,只写真实
+/// `%LOCALAPPDATA%\Claude-3p` 它看不见;可反过来只写容器也不保险——两种装法并存,
+/// 或者 Desktop 的包关掉了文件系统重定向时,它读的又是真实目录。挑错一边的后果都是
+/// 开关显示成功、Desktop 却还在用自己那份,所以不挑,两边都写。
+///
+/// 容器只认跑过一次的包(有 `LocalCache`);传统目录总在列表里,哪怕还没建出来。
+fn windows_targets_from_app_data(app_data: &Path, local_app_data: &Path) -> Vec<DesktopTarget> {
+    let mut targets = Vec::new();
+    if let Some(paths) = windows_msix_paths(local_app_data) {
+        targets.push(DesktopTarget {
+            key: WINDOWS_MSIX_TARGET,
+            paths,
+        });
+    }
+    targets.push(DesktopTarget {
+        key: WINDOWS_CLASSIC_TARGET,
+        paths: windows_classic_paths_in_either(app_data, local_app_data),
+    });
+    targets
 }
 
 /// 传统安装的 1P / 3P 目录总是成对放在同一个根下:要么都在 `%LOCALAPPDATA%`,
@@ -147,8 +177,8 @@ fn windows_classic_paths_in_either(app_data: &Path, local_app_data: &Path) -> De
 /// `LocalCache\Local\Claude-3p`(早期版本在 `Roaming\Claude-3p`,启动时会自己
 /// 搬到 Local)。哪个已经存在就用哪个,都不存在用新版的位置。
 ///
-/// 只认跑过一次的包(有 `LocalCache`):没跑过的退回传统路径,由安装检查报
-/// 「请先启动一次」。
+/// 只认跑过一次的包(有 `LocalCache`):没跑过的只剩传统路径,传统目录也没有时由
+/// 安装检查报「请先启动一次」。
 fn windows_msix_paths(local_app_data: &Path) -> Option<DesktopPaths> {
     let mut packages: Vec<PathBuf> = std::fs::read_dir(local_app_data.join("Packages"))
         .ok()?
@@ -230,10 +260,21 @@ fn linux_config_dir() -> PathBuf {
         .unwrap_or_else(|| crate::config::get_home_dir().join(".config"))
 }
 
-fn current_paths() -> Result<DesktopPaths, AppError> {
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn single_target(paths: DesktopPaths) -> Vec<DesktopTarget> {
+    vec![DesktopTarget {
+        key: DEFAULT_TARGET,
+        paths,
+    }]
+}
+
+/// 要写的全部目标。至少一个。
+fn current_targets() -> Result<Vec<DesktopTarget>, AppError> {
     #[cfg(target_os = "macos")]
     {
-        Ok(macos_paths_from_home(&crate::config::get_home_dir()))
+        Ok(single_target(macos_paths_from_home(
+            &crate::config::get_home_dir(),
+        )))
     }
     #[cfg(windows)]
     {
@@ -242,14 +283,16 @@ fn current_paths() -> Result<DesktopPaths, AppError> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| crate::config::get_home_dir().join("AppData").join(fallback))
         };
-        Ok(windows_paths_from_app_data(
+        Ok(windows_targets_from_app_data(
             &known_dir("APPDATA", "Roaming"),
             &known_dir("LOCALAPPDATA", "Local"),
         ))
     }
     #[cfg(target_os = "linux")]
     {
-        Ok(linux_paths_from_config_dir(&linux_config_dir()))
+        Ok(single_target(linux_paths_from_config_dir(
+            &linux_config_dir(),
+        )))
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
@@ -270,12 +313,29 @@ pub fn is_supported_platform() -> bool {
 /// 按配置目录(MSIX 是包容器)是否存在判断,而不是去找 .app/.exe:绿色解压、改过安装路径的装法
 /// 都找不到可执行文件,但只要跑过一次就一定有这个配置目录。
 pub fn is_installed() -> bool {
-    current_paths().is_ok_and(|paths| paths.install_dir.is_dir())
+    current_targets().is_ok_and(|targets| any_installed(&targets))
+}
+
+fn any_installed(targets: &[DesktopTarget]) -> bool {
+    targets
+        .iter()
+        .any(|target| target.paths.install_dir.is_dir())
+}
+
+/// 给用户看的那一套:第一个装过的目标(Windows 上容器在就是容器),都没装就第一个。
+/// 只用于展示和读取,写入一律走全部目标。
+fn primary_paths(targets: &[DesktopTarget]) -> &DesktopPaths {
+    let target = targets
+        .iter()
+        .find(|target| target.paths.install_dir.is_dir())
+        .or(targets.first())
+        .expect("current_targets returns at least one target");
+    &target.paths
 }
 
 /// `configLibrary` 的绝对路径,给「打开配置目录」用。
 pub fn config_library_path() -> Result<PathBuf, AppError> {
-    Ok(current_paths()?.config_library)
+    Ok(primary_paths(&current_targets()?).config_library.clone())
 }
 
 fn not_installed_error() -> AppError {
@@ -517,7 +577,7 @@ fn write_object(path: &Path, value: &Map<String, Value>) -> Result<(), AppError>
 /// 首次改动某个文件之前,把原件拷到 `~/.fwai_app/backups`。
 ///
 /// 只拷一次:名字里不带时间戳,留住的始终是**我们没碰过之前**的那一份。
-fn backup_once(path: &Path, backup_dir: &Path) -> Result<(), AppError> {
+fn backup_once(path: &Path, target_key: &str, backup_dir: &Path) -> Result<(), AppError> {
     if !path.exists() {
         return Ok(());
     }
@@ -530,7 +590,15 @@ fn backup_once(path: &Path, backup_dir: &Path) -> Result<(), AppError> {
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
         .unwrap_or("claude-desktop");
-    let target = backup_dir.join(format!("claude-desktop.{parent_name}.{file_name}"));
+    // Windows 两套目录的父目录名一样,再带上目标的键。单目标的平台沿用旧名字,
+    // 已有的备份照旧认得。
+    let target = if target_key == DEFAULT_TARGET {
+        backup_dir.join(format!("claude-desktop.{parent_name}.{file_name}"))
+    } else {
+        backup_dir.join(format!(
+            "claude-desktop.{target_key}.{parent_name}.{file_name}"
+        ))
+    };
     if target.exists() {
         return Ok(());
     }
@@ -675,18 +743,20 @@ struct PendingWrite {
     content: Map<String, Value>,
     /// profile 里有 Key,落盘要 0600。
     private: bool,
+    /// 属于哪个目标,备份文件名要用。
+    target_key: &'static str,
 }
 
-/// 先把四个文件全算好,再逐个落盘。
+/// 先把所有目标的文件全算好,再逐个落盘。
 ///
 /// 任何一个文件解析失败都不写——不接受「改了一半」的中间状态。写盘阶段每个文件
-/// 自己是原子的(临时文件 + rename),但四个文件之间没有事务:写到第三个失败时
+/// 自己是原子的(临时文件 + rename),但文件之间没有事务:写到第三个失败时
 /// 前两个已经生效。没搬上游那套写前意图 + 崩溃前滚的引擎,因为这里的写入是幂等
 /// 的,重试一次就能收敛,而 Desktop 配置丢了也不像 Codex 的 OAuth 凭据那样需要
 /// 重新登录。
 fn commit(writes: Vec<PendingWrite>, backup_dir: &Path) -> Result<(), AppError> {
     for write in &writes {
-        backup_once(&write.path, backup_dir)?;
+        backup_once(&write.path, write.target_key, backup_dir)?;
     }
     for write in &writes {
         write_object(&write.path, &write.content)?;
@@ -724,21 +794,24 @@ pub fn apply_with_credentials(
     provider: &Provider,
     credentials: &GatewayCredentials,
 ) -> Result<(), AppError> {
-    let paths = current_paths()?;
-    apply_provider_to_paths(provider, credentials, &paths, &default_backup_dir())
+    let targets = current_targets()?;
+    apply_provider_to_targets(provider, credentials, &targets, &default_backup_dir())
 }
 
 fn default_backup_dir() -> PathBuf {
     crate::config::get_app_config_dir().join("backups")
 }
 
-fn apply_provider_to_paths(
+/// 只要有一个目标装过就全部写:没装过的那套(比如只装了商店版时的传统目录)也写,
+/// Desktop 读的是哪一套我们说不准。一个都没装过才拒绝,不在没装 Desktop 的机器上
+/// 凭空造目录。
+fn apply_provider_to_targets(
     provider: &Provider,
     credentials: &GatewayCredentials,
-    paths: &DesktopPaths,
+    targets: &[DesktopTarget],
     backup_dir: &Path,
 ) -> Result<(), AppError> {
-    if !paths.install_dir.is_dir() {
+    if !any_installed(targets) {
         return Err(not_installed_error());
     }
     validate_provider(provider)?;
@@ -746,6 +819,18 @@ fn apply_provider_to_paths(
     let models = inference_model_specs(provider)?;
     let fields = build_profile_fields(credentials, &models);
 
+    let mut writes = Vec::new();
+    for target in targets {
+        writes.extend(apply_writes(target, fields.clone())?);
+    }
+    commit(writes, backup_dir)
+}
+
+fn apply_writes(
+    target: &DesktopTarget,
+    fields: Map<String, Value>,
+) -> Result<Vec<PendingWrite>, AppError> {
+    let paths = &target.paths;
     let mut normal = read_object(&paths.normal_config)?;
     set_deployment_mode(&mut normal, "3p");
     let mut threep = read_object(&paths.threep_config)?;
@@ -754,31 +839,32 @@ fn apply_provider_to_paths(
     let mut meta = read_object(&paths.meta)?;
     apply_meta(&mut meta)?;
 
-    commit(
-        vec![
-            PendingWrite {
-                path: paths.normal_config.clone(),
-                content: normal,
-                private: false,
-            },
-            PendingWrite {
-                path: paths.threep_config.clone(),
-                content: threep,
-                private: false,
-            },
-            PendingWrite {
-                path: paths.profile.clone(),
-                content: profile,
-                private: true,
-            },
-            PendingWrite {
-                path: paths.meta.clone(),
-                content: meta,
-                private: false,
-            },
-        ],
-        backup_dir,
-    )
+    Ok(vec![
+        PendingWrite {
+            path: paths.normal_config.clone(),
+            content: normal,
+            private: false,
+            target_key: target.key,
+        },
+        PendingWrite {
+            path: paths.threep_config.clone(),
+            content: threep,
+            private: false,
+            target_key: target.key,
+        },
+        PendingWrite {
+            path: paths.profile.clone(),
+            content: profile,
+            private: true,
+            target_key: target.key,
+        },
+        PendingWrite {
+            path: paths.meta.clone(),
+            content: meta,
+            private: false,
+            target_key: target.key,
+        },
+    ])
 }
 
 /// 动手之前的 Desktop 状态,交给转发的备份机制保存。
@@ -789,6 +875,19 @@ fn apply_provider_to_paths(
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopSnapshot {
+    /// 每个目标一份,键是目标的 `key`。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub targets: BTreeMap<String, TargetSnapshot>,
+    /// 旧版本只写一个目标,快照直接摊在这一层。`targets` 为空时它归第一个目标——
+    /// 旧版本挑中的那一套和现在排在第一的是同一套。
+    #[serde(flatten)]
+    pub legacy: TargetSnapshot,
+}
+
+/// 一个目标动手前的状态。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetSnapshot {
     /// 两个 `claude_desktop_config.json` 的 `deploymentMode` 原值。
     /// `None` 表示原本没有这个键——还原时应当删掉,而不是写一个我们编的值。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -800,23 +899,42 @@ pub struct DesktopSnapshot {
     pub applied_id: Option<String>,
 }
 
-/// 采集动手前的状态。Desktop 没装时返回空快照(还原时就什么都不做)。
-pub fn capture_snapshot() -> Result<DesktopSnapshot, AppError> {
-    let paths = current_paths()?;
-    if !paths.install_dir.is_dir() {
-        return Ok(DesktopSnapshot::default());
+impl DesktopSnapshot {
+    /// 第 `index` 个目标的快照。没有记录(旧快照之后才多出来的目标)返回 `None`。
+    fn for_target(&self, index: usize, target: &DesktopTarget) -> Option<&TargetSnapshot> {
+        if self.targets.is_empty() {
+            return (index == 0).then_some(&self.legacy);
+        }
+        self.targets.get(target.key)
     }
-    capture_snapshot_at_paths(&paths)
 }
 
-fn capture_snapshot_at_paths(paths: &DesktopPaths) -> Result<DesktopSnapshot, AppError> {
+/// 采集动手前的状态。Desktop 没装时返回空快照(还原时就什么都不做)。
+pub fn capture_snapshot() -> Result<DesktopSnapshot, AppError> {
+    capture_snapshot_at_targets(&current_targets()?)
+}
+
+fn capture_snapshot_at_targets(targets: &[DesktopTarget]) -> Result<DesktopSnapshot, AppError> {
+    if !any_installed(targets) {
+        return Ok(DesktopSnapshot::default());
+    }
+    let mut snapshot = DesktopSnapshot::default();
+    for target in targets {
+        snapshot
+            .targets
+            .insert(target.key.to_string(), capture_target(&target.paths)?);
+    }
+    Ok(snapshot)
+}
+
+fn capture_target(paths: &DesktopPaths) -> Result<TargetSnapshot, AppError> {
     let read_mode = |path: &Path| -> Result<Option<String>, AppError> {
         Ok(read_object(path)?
             .get("deploymentMode")
             .and_then(Value::as_str)
             .map(str::to_string))
     };
-    Ok(DesktopSnapshot {
+    Ok(TargetSnapshot {
         normal_deployment_mode: read_mode(&paths.normal_config)?,
         threep_deployment_mode: read_mode(&paths.threep_config)?,
         applied_id: read_object(&paths.meta)?
@@ -828,9 +946,39 @@ fn capture_snapshot_at_paths(paths: &DesktopPaths) -> Result<DesktopSnapshot, Ap
 
 /// 按快照还原:`deploymentMode` 回到原值(原本没有就删掉),摘掉我们的 profile 条目,
 /// `appliedId` 回到原来指的那个,profile 文件保留、只清我们独占的字段。
+///
+/// 快照里没有的目标(旧版本开的转发,升级后才写进第二套目录)只在里面确实登记着
+/// 我们的 profile 时才动,按交还 1P 兜底;没登记说明不是我们写的,不碰。
 pub fn restore_snapshot(snapshot: &DesktopSnapshot) -> Result<(), AppError> {
-    let paths = current_paths()?;
-    restore_at_paths(&paths, Some(snapshot), &default_backup_dir())
+    restore_snapshot_at_targets(&current_targets()?, snapshot, &default_backup_dir())
+}
+
+fn restore_snapshot_at_targets(
+    targets: &[DesktopTarget],
+    snapshot: &DesktopSnapshot,
+    backup_dir: &Path,
+) -> Result<(), AppError> {
+    let mut writes = Vec::new();
+    for (index, target) in targets.iter().enumerate() {
+        let target_snapshot = snapshot.for_target(index, target);
+        if target_snapshot.is_none() && !lists_our_profile(&target.paths)? {
+            continue;
+        }
+        writes.extend(restore_writes(target, target_snapshot)?);
+    }
+    commit(writes, backup_dir)
+}
+
+/// `_meta.json` 里还登记着我们的 profile 吗。
+fn lists_our_profile(paths: &DesktopPaths) -> Result<bool, AppError> {
+    Ok(read_object(&paths.meta)?
+        .get("entries")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.get("id").and_then(Value::as_str) == Some(PROFILE_ID))
+        }))
 }
 
 /// 交还给 Desktop 自己的 1P 登录。
@@ -839,23 +987,32 @@ pub fn restore_snapshot(snapshot: &DesktopSnapshot) -> Result<(), AppError> {
 /// 设置下次切回来还在,而 Key 已经从磁盘上没了。Desktop 只按 `_meta.json` 的条目
 /// 列 profile,摘掉条目后它不会再被列出来。
 pub fn restore_official() -> Result<(), AppError> {
-    let paths = current_paths()?;
-    restore_official_at_paths(&paths, &default_backup_dir())
+    restore_official_at_targets(&current_targets()?, &default_backup_dir())
 }
 
-fn restore_official_at_paths(paths: &DesktopPaths, backup_dir: &Path) -> Result<(), AppError> {
-    restore_at_paths(paths, None, backup_dir)
-}
-
-/// `snapshot` 为 `None` 时按 1P 兜底——没有动手前的记录可依据（删除条目那条路径）。
-fn restore_at_paths(
-    paths: &DesktopPaths,
-    snapshot: Option<&DesktopSnapshot>,
+fn restore_official_at_targets(
+    targets: &[DesktopTarget],
     backup_dir: &Path,
 ) -> Result<(), AppError> {
-    // 没装过就没什么可还原的。不要在这里把目录建出来。
-    if !paths.install_dir.is_dir() {
-        return Ok(());
+    let mut writes = Vec::new();
+    for target in targets {
+        writes.extend(restore_writes(target, None)?);
+    }
+    commit(writes, backup_dir)
+}
+
+/// 一个目标的还原内容。`snapshot` 为 `None` 时按 1P 兜底——没有动手前的记录可依据
+/// (删除条目那条路径)。
+///
+/// 目标既没装过、也没被我们写过(没有 `_meta.json`)就什么都不写,不在这里把目录
+/// 建出来。装没装过不能单看 1P 目录:只装了商店版时,传统目录是我们建的,也要还原。
+fn restore_writes(
+    target: &DesktopTarget,
+    snapshot: Option<&TargetSnapshot>,
+) -> Result<Vec<PendingWrite>, AppError> {
+    let paths = &target.paths;
+    if !paths.install_dir.is_dir() && !paths.meta.exists() {
+        return Ok(Vec::new());
     }
 
     let mut normal = read_object(&paths.normal_config)?;
@@ -892,16 +1049,19 @@ fn restore_at_paths(
             path: paths.normal_config.clone(),
             content: normal,
             private: false,
+            target_key: target.key,
         },
         PendingWrite {
             path: paths.threep_config.clone(),
             content: threep,
             private: false,
+            target_key: target.key,
         },
         PendingWrite {
             path: paths.meta.clone(),
             content: meta,
             private: false,
+            target_key: target.key,
         },
     ];
     if paths.profile.exists() {
@@ -913,47 +1073,49 @@ fn restore_at_paths(
             path: paths.profile.clone(),
             content: profile,
             private: true,
+            target_key: target.key,
         });
     }
-    commit(writes, backup_dir)
+    Ok(writes)
 }
 
 /// 删掉某个供应商条目时:只有 profile 里生效的正是它,才交还 1P。
 ///
 /// 和 Claude / Codex 的同类逻辑一个意思——用户删的可能是个早就不生效的旧条目,
-/// 那种情况下动 live 配置属于误伤。
+/// 那种情况下动 live 配置属于误伤。每个目标分开判断。
 pub fn restore_official_if_matches(provider: &Provider) -> Result<(), AppError> {
-    let paths = current_paths()?;
-    restore_official_if_matches_at_paths(provider, &paths, &default_backup_dir())
+    restore_official_if_matches_at_targets(provider, &current_targets()?, &default_backup_dir())
 }
 
-fn restore_official_if_matches_at_paths(
+fn restore_official_if_matches_at_targets(
     provider: &Provider,
-    paths: &DesktopPaths,
+    targets: &[DesktopTarget],
     backup_dir: &Path,
 ) -> Result<(), AppError> {
     let Ok(credentials) = gateway_credentials(provider) else {
         // 条目本身就没有完整凭据,不可能是它写进去的。
         return Ok(());
     };
-    if !paths.install_dir.is_dir() {
-        return Ok(());
+    let mut writes = Vec::new();
+    for target in targets {
+        let live_key = read_object(&target.paths.profile)?
+            .get("inferenceGatewayApiKey")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_default();
+        if live_key == credentials.api_key {
+            writes.extend(restore_writes(target, None)?);
+        }
     }
-    let profile = read_object(&paths.profile)?;
-    let live_key = profile
-        .get("inferenceGatewayApiKey")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if live_key != credentials.api_key {
-        return Ok(());
-    }
-    restore_official_at_paths(paths, backup_dir)
+    commit(writes, backup_dir)
 }
 
 /// 当前 profile 的内容,给「查看当前生效配置」用。没有就返回空对象。
 pub fn read_profile() -> Result<Value, AppError> {
-    let paths = current_paths()?;
-    Ok(Value::Object(read_object(&paths.profile)?))
+    let targets = current_targets()?;
+    Ok(Value::Object(read_object(
+        &primary_paths(&targets).profile,
+    )?))
 }
 
 // ---------------------------------------------------------------------------
@@ -990,19 +1152,12 @@ pub fn get_status() -> Result<ClaudeDesktopStatus, AppError> {
         });
     }
 
-    let paths = current_paths()?;
+    let targets = current_targets()?;
+    let paths = primary_paths(&targets);
     let profile = read_object(&paths.profile).unwrap_or_default();
-    let meta = read_object(&paths.meta).unwrap_or_default();
     // 切回官方后 profile 文件还在、只是关键字段被清空了,所以不能按文件在不在
     // 判断,要看 _meta.json 里还有没有我们的条目。
-    let listed = meta
-        .get("entries")
-        .and_then(Value::as_array)
-        .is_some_and(|entries| {
-            entries
-                .iter()
-                .any(|entry| entry.get("id").and_then(Value::as_str) == Some(PROFILE_ID))
-        });
+    let listed = lists_our_profile(paths).unwrap_or(false);
     let stale_raw_models = profile
         .get("inferenceModels")
         .and_then(Value::as_array)
@@ -1016,7 +1171,7 @@ pub fn get_status() -> Result<ClaudeDesktopStatus, AppError> {
 
     Ok(ClaudeDesktopStatus {
         supported: true,
-        installed: paths.install_dir.is_dir(),
+        installed: any_installed(&targets),
         configured: listed && profile.get("inferenceProvider").is_some(),
         profile_path: Some(paths.profile.display().to_string()),
         config_library_path: Some(paths.config_library.display().to_string()),
@@ -1077,10 +1232,25 @@ mod tests {
         paths
     }
 
+    /// macOS / Linux 那样只有一套目录。
+    fn single(paths: &DesktopPaths) -> Vec<DesktopTarget> {
+        vec![DesktopTarget {
+            key: DEFAULT_TARGET,
+            paths: paths.clone(),
+        }]
+    }
+
     /// 测试里按条目自带的凭据写入（等价于直接切换那条路径）。
     fn apply(provider: &Provider, paths: &DesktopPaths, backup_dir: &Path) -> Result<(), AppError> {
         let credentials = gateway_credentials(provider)?;
-        apply_provider_to_paths(provider, &credentials, paths, backup_dir)
+        apply_provider_to_targets(provider, &credentials, &single(paths), backup_dir)
+    }
+
+    fn capture(paths: &DesktopPaths) -> TargetSnapshot {
+        capture_snapshot_at_targets(&single(paths))
+            .expect("capture")
+            .targets[DEFAULT_TARGET]
+            .clone()
     }
 
     fn read(path: &Path) -> Value {
@@ -1271,12 +1441,20 @@ mod tests {
         );
     }
 
+    /// 没有商店版容器时只有传统目录这一套。
+    fn windows_classic_only(app_data: &Path, local_app_data: &Path) -> DesktopPaths {
+        let targets = windows_targets_from_app_data(app_data, local_app_data);
+        assert_eq!(targets.len(), 1, "{targets:?}");
+        assert_eq!(targets[0].key, WINDOWS_CLASSIC_TARGET);
+        targets[0].paths.clone()
+    }
+
     #[test]
     fn windows_paths_prefer_the_exact_directory_names() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(temp.path().join("Claude")).expect("Claude");
         std::fs::create_dir_all(temp.path().join("Claude-3p")).expect("Claude-3p");
-        let paths = windows_paths_from_app_data(&temp.path().join("Roaming"), temp.path());
+        let paths = windows_classic_only(&temp.path().join("Roaming"), temp.path());
         assert_eq!(paths.install_dir, temp.path().join("Claude"));
         assert_eq!(
             paths.threep_config,
@@ -1290,7 +1468,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(temp.path().join("Claude-beta")).expect("Claude-beta");
         std::fs::create_dir_all(temp.path().join("Claude-beta-3p")).expect("Claude-beta-3p");
-        let paths = windows_paths_from_app_data(&temp.path().join("Roaming"), temp.path());
+        let paths = windows_classic_only(&temp.path().join("Roaming"), temp.path());
         assert_eq!(paths.install_dir, temp.path().join("Claude-beta"));
         assert_eq!(
             paths.threep_config,
@@ -1305,7 +1483,7 @@ mod tests {
         let roaming = temp.path().join("Roaming");
         std::fs::create_dir_all(roaming.join("Claude")).expect("Claude");
         std::fs::create_dir_all(roaming.join("Claude-3p")).expect("Claude-3p");
-        let paths = windows_paths_from_app_data(&roaming, temp.path());
+        let paths = windows_classic_only(&roaming, temp.path());
         assert_eq!(paths.install_dir, roaming.join("Claude"));
         assert_eq!(
             paths.normal_config,
@@ -1325,7 +1503,7 @@ mod tests {
         std::fs::create_dir_all(roaming.join("Claude-3p")).expect("Roaming Claude-3p");
         std::fs::create_dir_all(temp.path().join("Claude")).expect("Claude");
         std::fs::create_dir_all(temp.path().join("Claude-3p")).expect("Claude-3p");
-        let paths = windows_paths_from_app_data(&roaming, temp.path());
+        let paths = windows_classic_only(&roaming, temp.path());
         assert_eq!(paths.install_dir, temp.path().join("Claude"));
         assert_eq!(
             paths.threep_config,
@@ -1333,10 +1511,21 @@ mod tests {
         );
     }
 
+    /// 有商店版容器时两套都在:容器排第一,传统目录跟在后面。
+    fn windows_msix_and_classic(
+        app_data: &Path,
+        local_app_data: &Path,
+    ) -> (DesktopPaths, DesktopPaths) {
+        let targets = windows_targets_from_app_data(app_data, local_app_data);
+        let keys: Vec<_> = targets.iter().map(|target| target.key).collect();
+        assert_eq!(keys, vec![WINDOWS_MSIX_TARGET, WINDOWS_CLASSIC_TARGET]);
+        (targets[0].paths.clone(), targets[1].paths.clone())
+    }
+
     #[test]
-    fn windows_paths_prefer_the_msix_container() {
-        // 商店版跑过以后,传统目录里往往还留着迁移前的旧文件;必须写进容器,
-        // 不然 Desktop 看不见。
+    fn windows_targets_both_the_msix_container_and_the_classic_dirs() {
+        // 容器和传统目录同时在:不挑,两套都写。只写容器时,关掉了文件系统重定向的
+        // 包读的是传统目录;只写传统目录时,走重定向的包又看不见。
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(temp.path().join("Claude")).expect("Claude");
         std::fs::create_dir_all(temp.path().join("Claude-3p")).expect("Claude-3p");
@@ -1348,16 +1537,24 @@ mod tests {
         std::fs::create_dir_all(local_cache.join("Roaming").join("Claude")).expect("Roaming");
         std::fs::create_dir_all(local_cache.join("Local").join("Claude-3p")).expect("Local");
 
-        let paths = windows_paths_from_app_data(&temp.path().join("Roaming"), temp.path());
-        assert_eq!(paths.install_dir, local_cache);
+        let (msix, classic) = windows_msix_and_classic(&temp.path().join("Roaming"), temp.path());
+        assert_eq!(msix.install_dir, local_cache);
         assert_eq!(
-            paths.normal_config,
+            msix.normal_config,
             local_cache.join("Roaming").join("Claude").join(CONFIG_FILE)
         );
         assert_eq!(
-            paths.profile,
+            msix.profile,
             local_cache
                 .join("Local")
+                .join("Claude-3p")
+                .join(CONFIG_LIBRARY_DIR)
+                .join(format!("{PROFILE_ID}.json"))
+        );
+        assert_eq!(classic.install_dir, temp.path().join("Claude"));
+        assert_eq!(
+            classic.profile,
+            temp.path()
                 .join("Claude-3p")
                 .join(CONFIG_LIBRARY_DIR)
                 .join(format!("{PROFILE_ID}.json"))
@@ -1375,8 +1572,13 @@ mod tests {
             .join("LocalCache");
         std::fs::create_dir_all(&local_cache).expect("LocalCache");
 
-        let paths = windows_paths_from_app_data(&temp.path().join("Roaming"), temp.path());
+        let (paths, classic) = windows_msix_and_classic(&temp.path().join("Roaming"), temp.path());
         assert!(paths.install_dir.is_dir());
+        // 传统目录还没有,照样在写入列表里
+        assert_eq!(
+            classic.threep_config,
+            temp.path().join("Claude-3p").join(CONFIG_FILE)
+        );
         assert_eq!(
             paths.normal_config,
             local_cache.join("Roaming").join("Claude").join(CONFIG_FILE)
@@ -1400,7 +1602,7 @@ mod tests {
             .join("LocalCache");
         std::fs::create_dir_all(local_cache.join("Roaming").join("Claude-3p")).expect("Roaming");
 
-        let paths = windows_paths_from_app_data(&temp.path().join("Roaming"), temp.path());
+        let (paths, _) = windows_msix_and_classic(&temp.path().join("Roaming"), temp.path());
         assert_eq!(
             paths.threep_config,
             local_cache
@@ -1412,13 +1614,13 @@ mod tests {
 
     #[test]
     fn windows_ignores_a_never_launched_msix_package() {
-        // 没有 LocalCache 的包不算,退回传统路径。
+        // 没有 LocalCache 的包不算,只剩传统路径。
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(temp.path().join("Packages").join("Claude_pzs8sxrjxfjjc"))
             .expect("package");
         std::fs::create_dir_all(temp.path().join("Claude")).expect("Claude");
 
-        let paths = windows_paths_from_app_data(&temp.path().join("Roaming"), temp.path());
+        let paths = windows_classic_only(&temp.path().join("Roaming"), temp.path());
         assert_eq!(paths.install_dir, temp.path().join("Claude"));
     }
 
@@ -1687,7 +1889,7 @@ mod tests {
         let provider = provider_with(&[("claude-sonnet-5", false)]);
         apply(&provider, &paths, &backups).expect("apply");
 
-        restore_official_at_paths(&paths, &backups).expect("restore");
+        restore_official_at_targets(&single(&paths), &backups).expect("restore");
 
         assert_eq!(read(&paths.normal_config)["deploymentMode"], json!("1p"));
         assert_eq!(read(&paths.threep_config)["deploymentMode"], json!("1p"));
@@ -1728,7 +1930,8 @@ mod tests {
         )
         .expect("seed");
 
-        restore_official_at_paths(&paths, &temp.path().join("backups")).expect("restore");
+        restore_official_at_targets(&single(&paths), &temp.path().join("backups"))
+            .expect("restore");
 
         let threep = read(&paths.threep_config);
         assert_eq!(threep["deploymentMode"], json!("1p"));
@@ -1752,7 +1955,8 @@ mod tests {
         )
         .expect("seed");
 
-        restore_official_at_paths(&paths, &temp.path().join("backups")).expect("restore");
+        restore_official_at_targets(&single(&paths), &temp.path().join("backups"))
+            .expect("restore");
 
         let threep = read(&paths.threep_config);
         assert_eq!(threep["enterpriseConfig"], json!({ "someOrgPolicy": true }));
@@ -1771,7 +1975,7 @@ mod tests {
         )
         .expect("seed");
 
-        let snapshot = capture_snapshot_at_paths(&paths).expect("capture");
+        let snapshot = capture(&paths);
         assert_eq!(snapshot.normal_deployment_mode.as_deref(), Some("3p"));
         // 这个文件还不存在，原本就没有这个键
         assert_eq!(snapshot.threep_deployment_mode, None);
@@ -1795,7 +1999,7 @@ mod tests {
         )
         .expect("seed");
 
-        let snapshot = capture_snapshot_at_paths(&paths).expect("capture");
+        let snapshot = capture_snapshot_at_targets(&single(&paths)).expect("capture");
         apply(
             &provider_with(&[("claude-sonnet-5", false)]),
             &paths,
@@ -1805,7 +2009,7 @@ mod tests {
         // 我们接管期间 appliedId 指向我们
         assert_eq!(read(&paths.meta)["appliedId"], json!(PROFILE_ID));
 
-        restore_at_paths(&paths, Some(&snapshot), &backups).expect("restore");
+        restore_snapshot_at_targets(&single(&paths), &snapshot, &backups).expect("restore");
 
         // 回到他原来的模式和 profile，而不是被按成 1p
         assert_eq!(read(&paths.normal_config)["deploymentMode"], json!("3p"));
@@ -1825,13 +2029,16 @@ mod tests {
         let paths = installed_paths(temp.path());
         std::fs::write(&paths.normal_config, r#"{"preferences":{"locale":"zh"}}"#).expect("seed");
 
-        let snapshot = capture_snapshot_at_paths(&paths).expect("capture");
-        assert_eq!(snapshot.normal_deployment_mode, None);
+        let snapshot = capture_snapshot_at_targets(&single(&paths)).expect("capture");
+        assert_eq!(
+            snapshot.targets[DEFAULT_TARGET].normal_deployment_mode,
+            None
+        );
 
         apply(&provider_with(&[]), &paths, &backups).expect("apply");
         assert_eq!(read(&paths.normal_config)["deploymentMode"], json!("3p"));
 
-        restore_at_paths(&paths, Some(&snapshot), &backups).expect("restore");
+        restore_snapshot_at_targets(&single(&paths), &snapshot, &backups).expect("restore");
 
         let normal = read(&paths.normal_config);
         assert!(
@@ -1850,7 +2057,7 @@ mod tests {
         let paths = installed_paths(temp.path());
         apply(&provider_with(&[]), &paths, &backups).expect("apply");
 
-        restore_at_paths(&paths, None, &backups).expect("restore");
+        restore_official_at_targets(&single(&paths), &backups).expect("restore");
 
         assert_eq!(read(&paths.normal_config)["deploymentMode"], json!("1p"));
     }
@@ -1860,7 +2067,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let paths = paths_from_dirs(temp.path().join("Claude"), temp.path().join("Claude-3p"));
         // 没装过时不该去读（也读不到）任何东西，更不该建目录
-        let snapshot = capture_snapshot_at_paths(&paths).expect("capture");
+        let snapshot = capture_snapshot_at_targets(&single(&paths)).expect("capture");
         assert_eq!(snapshot, DesktopSnapshot::default());
         assert!(!paths.config_library.exists());
     }
@@ -1869,7 +2076,7 @@ mod tests {
     fn restore_is_a_noop_when_desktop_is_not_installed() {
         let temp = tempfile::tempdir().expect("tempdir");
         let paths = paths_from_dirs(temp.path().join("Claude"), temp.path().join("Claude-3p"));
-        restore_official_at_paths(&paths, &temp.path().join("backups")).expect("noop");
+        restore_official_at_targets(&single(&paths), &temp.path().join("backups")).expect("noop");
         assert!(!paths.normal_config.exists());
         assert!(!paths.config_library.exists());
     }
@@ -1937,7 +2144,7 @@ mod tests {
         other.settings_config = json!({
             "env": { "ANTHROPIC_BASE_URL": "https://other", "ANTHROPIC_AUTH_TOKEN": "sk-other" }
         });
-        restore_official_if_matches_at_paths(&other, &paths, &backups).expect("noop");
+        restore_official_if_matches_at_targets(&other, &single(&paths), &backups).expect("noop");
 
         assert_eq!(read(&paths.normal_config)["deploymentMode"], json!("3p"));
         assert_eq!(read(&paths.meta)["appliedId"], json!(PROFILE_ID));
@@ -1951,9 +2158,249 @@ mod tests {
         let provider = provider_with(&[]);
         apply(&provider, &paths, &backups).expect("apply");
 
-        restore_official_if_matches_at_paths(&provider, &paths, &backups).expect("restore");
+        restore_official_if_matches_at_targets(&provider, &single(&paths), &backups)
+            .expect("restore");
 
         assert_eq!(read(&paths.normal_config)["deploymentMode"], json!("1p"));
         assert!(read(&paths.meta)["entries"].as_array().unwrap().is_empty());
+    }
+
+    // ---- Windows 两套目录 ----------------------------------------------
+
+    /// 只装了商店版:容器装过,传统目录还没有。
+    fn msix_and_classic_targets(root: &Path) -> Vec<DesktopTarget> {
+        let msix = installed_paths(&root.join("LocalCache"));
+        let classic = paths_from_dirs(root.join("Claude"), root.join("Claude-3p"));
+        vec![
+            DesktopTarget {
+                key: WINDOWS_MSIX_TARGET,
+                paths: msix,
+            },
+            DesktopTarget {
+                key: WINDOWS_CLASSIC_TARGET,
+                paths: classic,
+            },
+        ]
+    }
+
+    fn apply_to(targets: &[DesktopTarget], backup_dir: &Path) {
+        let provider = provider_with(&[("claude-sonnet-5", false)]);
+        let credentials = gateway_credentials(&provider).expect("credentials");
+        apply_provider_to_targets(&provider, &credentials, targets, backup_dir).expect("apply");
+    }
+
+    #[test]
+    fn apply_writes_every_target_even_one_desktop_has_not_created_yet() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let targets = msix_and_classic_targets(temp.path());
+
+        apply_to(&targets, &temp.path().join("backups"));
+
+        for target in &targets {
+            let paths = &target.paths;
+            assert_eq!(read(&paths.normal_config)["deploymentMode"], json!("3p"));
+            assert_eq!(read(&paths.threep_config)["deploymentMode"], json!("3p"));
+            assert_eq!(
+                read(&paths.profile)["inferenceGatewayApiKey"],
+                json!("sk-test-token")
+            );
+            assert_eq!(read(&paths.meta)["appliedId"], json!(PROFILE_ID));
+        }
+    }
+
+    #[test]
+    fn apply_refuses_when_no_target_is_installed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let targets = vec![
+            DesktopTarget {
+                key: WINDOWS_MSIX_TARGET,
+                paths: paths_from_dirs(temp.path().join("a"), temp.path().join("a-3p")),
+            },
+            DesktopTarget {
+                key: WINDOWS_CLASSIC_TARGET,
+                paths: paths_from_dirs(temp.path().join("b"), temp.path().join("b-3p")),
+            },
+        ];
+        let provider = provider_with(&[]);
+        let credentials = gateway_credentials(&provider).expect("credentials");
+        apply_provider_to_targets(
+            &provider,
+            &credentials,
+            &targets,
+            &temp.path().join("backups"),
+        )
+        .expect_err("should refuse");
+        for target in &targets {
+            assert!(!target.paths.normal_config.exists());
+            assert!(!target.paths.config_library.exists());
+        }
+    }
+
+    #[test]
+    fn backups_of_the_two_targets_do_not_overwrite_each_other() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let backups = temp.path().join("backups");
+        let targets = msix_and_classic_targets(temp.path());
+        std::fs::create_dir_all(&targets[1].paths.install_dir).expect("classic");
+        std::fs::write(&targets[0].paths.normal_config, r#"{"from":"msix"}"#).expect("seed");
+        std::fs::write(&targets[1].paths.normal_config, r#"{"from":"classic"}"#).expect("seed");
+
+        apply_to(&targets, &backups);
+
+        let msix = std::fs::read_to_string(
+            backups.join("claude-desktop.msix.Claude.claude_desktop_config.json"),
+        )
+        .expect("msix backup");
+        let classic = std::fs::read_to_string(
+            backups.join("claude-desktop.classic.Claude.claude_desktop_config.json"),
+        )
+        .expect("classic backup");
+        assert!(msix.contains("msix"), "{msix}");
+        assert!(classic.contains("classic"), "{classic}");
+    }
+
+    #[test]
+    fn restore_returns_each_target_to_its_own_prior_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let backups = temp.path().join("backups");
+        let targets = msix_and_classic_targets(temp.path());
+        std::fs::write(
+            &targets[0].paths.normal_config,
+            r#"{"deploymentMode":"3p"}"#,
+        )
+        .expect("seed");
+        std::fs::write(
+            &targets[0].paths.meta,
+            r#"{"entries":[{"id":"theirs","name":"Theirs"}],"appliedId":"theirs"}"#,
+        )
+        .expect("seed");
+
+        let snapshot = capture_snapshot_at_targets(&targets).expect("capture");
+        apply_to(&targets, &backups);
+        restore_snapshot_at_targets(&targets, &snapshot, &backups).expect("restore");
+
+        // 容器那套回到用户自己的 3P profile
+        let msix = &targets[0].paths;
+        assert_eq!(read(&msix.normal_config)["deploymentMode"], json!("3p"));
+        assert_eq!(read(&msix.meta)["appliedId"], json!("theirs"));
+        // 传统那套是我们建的:原本没有 deploymentMode,还原后也没有
+        let classic = &targets[1].paths;
+        assert!(!read(&classic.normal_config)
+            .as_object()
+            .unwrap()
+            .contains_key("deploymentMode"));
+        assert!(read(&classic.meta)["entries"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(!read(&classic.profile)
+            .as_object()
+            .unwrap()
+            .contains_key("inferenceGatewayApiKey"));
+    }
+
+    #[test]
+    fn old_single_target_snapshot_still_restores_the_first_target() {
+        // 旧版本开的转发,备份里的快照是摊平的三个字段。升级后两套都被写过:
+        // 第一套按旧快照还原,第二套没有记录,按交还 1P 兜底。
+        let temp = tempfile::tempdir().expect("tempdir");
+        let backups = temp.path().join("backups");
+        let targets = msix_and_classic_targets(temp.path());
+        let snapshot: DesktopSnapshot = serde_json::from_value(json!({
+            "normalDeploymentMode": "3p",
+            "threepDeploymentMode": "3p",
+            "appliedId": "theirs",
+        }))
+        .expect("legacy snapshot");
+        assert!(snapshot.targets.is_empty());
+
+        apply_to(&targets, &backups);
+        restore_snapshot_at_targets(&targets, &snapshot, &backups).expect("restore");
+
+        let msix = &targets[0].paths;
+        assert_eq!(read(&msix.normal_config)["deploymentMode"], json!("3p"));
+        assert_eq!(read(&msix.meta)["appliedId"], json!("theirs"));
+        let classic = &targets[1].paths;
+        assert_eq!(read(&classic.normal_config)["deploymentMode"], json!("1p"));
+        assert!(read(&classic.meta)["entries"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_target_missing_from_the_snapshot_is_left_alone_if_we_never_wrote_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let backups = temp.path().join("backups");
+        let targets = msix_and_classic_targets(temp.path());
+        // 第二套是用户自己的 3P 配置,我们从没写过
+        std::fs::create_dir_all(&targets[1].paths.config_library).expect("classic");
+        std::fs::create_dir_all(&targets[1].paths.install_dir).expect("classic");
+        std::fs::write(
+            &targets[1].paths.normal_config,
+            r#"{"deploymentMode":"3p"}"#,
+        )
+        .expect("seed");
+        std::fs::write(
+            &targets[1].paths.meta,
+            r#"{"entries":[{"id":"theirs","name":"Theirs"}],"appliedId":"theirs"}"#,
+        )
+        .expect("seed");
+
+        let legacy = DesktopSnapshot::default();
+        restore_snapshot_at_targets(&targets, &legacy, &backups).expect("restore");
+
+        assert_eq!(
+            read(&targets[1].paths.normal_config)["deploymentMode"],
+            json!("3p")
+        );
+        assert_eq!(read(&targets[1].paths.meta)["appliedId"], json!("theirs"));
+    }
+
+    #[test]
+    fn snapshot_serializes_per_target_without_the_legacy_fields() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let targets = msix_and_classic_targets(temp.path());
+        std::fs::write(
+            &targets[0].paths.normal_config,
+            r#"{"deploymentMode":"3p"}"#,
+        )
+        .expect("seed");
+
+        let snapshot = capture_snapshot_at_targets(&targets).expect("capture");
+        let value = serde_json::to_value(&snapshot).expect("serialize");
+        assert_eq!(
+            value,
+            json!({ "targets": { "msix": { "normalDeploymentMode": "3p" }, "classic": {} } })
+        );
+        let back: DesktopSnapshot = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back, snapshot);
+    }
+
+    #[test]
+    fn restore_if_matches_checks_each_target_separately() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let backups = temp.path().join("backups");
+        let targets = msix_and_classic_targets(temp.path());
+        apply_to(&targets, &backups);
+        // 第二套被另一家的 Key 覆盖了
+        let mut other = provider_with(&[("claude-sonnet-5", false)]);
+        other.settings_config = json!({
+            "env": { "ANTHROPIC_BASE_URL": "https://other", "ANTHROPIC_AUTH_TOKEN": "sk-other" }
+        });
+        let credentials = gateway_credentials(&other).expect("credentials");
+        apply_provider_to_targets(&other, &credentials, &targets[1..], &backups).expect("apply");
+
+        restore_official_if_matches_at_targets(&provider_with(&[]), &targets, &backups)
+            .expect("restore");
+
+        assert_eq!(
+            read(&targets[0].paths.normal_config)["deploymentMode"],
+            json!("1p")
+        );
+        assert_eq!(
+            read(&targets[1].paths.normal_config)["deploymentMode"],
+            json!("3p")
+        );
     }
 }
