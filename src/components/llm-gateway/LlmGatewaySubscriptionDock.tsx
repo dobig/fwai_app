@@ -92,6 +92,16 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PlanCheckout } from "./PlanCheckout";
 import { PlanSections } from "./PlanSections";
 import { ModelCapBar } from "./ModelCapBar";
+import {
+  foldedSummary,
+  formatWeekReset,
+  plansInVendorGroup,
+  splitWeekGrants,
+  weekGrantFooter,
+  weekGrantLabel,
+  type WeekFooterTone,
+  type WeekGrant,
+} from "./grantWeeks";
 import { OrgProjectRow, ProjectPicker, currentOrgProject } from "./OrgProjects";
 // 价格和陈述规则的文案一律来自服务端：周期列表取 GET /v1/plans 的成品价和
 // 周期名，结账页取 quote 的 amount_due_micros 和 headline，二维码页取下单
@@ -319,25 +329,26 @@ function formatStaleAge(fetchedAt: number): string {
 
 // Short local time for a usage window's reset instant, e.g. "7月19 15:00".
 function formatReset(iso?: string | null): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return iso ? formatWeekReset(iso) : "";
 }
 
+const FOOTER_TONE: Record<WeekFooterTone, string> = {
+  muted: "text-muted-foreground",
+  warn: "text-amber-600 dark:text-amber-400",
+  danger: "font-medium text-red-500",
+};
+
 // One account-usage window rendered as a labelled utilization bar. Turns red as
-// it approaches the cap so users notice before they run out.
+// it approaches the cap so users notice before they run out. `footer` replaces
+// the "x 重置" line — the per-grant weekly bars say 刷新 / 到期 / 已用完 instead.
 function UsageBar({
   label,
   window: w,
+  footer,
 }: {
   label: string;
   window: GatewayUsageWindow;
+  footer?: { text: string; tone: WeekFooterTone };
 }) {
   const pct = Math.max(0, Math.min(100, w.utilization));
   const near = pct >= 90;
@@ -357,12 +368,38 @@ function UsageBar({
           style={{ width: `${pct}%` }}
         />
       </div>
-      {w.resets_at && (
-        <div className="mt-0.5 text-right text-[10px] text-muted-foreground">
-          {formatReset(w.resets_at)} 重置
+      {footer ? (
+        <div
+          className={`mt-0.5 text-right text-[10px] ${FOOTER_TONE[footer.tone]}`}
+        >
+          {footer.text}
         </div>
+      ) : (
+        w.resets_at && (
+          <div className="mt-0.5 text-right text-[10px] text-muted-foreground">
+            {formatReset(w.resets_at)} 重置
+          </div>
+        )
       )}
     </div>
+  );
+}
+
+// 一份额度这周用了多少、什么时候刷新（#79）。和总用量条同一个样子，只换标题
+// 和时间那一行。
+function WeekGrantBar({
+  plan,
+  showVendor,
+}: {
+  plan: WeekGrant;
+  showVendor: boolean;
+}) {
+  return (
+    <UsageBar
+      label={weekGrantLabel(plan, showVendor)}
+      window={{ utilization: plan.week_utilization }}
+      footer={weekGrantFooter(plan)}
+    />
   );
 }
 
@@ -408,8 +445,11 @@ export function LlmGatewaySubscriptionDock({
   const open = inline || openState;
   // 内嵌时账号屏下半部分（购买 / 兑换 / 登出）是否展开。
   const [accountMoreOpen, setAccountMoreOpen] = useState(false);
-  // 用量卡里按模型的份额条（如 Fable）是否展开。
-  const [modelCapsOpen, setModelCapsOpen] = useState(false);
+  // 用量卡底部的折叠行是否展开：加量 / 赠送的周额度，和按模型的份额（如 Fable）。
+  const [usageMoreOpen, setUsageMoreOpen] = useState(false);
+  // 展开时把面板内容区钉在展开前的高度：多出来的条目在面板里往下滑，面板（简洁
+  // 模式下是整个窗口）不跟着长高。null = 不钉。
+  const [pinnedBodyHeight, setPinnedBodyHeight] = useState<number | null>(null);
   const [login, setLogin] = useState<GatewayLoginResult | null>(
     loadGatewayLogin(),
   );
@@ -510,6 +550,21 @@ export function LlmGatewaySubscriptionDock({
   useEffect(() => {
     if (bodyRef.current) bodyRef.current.scrollTop = 0;
   }, [screen]);
+  // 钉住的高度是账号屏量的，离开账号屏或收起面板就作废；折叠区跟着收起，
+  // 回来时从折叠的样子重新量。
+  useEffect(() => {
+    setUsageMoreOpen(false);
+    setPinnedBodyHeight(null);
+  }, [screen, open]);
+  const toggleUsageMore = () => {
+    if (usageMoreOpen) {
+      setUsageMoreOpen(false);
+      setPinnedBodyHeight(null);
+      return;
+    }
+    setPinnedBodyHeight(bodyRef.current?.offsetHeight || null);
+    setUsageMoreOpen(true);
+  };
   const onActivatedRef = useRef<() => Promise<void>>(async () => {});
 
   // 转发只作用于当前选中的那个 CLI：Claude 走网关时，Codex 的配置一个字节都
@@ -584,9 +639,20 @@ export function LlmGatewaySubscriptionDock({
   // 否则每一轮的后半段都会变灰；变灰只该表示后台刷新失败了。
   const usageIsStale =
     usageFetchedAt != null && Date.now() - usageFetchedAt > 30 * 60 * 1000;
+  // 组织与项目（GET /v1/me/organization）。null = 不是组织成员，界面和以前
+  // 一模一样。从缓存起步，组织成员打开面板不会先闪一下个人账号的界面。
+  const [org, setOrg] = useState<GatewayOrganization | null>(
+    () => loadGatewayOrgCache()?.org ?? null,
+  );
+  const isOrgMember = Boolean(login && org);
   // 用量按套餐绑定的厂商分组（服务端 vendors）：Claude、GPT、通用各一组，
   // 只有用户手上有的才出现。老服务端（或升级前的缓存）没有 vendors，就是
   // 顶层那一组，不带厂商标题，和以前一样。
+  //
+  // 每组里的「7 天」再按份拆开（#79）：这一家的每份额度一条，订阅常显，
+  // 加量 / 赠送收进折叠行。组织成员的用量按项目算，不拆；没有分份数据时
+  // week 是 null，这一组还是一条「7 天」。
+  const groupVendors = (usage?.vendors ?? []).map((v) => v.vendor ?? null);
   const usageGroups = (
     usage?.vendors
       ? usage.vendors.map((v) => ({
@@ -594,6 +660,7 @@ export function LlmGatewaySubscriptionDock({
           label: v.vendor
             ? vendorLabel(v.vendor, catalog?.vendor_details)
             : "通用",
+          vendor: v.vendor ?? null,
           five_hour: v.five_hour,
           seven_day: v.seven_day,
         }))
@@ -602,28 +669,41 @@ export function LlmGatewaySubscriptionDock({
             {
               key: "total",
               label: null,
+              vendor: undefined,
               five_hour: usage.five_hour,
               seven_day: usage.seven_day,
             },
           ]
         : []
-  ).filter((g) => g.five_hour || g.seven_day);
-  // 折叠的模型份额行上显示的数：所有模型族、两个窗口里用得最多的那个。
-  const modelCapPeak = Math.max(
-    0,
-    ...(usage?.model_caps ?? []).flatMap((cap) =>
-      [cap.five_hour, cap.seven_day].map((w) =>
-        Math.max(0, Math.min(100, w?.utilization ?? 0)),
+  )
+    .filter((g) => g.five_hour || g.seven_day)
+    .map((g) => ({
+      ...g,
+      week: isOrgMember
+        ? null
+        : splitWeekGrants(plansInVendorGroup(planList, g.vendor, groupVendors)),
+    }));
+  // 没有分组时 plans 又带厂商的话，条目标题自己写厂商（见 weekGrantLabel）。
+  const showGrantVendor = !usage?.vendors && planList.some((p) => p.vendor);
+  const modelCaps = usage?.model_caps ?? [];
+  const usageFolded = usageGroups.flatMap((g) => g.week?.folded ?? []);
+  // 折叠行上显示的数：收起来的所有条里用得最多的那个，快用完时不点开也看得到。
+  const usageFoldedPeak = Math.min(
+    100,
+    Math.max(
+      0,
+      ...usageFolded.map((p) => p.week_utilization),
+      ...modelCaps.flatMap((cap) =>
+        [cap.five_hour, cap.seven_day].map((w) => w?.utilization ?? 0),
       ),
     ),
   );
-
-  // 组织与项目（GET /v1/me/organization）。null = 不是组织成员，界面和以前
-  // 一模一样。从缓存起步，组织成员打开面板不会先闪一下个人账号的界面。
-  const [org, setOrg] = useState<GatewayOrganization | null>(
-    () => loadGatewayOrgCache()?.org ?? null,
-  );
-  const isOrgMember = Boolean(login && org);
+  const usageFoldedNames = [
+    ...foldedSummary(usageFolded),
+    ...(modelCaps.length > 0
+      ? [`${modelCaps.map((cap) => cap.label).join("、")} 份额`]
+      : []),
+  ];
   const currentProject = org ? currentOrgProject(org) : null;
   // 当前项目用不了：没有项目，或者项目没给这个人分额度。
   const projectBlocked =
@@ -710,6 +790,17 @@ export function LlmGatewaySubscriptionDock({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, screen, login]);
 
+  // 套餐也同一个时机重读：每份额度本周用了多少（week_utilization）随请求在变，
+  // 只靠登录时那份快照的话用量卡上分份的数字永远不动（#79）。静默：读不到就
+  // 留着上一份。依赖 access_token 而不是 login —— 读回来写进 login，按 login
+  // 依赖就会自己再触发一轮。
+  const loginToken = login?.access_token;
+  useEffect(() => {
+    if (!open || screen !== "account" || !loginToken) return;
+    void refreshSubscription();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, screen, loginToken]);
+
   // 窗口重新回到前台时也重读。当前项目存在服务端：别的设备上切了项目、管理员
   // 把人移出了项目，这边都要跟上 —— CLI 的请求不经过 app，app 收不到
   // no_project，只能靠自己来问。
@@ -718,6 +809,7 @@ export function LlmGatewaySubscriptionDock({
     const onFocus = () => {
       if (document.visibilityState === "hidden") return;
       void reloadOrg();
+      void refreshSubscription();
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onFocus);
@@ -1718,6 +1810,16 @@ requires_openai_auth = true`,
           subscription: res.subscription,
           user: res.user ?? prev.user,
         };
+        // 打开面板、回到前台都会读一次（#79），大多数时候什么都没变。原样
+        // 返回 prev，不写缓存也不广播：login 一换，用量和组织那几个 effect
+        // 就会再各拉一遍。
+        if (
+          JSON.stringify(next.subscription) ===
+            JSON.stringify(prev.subscription) &&
+          JSON.stringify(next.user) === JSON.stringify(prev.user)
+        ) {
+          return prev;
+        }
         saveGatewayLogin(next);
         return next;
       });
@@ -2233,7 +2335,19 @@ requires_openai_auth = true`,
           actually scrolls instead of being clipped by the container */}
       <div
         ref={bodyRef}
-        className={inline ? "p-4" : "min-h-0 flex-1 overflow-y-auto p-4"}
+        className={
+          inline
+            ? `p-4 ${pinnedBodyHeight ? "overflow-y-auto" : ""}`
+            : "min-h-0 flex-1 overflow-y-auto p-4"
+        }
+        // 用量折叠区展开时钉住高度（见 toggleUsageMore）。浮动面板的 body 是
+        // flex-1（basis 0），换成 basis auto 才按 height 算；仍可收缩，窗口
+        // 变矮时照样受面板 max-h 约束。
+        style={
+          pinnedBodyHeight
+            ? { height: pinnedBodyHeight, flex: "0 1 auto" }
+            : undefined
+        }
       >
         {screen === "auth" && (
           <ScreenView key="auth">
@@ -2532,59 +2646,72 @@ requires_openai_auth = true`,
                       {g.five_hour && (
                         <UsageBar label="5 小时" window={g.five_hour} />
                       )}
-                      {g.seven_day && (
-                        <UsageBar label="7 天" window={g.seven_day} />
-                      )}
+                      {/* 「7 天」按份拆开时常显订阅层（见 splitWeekGrants），
+                          其余收进卡片底部的折叠行；没有分份数据时还是一条
+                          总的。 */}
+                      {g.week
+                        ? g.week.pinned.map((p) => (
+                            <WeekGrantBar
+                              key={p.grant_id}
+                              plan={p}
+                              showVendor={showGrantVendor}
+                            />
+                          ))
+                        : g.seven_day && (
+                            <UsageBar label="7 天" window={g.seven_day} />
+                          )}
+                      {usageMoreOpen &&
+                        (g.week?.folded ?? []).map((p) => (
+                          <WeekGrantBar
+                            key={p.grant_id}
+                            plan={p}
+                            showVendor={showGrantVendor}
+                          />
+                        ))}
                     </div>
                   ))}
                   {/* 份额上限按模型族算，不属于某一个厂商分组，统一放在最后。 */}
-                  {modelCapsOpen &&
-                    (usage.model_caps ?? []).map((cap) => (
+                  {usageMoreOpen &&
+                    modelCaps.flatMap((cap) => [
                       <ModelCapBar
                         key={`5h-${cap.id}`}
                         cap={cap}
                         windowKey="five_hour"
-                      />
-                    ))}
-                  {modelCapsOpen &&
-                    (usage.model_caps ?? []).map((cap) => (
+                      />,
                       <ModelCapBar
                         key={`7d-${cap.id}`}
                         cap={cap}
                         windowKey="seven_day"
-                      />
-                    ))}
-                  {/* 模型份额（如 Fable）默认折叠：大多数时候只看总用量就够。
-                      折叠时仍给出最高的那个份额，快用完时标红，不用点开也能
-                      注意到。 */}
-                  {(usage.model_caps ?? []).length > 0 && (
+                      />,
+                    ])}
+                  {/* 加量 / 赠送的周额度和模型份额（如 Fable）默认折叠：大多数
+                      时候看订阅层就够。折叠时仍给出收起来的里面最高的那个，
+                      快用完时标红，不用点开也能注意到。 */}
+                  {usageFoldedNames.length > 0 && (
                     <button
                       type="button"
                       className="flex w-full items-center justify-between gap-2 pt-0.5 text-[11px] text-muted-foreground transition hover:text-foreground"
-                      aria-expanded={modelCapsOpen}
-                      onClick={() => setModelCapsOpen((v) => !v)}
+                      aria-expanded={usageMoreOpen}
+                      onClick={toggleUsageMore}
                     >
-                      <span className="truncate">
-                        {(usage.model_caps ?? [])
-                          .map((cap) => cap.label)
-                          .join("、")}{" "}
-                        份额
+                      <span className="min-w-0">
+                        {usageFoldedNames.join("、")}
                       </span>
                       <span className="flex flex-none items-center gap-1">
-                        {!modelCapsOpen && (
+                        {!usageMoreOpen && (
                           <span
                             className={
-                              modelCapPeak >= 90
+                              usageFoldedPeak >= 90
                                 ? "font-semibold text-red-500"
                                 : "text-foreground"
                             }
                           >
-                            最高 {modelCapPeak.toFixed(1)}%
+                            最高 {usageFoldedPeak.toFixed(1)}%
                           </span>
                         )}
                         <ChevronDown
                           className={`h-3.5 w-3.5 transition-transform ${
-                            modelCapsOpen ? "rotate-180" : ""
+                            usageMoreOpen ? "rotate-180" : ""
                           }`}
                         />
                       </span>

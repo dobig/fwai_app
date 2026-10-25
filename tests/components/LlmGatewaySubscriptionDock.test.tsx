@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { LlmGatewaySubscriptionDock } from "@/components/llm-gateway/LlmGatewaySubscriptionDock";
 import { formatPlanDate } from "@/components/llm-gateway/planCatalog";
+import { formatWeekReset } from "@/components/llm-gateway/grantWeeks";
 import {
   ActiveAppProvider,
   useActiveApp,
@@ -2242,7 +2243,9 @@ describe("LlmGatewaySubscriptionDock 模型份额", () => {
 
     await userEvent.click(toggle);
 
-    expect(await screen.findAllByText("Fable")).toHaveLength(2);
+    // 两个窗口的份额条在折叠区里挨着，标题写明窗口。
+    expect(await screen.findByText(/^Fable 5 小时/)).toBeTruthy();
+    expect(screen.getByText(/^Fable 7 天/)).toBeTruthy();
     expect(screen.getAllByText("· 最多占 50%")).toHaveLength(2);
     expect(screen.getByText("Fable 份额已用完，其它模型仍可使用")).toBeTruthy();
     // 「按模型查看」入口已去掉：客户端不再提供按模型拆分的用量页。
@@ -2327,6 +2330,225 @@ describe("LlmGatewaySubscriptionDock 按厂商分组的用量", () => {
     expect(await screen.findByText("5 小时")).toBeTruthy();
     expect(screen.getAllByText("5 小时")).toHaveLength(1);
     expect(screen.queryByText("通用")).not.toBeInTheDocument();
+  });
+});
+
+describe("LlmGatewaySubscriptionDock 每份额度的周刷新（#79）", () => {
+  const sub = (
+    patch: Partial<gateway.GatewaySubscriptionPlan> = {},
+  ): gateway.GatewaySubscriptionPlan => ({
+    grant_id: "grant_a1",
+    tier: "pro",
+    role: "subscription",
+    kind: "subscription",
+    label: "$100",
+    usage_micros_per_5h: 0,
+    usage_micros_per_week: 0,
+    valid_from: "2099-01-01T00:00:00Z",
+    valid_until: "2099-02-20T09:00:00Z",
+    week_resets_at: "2099-01-28T09:00:00Z",
+    week_utilization: 25,
+    ...patch,
+  });
+  const pack = (
+    grant_id: string,
+    patch: Partial<gateway.GatewaySubscriptionPlan> = {},
+  ): gateway.GatewaySubscriptionPlan => ({
+    ...sub(),
+    grant_id,
+    tier: "extra",
+    role: "extra",
+    kind: "pack",
+    label: "加量包",
+    ...patch,
+  });
+  const gift = pack("grant_d4", {
+    kind: "gift",
+    label: "专属额度",
+    title: "新春回馈",
+    week_resets_at: "2099-01-31T10:00:00Z",
+    week_utilization: 0,
+  });
+
+  function seedPlans(plans: gateway.GatewaySubscriptionPlan[]) {
+    seedActivePlan();
+    const login = JSON.parse(localStorage.getItem(LOGIN_KEY)!);
+    login.subscription = { active: true, tier: "pro", plans };
+    localStorage.setItem(LOGIN_KEY, JSON.stringify(login));
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue({
+      subscription: login.subscription,
+    });
+    vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({
+      five_hour: { utilization: 27.4, resets_at: "2099-01-01T05:00:00Z" },
+      seven_day: { utilization: 18.2, resets_at: "2099-01-25T08:00:00Z" },
+    });
+  }
+
+  const ACCEPTANCE = [
+    sub(),
+    // 下次周刷新前就到期：服务端不给 week_resets_at。
+    pack("grant_c3", {
+      valid_until: "2099-01-25T08:00:00Z",
+      week_resets_at: undefined,
+      week_utilization: 64.5,
+    }),
+    pack("grant_b2", {
+      week_resets_at: "2099-01-30T14:00:00Z",
+      week_utilization: 0,
+    }),
+    gift,
+  ];
+
+  it("验收：订阅常显，两份加量包和赠送收在折叠行里，各自一条", async () => {
+    seedPlans(ACCEPTANCE);
+    renderDock();
+
+    expect(await screen.findByText("7 天 · 订阅")).toBeInTheDocument();
+    expect(screen.getByText("25.0%")).toBeInTheDocument();
+    expect(
+      screen.getByText(`${formatWeekReset("2099-01-28T09:00:00Z")} 刷新`),
+    ).toBeInTheDocument();
+    // 拆开之后不再有那条总的「7 天」。
+    expect(screen.queryByText("7 天")).toBeNull();
+    expect(screen.queryByText("7 天 · 加量")).toBeNull();
+
+    const toggle = screen.getByRole("button", { name: /加量 ×2、赠送/ });
+    expect(toggle).toHaveTextContent("最高 64.5%");
+    await userEvent.click(toggle);
+
+    expect(screen.getAllByText("7 天 · 加量")).toHaveLength(2);
+    expect(screen.getByText("7 天 · 赠送")).toBeInTheDocument();
+    // 刷新前到期的那份：写到期日，不写刷新时间。
+    expect(screen.getByText(/^\d{1,2}\/\d{1,2} 到期 · 不再刷新$/)).toBeTruthy();
+    expect(
+      screen.getByText(`${formatWeekReset("2099-01-30T14:00:00Z")} 刷新`),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(`${formatWeekReset("2099-01-31T10:00:00Z")} 刷新`),
+    ).toBeInTheDocument();
+  });
+
+  it("用满的那份写什么时候恢复，折叠行标红", async () => {
+    seedPlans([sub(), pack("grant_b2", { week_utilization: 100 })]);
+    renderDock();
+
+    const toggle = await screen.findByRole("button", { name: /^加量/ });
+    expect(toggle).toHaveTextContent("最高 100.0%");
+    expect(screen.getByText("最高 100.0%")).toHaveClass("text-red-500");
+    await userEvent.click(toggle);
+    expect(
+      screen.getByText(
+        `已用完 · ${formatWeekReset("2099-01-28T09:00:00Z")} 恢复`,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("订阅已过期、只剩加量包时直接显示，没有折叠行", async () => {
+    seedPlans([pack("grant_b2", { week_utilization: 12 })]);
+    renderDock();
+
+    expect(await screen.findByText("7 天 · 加量")).toBeInTheDocument();
+    expect(screen.getByText("12.0%")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /加量/ })).toBeNull();
+  });
+
+  it("老服务端（没有 kind / week_*）：还是一条总的「7 天 · x 重置」", async () => {
+    seedPlans(
+      ACCEPTANCE.map(
+        ({ kind: _k, week_resets_at: _r, week_utilization: _u, ...p }) => p,
+      ),
+    );
+    renderDock();
+
+    expect(await screen.findByText("7 天")).toBeInTheDocument();
+    expect(screen.getByText("18.2%")).toBeInTheDocument();
+    expect(screen.queryByText(/^7 天 · /)).toBeNull();
+    expect(screen.queryByRole("button", { name: /加量|赠送/ })).toBeNull();
+  });
+
+  it("打开面板时重读套餐，分份的百分比跟着变", async () => {
+    seedPlans([sub()]);
+    vi.spyOn(gateway, "fetchGatewaySubscription").mockResolvedValue({
+      subscription: {
+        active: true,
+        tier: "pro",
+        plans: [sub({ week_utilization: 40 })],
+      },
+    });
+    renderDock();
+
+    expect(await screen.findByText("40.0%")).toBeInTheDocument();
+    expect(gateway.fetchGatewaySubscription).toHaveBeenCalled();
+  });
+
+  it("按厂商分组时每组拆自己那几份：订阅常显，加量收起后回到自己那组", async () => {
+    seedPlans([
+      sub({ vendor: "claude" }),
+      pack("grant_c3", { vendor: "claude", week_utilization: 64.5 }),
+      sub({
+        grant_id: "grant_g1",
+        vendor: "openai",
+        week_resets_at: "2099-01-26T06:00:00Z",
+        week_utilization: 58,
+      }),
+      // 没绑定厂商的赠送：「通用」组里没有订阅，直接显示。
+      gift,
+    ]);
+    const win = (utilization: number) => ({
+      utilization,
+      resets_at: "2099-01-01T05:00:00Z",
+    });
+    vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({
+      five_hour: win(27),
+      seven_day: win(18),
+      vendors: [
+        { vendor: "claude", five_hour: win(27), seven_day: win(18) },
+        { vendor: "openai", five_hour: win(12), seven_day: win(58) },
+        { five_hour: win(0), seven_day: win(0) },
+      ],
+    });
+    renderDock();
+
+    expect(await screen.findByText("GPT")).toBeInTheDocument();
+    expect(screen.getAllByText("5 小时")).toHaveLength(3);
+    // 组标题已经写了厂商，条目标题不重复。
+    expect(screen.getAllByText("7 天 · 订阅")).toHaveLength(2);
+    expect(screen.getByText("7 天 · 赠送")).toBeInTheDocument();
+    expect(screen.queryByText("7 天")).toBeNull();
+    expect(screen.queryByText("7 天 · 加量")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /^加量/ }));
+    const packBar = screen.getByText("7 天 · 加量");
+    // 展开后加量包出现在 Claude 那组里，不在 GPT 组：它所在那一组的第一行
+    // 就是组标题。
+    const group = packBar.closest<HTMLElement>(".space-y-2\\.5")!;
+    expect(group.firstElementChild).toHaveTextContent(/^Claude$/);
+  });
+
+  it("kind 是 extra（服务端认不出来源）时按赠送显示，不丢", async () => {
+    seedPlans([sub(), pack("grant_x", { kind: "extra", week_utilization: 9 })]);
+    renderDock();
+
+    await userEvent.click(await screen.findByRole("button", { name: /^赠送/ }));
+    expect(screen.getByText("7 天 · 赠送")).toBeInTheDocument();
+    expect(screen.getByText("9.0%")).toBeInTheDocument();
+  });
+
+  it("展开折叠行时面板内容区钉在展开前的高度，收起后放开", async () => {
+    seedPlans(ACCEPTANCE);
+    const spy = vi
+      .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+      .mockReturnValue(480);
+    renderDock();
+
+    const toggle = await screen.findByRole("button", { name: /加量 ×2/ });
+    await userEvent.click(toggle);
+    const body = toggle.closest<HTMLElement>('[style*="height"]');
+    expect(body?.style.height).toBe("480px");
+
+    await userEvent.click(toggle);
+    expect(toggle.closest('[style*="height"]')).toBeNull();
+    spy.mockRestore();
   });
 });
 
