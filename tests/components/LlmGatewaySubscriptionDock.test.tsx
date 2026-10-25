@@ -2262,6 +2262,74 @@ describe("LlmGatewaySubscriptionDock 模型份额", () => {
   });
 });
 
+describe("LlmGatewaySubscriptionDock 按厂商分组的用量", () => {
+  const win = (utilization: number) => ({
+    utilization,
+    resets_at: "2099-01-01T05:00:00Z",
+  });
+
+  it("Claude、GPT、通用三组都有时各显示一组用量条", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({
+      five_hour: win(10),
+      seven_day: win(2),
+      vendors: [
+        { vendor: "claude", five_hour: win(10), seven_day: win(2) },
+        { vendor: "openai", five_hour: win(70), seven_day: win(30) },
+        { five_hour: win(5), seven_day: win(1) },
+      ],
+    });
+    renderDock();
+
+    expect(await screen.findByText("GPT")).toBeTruthy();
+    expect(screen.getByText("Claude")).toBeTruthy();
+    expect(screen.getByText("通用")).toBeTruthy();
+    expect(screen.getAllByText("5 小时")).toHaveLength(3);
+    expect(screen.getAllByText("7 天")).toHaveLength(3);
+    expect(screen.getByText("70.0%")).toBeTruthy();
+  });
+
+  it("只买了 GPT 时只显示 GPT 那一组", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({
+      five_hour: win(40),
+      seven_day: win(8),
+      vendors: [{ vendor: "openai", five_hour: win(40), seven_day: win(8) }],
+    });
+    renderDock();
+
+    expect(await screen.findByText("GPT")).toBeTruthy();
+    expect(screen.queryByText("Claude")).not.toBeInTheDocument();
+    expect(screen.getAllByText("5 小时")).toHaveLength(1);
+  });
+
+  it("只有不绑定厂商的套餐时显示为通用", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({
+      five_hour: win(15),
+      seven_day: win(3),
+      vendors: [{ five_hour: win(15), seven_day: win(3) }],
+    });
+    renderDock();
+
+    expect(await screen.findByText("通用")).toBeTruthy();
+    expect(screen.getAllByText("5 小时")).toHaveLength(1);
+  });
+
+  it("老服务端没有 vendors 时照旧显示一组，不带厂商标题", async () => {
+    seedActivePlan();
+    vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({
+      five_hour: win(20),
+      seven_day: win(4),
+    });
+    renderDock();
+
+    expect(await screen.findByText("5 小时")).toBeTruthy();
+    expect(screen.getAllByText("5 小时")).toHaveLength(1);
+    expect(screen.queryByText("通用")).not.toBeInTheDocument();
+  });
+});
+
 describe("LlmGatewaySubscriptionDock 与应用设置页同步", () => {
   it("在设置页改了资料后，面板读到的是新值，且面板里不再有脱敏入口", async () => {
     seedActivePlan();
