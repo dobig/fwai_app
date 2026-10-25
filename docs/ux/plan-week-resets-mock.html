@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>用量卡 · 每份额度各自的周刷新 — UX mock (#79)</title>
+<!-- 纯 mock：Tailwind Play CDN + 与 src/index.css 相同的 HSL token，类名照抄 main 上的 PlanSections / UsageBar / ModelCapBar -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        colors: {
+          border: "hsl(var(--border))",
+          background: "hsl(var(--background))",
+          foreground: "hsl(var(--foreground))",
+          primary: { DEFAULT: "hsl(var(--primary))", foreground: "hsl(var(--primary-foreground))" },
+          muted: { DEFAULT: "hsl(var(--muted))", foreground: "hsl(var(--muted-foreground))" },
+          destructive: "hsl(var(--destructive))",
+        },
+        borderRadius: { sm: "0.375rem", md: "0.5rem", lg: "0.75rem", xl: "0.875rem" },
+      },
+    },
+  };
+</script>
+<style>
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --primary: 210 100% 56%;
+    --primary-foreground: 0 0% 100%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --border: 240 5.9% 90%;
+    --destructive: 0 84.2% 60.2%;
+  }
+  .dark {
+    --background: 240 5% 12%;
+    --foreground: 0 0% 98%;
+    --primary: 210 100% 54%;
+    --muted: 240 5% 18%;
+    --muted-foreground: 240 5% 64.9%;
+    --border: 240 5% 24%;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  @keyframes screen-in { from { transform: translateX(1rem); opacity: 0 } to { transform: none; opacity: 1 } }
+  .screen-in { animation: screen-in 300ms ease-out both; }
+  @keyframes expand-in { from { transform: translateY(-4px); opacity: 0 } to { transform: none; opacity: 1 } }
+  .expand-in { animation: expand-in 200ms ease-out both; }
+  @keyframes toast-in { from { transform: translateY(-8px); opacity: 0 } to { transform: none; opacity: 1 } }
+  .toast-in { animation: toast-in 200ms ease-out both; }
+  .bar-fill { transition: width 600ms cubic-bezier(0.22, 1, 0.36, 1), background-color 300ms; }
+  .flash { animation: flash 900ms ease-out; }
+  @keyframes flash { 0% { box-shadow: 0 0 0 0 hsl(var(--primary) / .45) } 100% { box-shadow: 0 0 0 8px hsl(var(--primary) / 0) } }
+</style>
+</head>
+<body class="bg-muted/60 text-sm text-foreground">
+
+<!-- ======================= 左侧：场景控制 + 设计说明（不属于 app） ======================= -->
+<aside class="fixed inset-y-0 left-0 z-10 w-[340px] overflow-y-auto border-r border-border bg-background p-5">
+  <div class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Mock 控制台 · issue #79</div>
+  <h1 class="mt-1 text-base font-semibold">按厂商分组 + 每组 7 天按份拆（合 #82）</h1>
+
+  <div class="mt-4 space-y-1.5" id="scenarios"></div>
+
+  <div class="mt-4 space-y-2 rounded-xl border border-border bg-muted/40 p-3 text-xs">
+    <label class="flex items-center justify-between gap-2">
+      <span>设备宽度</span>
+      <select id="device" class="rounded-md border border-border bg-background px-1.5 py-1 text-xs">
+        <option value="desktop">桌面 dock（384px）</option>
+        <option value="375">手机 375px</option>
+        <option value="320">手机 320px</option>
+      </select>
+    </label>
+    <label class="flex items-center justify-between gap-2">
+      <span>有 Fable 份额（model_caps）</span>
+      <input id="hasCaps" type="checkbox" checked class="h-4 w-4 accent-[hsl(var(--primary))]" />
+    </label>
+    <button id="simFocus" class="w-full rounded-lg border border-border bg-background py-1.5 hover:bg-muted">
+      模拟：窗口重新获得焦点（重拉用量 + 套餐）
+    </button>
+    <button id="simRollover" class="w-full rounded-lg border border-border bg-background py-1.5 hover:bg-muted">
+      模拟：最早的那一份到了周刷新时刻
+    </button>
+    <div class="flex gap-2">
+      <button id="toggleTheme" class="flex-1 rounded-lg border border-border bg-background py-1.5 hover:bg-muted">切换深色 / 浅色</button>
+      <button id="toggleJson" class="flex-1 rounded-lg border border-border bg-background py-1.5 hover:bg-muted">看 plans JSON</button>
+    </div>
+    <pre id="json" class="hidden max-h-72 overflow-auto rounded-lg bg-background p-2 text-[10px] leading-snug"></pre>
+  </div>
+
+  <div class="mt-5 space-y-3 text-xs leading-relaxed text-muted-foreground">
+    <div class="text-[11px] font-semibold uppercase tracking-wide">设计要点</div>
+    <p><b class="text-foreground">在 #82（按厂商分组）的基础上拆 7 天。</b>用量卡沿用 #82 的分组：Claude / GPT / 通用各一组，只出现用户有的。每组里是这一家的「5 小时」，下面是这一家每份额度的「7 天 · 订阅 / 加量 / 赠送」。</p>
+    <p><b class="text-foreground">每份按 plan 的 vendor 进组</b>，没有 vendor 的进「通用」。组标题已经写了厂商，条目标题不再重复写厂商。</p>
+    <p><b class="text-foreground">常显 / 折叠：</b>每组的「5 小时」和「7 天 · 订阅」常显；所有组的加量 / 赠送和 Fable 份额收进卡片底部同一个折叠行。展开后，加量 / 赠送出现在各自那一组里，Fable 在最后。</p>
+    <p><b class="text-foreground">某组没有订阅</b>（比如「通用」只有一份赠送，或订阅过期了）时，这组的加量 / 赠送直接显示，不然这组一条 7 天都没有。</p>
+    <p><b class="text-foreground">折叠行</b>：左边列出收起了什么（「加量 ×2、赠送、Fable 份额」），右边是其中最高的百分比，≥90% 标红。展开后面板不长高，在面板里往下滑。</p>
+    <p><b class="text-foreground">时间那行：</b>
+      正常是「10/28 17:00 刷新」；
+      没有 week_resets_at 的写<span class="text-amber-600">「10/26 到期 · 不再刷新」</span>；
+      用满了写<span class="text-red-500">「已用完 · 10/30 14:00 恢复」</span>。</p>
+    <p><b class="text-foreground">兼容：</b>
+      有 vendors、没有 kind（#82 已上线、#496 还没上）→ 和 #82 现在一样，每组一条「7 天」；
+      没有 vendors、有 kind → 不带组标题，其余同上；
+      两样都没有 → 和今天一样。</p>
+    <p><b class="text-foreground">排队中的</b>不进用量卡，继续在套餐区显示 pending_text。</p>
+    <div class="text-[11px] font-semibold uppercase tracking-wide">待确认</div>
+    <p>1. kind=video 不在 issue 的分组表里，暂时不显示。</p>
+    <p>2. 组织成员（enterprise）的用量按项目计算，仍是一条「7 天」。</p>
+    <p>3. 某份额度的 vendor 不在 usage.vendors 里（理论上不该出现）时，放进「通用」组。</p>
+  </div>
+</aside>
+
+<!-- ======================= 右侧：假的 app 主窗口 ======================= -->
+<main class="ml-[340px] min-h-screen p-6">
+  <div id="frame"></div>
+</main>
+
+<div id="toasts" class="pointer-events-none fixed left-1/2 top-4 z-50 flex -translate-x-1/2 flex-col items-center gap-2"></div>
+
+<script>
+// ---------------------------------------------------------------------------
+// 图标（lucide 路径）
+// ---------------------------------------------------------------------------
+const ICONS = {
+  chevronDown: '<path d="m6 9 6 6 6-6"/>',
+  arrowLeftRight: '<path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/>',
+  packagePlus: '<path d="M16 16h6"/><path d="M19 13v6"/><path d="M21 10V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l2-1.14"/><path d="m7.5 4.27 9 5.15"/><polyline points="3.29 7 12 12 20.71 7"/><line x1="12" x2="12" y1="22" y2="12"/>',
+  plug: '<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+  logOut: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>',
+  bag: '<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>',
+  refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v-5"/>',
+};
+const icon = (name, cls = "h-4 w-4") =>
+  `<svg class="${cls}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
+
+// ---------------------------------------------------------------------------
+// 假网关：GET /v1/subscription 的 plans[]（main 上的字段 + #79 的 kind / week_*）
+// ---------------------------------------------------------------------------
+const H = 3600e3, D = 24 * H;
+const at = (ms) => new Date(Date.now() + ms).toISOString();
+
+const SUB_100 = () => ({ grant_id: "grant_a1", role: "subscription", kind: "subscription", tier: "max5",
+  label: "$100", description: "5× Starter", valid_from: at(-12 * D), valid_until: at(27 * D),
+  week_resets_at: at(3.6 * D), week_utilization: 25 });
+const PACK_B = () => ({ grant_id: "grant_b2", role: "extra", kind: "pack", tier: "extra",
+  label: "加量包", description: "1× Starter 用量", valid_from: at(-1 * D), valid_until: at(29.2 * D),
+  week_resets_at: at(6.2 * D), week_utilization: 0 });
+const PACK_C = () => ({ grant_id: "grant_c3", role: "extra", kind: "pack", tier: "extra",
+  label: "加量包", description: "1× Starter 用量", valid_from: at(-29 * D), valid_until: at(0.9 * D),
+  week_utilization: 100 });
+const GIFT_D = () => ({ grant_id: "grant_d4", role: "extra", kind: "gift", tier: "custom",
+  label: "专属额度", title: "新春回馈", description: "新春回馈", valid_from: at(-2 * D), valid_until: at(29.6 * D),
+  week_resets_at: at(5.1 * D), week_utilization: 0 });
+
+const VENDOR_LABEL = { claude: "Claude", openai: "GPT" };
+const withVendor = (p, vendor) => ({ ...p, vendor, vendor_label: VENDOR_LABEL[vendor] });
+
+const SCENARIOS = {
+  multiVendor: {
+    label: "两家：Claude 订阅 + 加量包，GPT 订阅，通用赠送",
+    plans: () => [
+      withVendor(SUB_100(), "claude"),
+      withVendor({ ...PACK_C(), valid_until: at(2.2 * D), week_utilization: 64.5 }, "claude"),
+      withVendor({ ...SUB_100(), grant_id: "grant_g1", label: "$20", description: "1× Starter", week_resets_at: at(1.3 * D), week_utilization: 58 }, "openai"),
+      GIFT_D(),
+    ],
+    vendors: [
+      { vendor: "claude", five_hour: 27.4, seven_day: 18.2 },
+      { vendor: "openai", five_hour: 12.0, seven_day: 58.0 },
+      { five_hour: 0, seven_day: 0 },
+    ],
+    usage_text: "总用量 7.5× Starter（含额外额度）",
+    usage: { five_hour: 27.4, seven_day: 18.2 },
+  },
+  oneVendor: {
+    label: "只有 Claude：订阅 + 两份加量包 + 一份赠送",
+    plans: () => [
+      withVendor(SUB_100(), "claude"),
+      withVendor({ ...PACK_C(), valid_until: at(2.2 * D), week_utilization: 64.5 }, "claude"),
+      withVendor(PACK_B(), "claude"),
+      withVendor(GIFT_D(), "claude"),
+    ],
+    vendors: [{ vendor: "claude", five_hour: 27.4, seven_day: 18.2 }],
+    usage_text: "总用量 8.5× Starter（含额外额度）",
+    usage: { five_hour: 27.4, seven_day: 18.2 },
+  },
+  vendorsNoKind: {
+    label: "#82 服务端：有 vendors，还没有 kind / week_*",
+    plans: () => [withVendor(SUB_100(), "claude"), withVendor({ ...SUB_100(), grant_id: "grant_g1", label: "$20" }, "openai")]
+      .map(({ kind, week_resets_at, week_utilization, ...p }) => p),
+    vendors: [
+      { vendor: "claude", five_hour: 27.4, seven_day: 18.2 },
+      { vendor: "openai", five_hour: 12.0, seven_day: 58.0 },
+    ],
+    usage_text: "总用量 6× Starter",
+    usage: { five_hour: 27.4, seven_day: 18.2 },
+  },
+  accept: {
+    label: "没有 vendors：订阅 + 两份加量包 + 一份赠送",
+    plans: () => [SUB_100(), { ...PACK_C(), valid_until: at(2.2 * D), week_utilization: 64.5 }, PACK_B(), GIFT_D()],
+    usage_text: "总用量 8.5× Starter（含额外额度）",
+    usage: { five_hour: 27.4, seven_day: 18.2 },
+  },
+  expiring: {
+    label: "一份加量包刷新前到期 + 一份用满",
+    plans: () => [SUB_100(), PACK_C(), { ...PACK_B(), week_utilization: 100, week_resets_at: at(1.4 * D) }, GIFT_D()],
+    usage_text: "总用量 8.5× Starter（含额外额度）",
+    usage: { five_hour: 61.0, seven_day: 72.8 },
+  },
+  hot: {
+    label: "订阅本周已用 94%",
+    plans: () => [{ ...SUB_100(), week_utilization: 94.3, week_resets_at: at(0.6 * D) }, { ...PACK_B(), week_utilization: 12.5 }],
+    usage_text: "总用量 6× Starter（含额外额度）",
+    usage: { five_hour: 88.1, seven_day: 81.6 },
+  },
+  pending: {
+    label: "排队降档 + 待生效加量包",
+    plans: () => [SUB_100(),
+      { grant_id: "grant_q1", role: "subscription", kind: "subscription", tier: "pro", label: "$20", pending: true,
+        valid_from: at(27 * D), valid_until: at(57 * D), pending_text: "到期后自动切换到 $20（生效于 {valid_from}）" },
+      PACK_B(),
+      { grant_id: "grant_q2", role: "extra", kind: "pack", tier: "extra", label: "加量包", description: "1× Starter 用量",
+        valid_from: at(2 * D), valid_until: at(32 * D), pending: true }],
+    usage_text: "总用量 6× Starter（含额外额度）",
+    usage: { five_hour: 9.0, seven_day: 22.4 },
+  },
+  extrasOnly: {
+    label: "订阅已过期，只剩加量包 + 赠送",
+    plans: () => [PACK_B(), { ...GIFT_D(), title: undefined, description: undefined },
+      { ...GIFT_D(), grant_id: "grant_d5", title: "邀请奖励", description: "邀请奖励", week_resets_at: at(1.2 * D), week_utilization: 47 }],
+    usage_text: "总用量 4× Starter",
+    usage: { five_hour: 3.2, seven_day: 15.9 },
+  },
+  subOnly: {
+    label: "只有订阅（大多数用户）",
+    plans: () => [SUB_100()],
+    usage_text: "总用量 5× Starter",
+    usage: { five_hour: 27.4, seven_day: 25 },
+  },
+  legacy: {
+    label: "旧服务端（没有 vendors / kind / week_*）",
+    plans: () => [SUB_100(), PACK_B(), GIFT_D()].map(({ kind, week_resets_at, week_utilization, ...p }) => p),
+    usage_text: "总用量 8.5× Starter（含额外额度）",
+    usage: { five_hour: 27.4, seven_day: 12.2 },
+  },
+};
+
+const CAPS = () => [{ id: "fable", label: "Fable", share_bps: 5000, five_hour: 31.5, seven_day: 12.8 }];
+
+const KIND_GROUPS = [
+  { kind: "subscription", title: "订阅套餐" },
+  { kind: "pack", title: "加量包" },
+  { kind: "gift", title: "赠送额度" },
+];
+
+// ---------------------------------------------------------------------------
+// 状态
+// ---------------------------------------------------------------------------
+const state = {
+  scenario: "multiVendor",
+  plans: SCENARIOS.multiVendor.plans(),
+  usage: { ...SCENARIOS.multiVendor.usage },
+  vendors: structuredClone(SCENARIOS.multiVendor.vendors),
+  caps: CAPS(),
+  forwarding: true,
+  moreOpen: false,
+  flash: new Set(),
+};
+const user = { username: "zhangrui", email: "zr@example.com" };
+
+// ---------------------------------------------------------------------------
+// 格式化（本地时区）
+// ---------------------------------------------------------------------------
+const pad = (n) => String(n).padStart(2, "0");
+const md = (d) => `${pad(d.getMonth() + 1)}/${pad(d.getDate())}`;
+const fmtResetAt = (iso) => { const d = new Date(iso); return `${md(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const fmtDay = (iso) => md(new Date(iso));
+const fmtPlanDate = (iso) => new Date(iso).toLocaleDateString("zh-CN");
+// main 上的 formatReset
+const fmtUsageReset = (iso) =>
+  new Date(iso).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const clamp = (n) => Math.max(0, Math.min(100, n));
+
+// 进明细的份：有周字段、不是 pending、kind 在分组表里
+const weekGrants = () =>
+  state.plans.filter((p) => !p.pending && p.week_utilization != null && KIND_GROUPS.some((g) => g.kind === p.kind));
+
+// ---------------------------------------------------------------------------
+// 套餐区：和 main 上的 PlanSections 一致，不改
+// ---------------------------------------------------------------------------
+function groupHeader(title, btn) {
+  return `
+    <div class="mb-1 flex items-center justify-between gap-2">
+      <span class="text-[11px] font-medium text-muted-foreground">${title}</span>
+      ${btn ? `<button type="button" class="inline-flex items-center gap-1 text-[11px] text-muted-foreground transition hover:text-foreground">${icon(btn.icon, "h-3 w-3")}${btn.label}</button>` : ""}
+    </div>`;
+}
+
+function planSections() {
+  const plans = state.plans;
+  const isExtra = (p) => p.role === "extra";
+  const subs = plans.filter((p) => !isExtra(p));
+  const current = subs.filter((p) => !p.pending);
+  const queued = subs.filter((p) => p.pending);
+  const extras = plans.filter(isExtra);
+  const showVendor = plans.some((p) => p.vendor);
+  const tag = (p) => showVendor
+    ? `<span class="rounded bg-muted px-1 py-0.5 text-[10px] font-medium text-muted-foreground">${p.vendor_label || "通用"}</span>` : "";
+  const row = (p) => `
+    <div class="flex items-center justify-between gap-2 rounded-lg bg-muted/40 px-2.5 py-1.5 text-[11px]">
+      <span class="flex items-center gap-1.5 font-medium">${tag(p)}${p.label}
+        ${p.description ? `<span class="text-muted-foreground">${p.description}</span>` : ""}
+        ${p.pending ? `<span class="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">待生效</span>` : ""}</span>
+      <span class="flex-none text-muted-foreground">至 ${fmtPlanDate(p.valid_until)}</span>
+    </div>`;
+  return `
+    <div class="mb-3.5 -mt-1 space-y-3">
+      <section>${groupHeader("我的套餐", { icon: "arrowLeftRight", label: "换档" })}
+        ${current.length ? `<div class="space-y-1">${current.map(row).join("")}</div>`
+          : `<div class="rounded-lg bg-muted/40 px-2.5 py-1.5 text-[11px] text-muted-foreground">当前没有生效的套餐</div>`}
+        ${queued.map((p) => `
+          <div class="mt-1 rounded-lg border border-dashed border-border px-2.5 py-1.5 text-[11px] leading-relaxed text-muted-foreground">
+            ${(p.pending_text ?? `${p.label} 待生效（{valid_from}）`).replace("{valid_from}", fmtPlanDate(p.valid_from))}
+          </div>`).join("")}
+        <div class="mt-1 px-0.5 text-[10px] text-muted-foreground">${SCENARIOS[state.scenario].usage_text}</div>
+      </section>
+      ${extras.length ? `<section>${groupHeader("额外额度", { icon: "packagePlus", label: "再买一个" })}
+        <div class="space-y-1">${extras.map(row).join("")}</div></section>` : ""}
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// 用量卡
+// ---------------------------------------------------------------------------
+function usageBar(label, pctRaw, footer) {
+  const pct = clamp(pctRaw);
+  const hot = pct >= 90;
+  return `
+    <div>
+      <div class="mb-1 flex items-center justify-between text-[11px]">
+        <span class="text-muted-foreground">${label}</span>
+        <span class="${hot ? "font-semibold text-red-500" : "text-foreground"}">${pct.toFixed(1)}%</span>
+      </div>
+      <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+        <div class="bar-fill h-full rounded-full ${hot ? "bg-red-500" : "bg-primary"}" style="width:${pct}%"></div>
+      </div>
+      ${footer ? `<div class="mt-0.5 text-right text-[10px] text-muted-foreground">${footer}</div>` : ""}
+    </div>`;
+}
+
+// ModelCapBar 原样
+function capBar(cap, key) {
+  const pct = clamp(cap[key]);
+  const hot = pct >= 90;
+  return `
+    <div >
+      <div class="mb-1 flex items-center justify-between text-[11px]">
+        <span class="text-muted-foreground">${cap.label}<span class="ml-1.5 text-[10px]">· 最多占 ${cap.share_bps / 100}%</span></span>
+        <span class="${hot ? "font-semibold text-red-500" : "text-foreground"}">${pct.toFixed(1)}%</span>
+      </div>
+      <div class="h-1 w-full overflow-hidden rounded-full bg-muted">
+        <div class="bar-fill h-full rounded-full ${hot ? "bg-red-500" : "bg-primary"}" style="width:${pct}%"></div>
+      </div>
+    </div>`;
+}
+
+// 新：一份额度一条「7 天 · 订阅 / 加量 / 赠送」，样式就是 UsageBar，只换时间那行
+const KIND_SHORT = { subscription: "订阅", pack: "加量", gift: "赠送" };
+function grantBar(p) {
+  let foot;
+  if (!p.week_resets_at) foot = `<span class="text-amber-600 dark:text-amber-400">${fmtDay(p.valid_until)} 到期 · 不再刷新</span>`;
+  else if (p.week_utilization >= 100) foot = `<span class="font-medium text-red-500">已用完 · ${fmtResetAt(p.week_resets_at)} 恢复</span>`;
+  else foot = `${fmtResetAt(p.week_resets_at)} 刷新`;
+  return `<div class="${state.flash.has(p.grant_id) ? "flash rounded" : ""}">${usageBar(`7 天 · ${KIND_SHORT[p.kind]}`, p.week_utilization, foot)}</div>`;
+}
+
+function usageCard() {
+  const caps = document.getElementById("hasCaps").checked ? state.caps : [];
+  const grants = weekGrants();
+
+  // #82：用量按套餐绑定的厂商分组（usage.vendors），只有用户手上有的才出现。
+  // 老服务端没有 vendors 时就是一组、不带标题。
+  const groups = state.vendors
+    ? state.vendors.map((v) => ({
+        key: v.vendor ?? "unbound",
+        label: v.vendor ? VENDOR_LABEL[v.vendor] : "通用",
+        vendor: v.vendor ?? null,
+        five_hour: v.five_hour,
+        seven_day: v.seven_day,
+      }))
+    : [{ key: "total", label: null, vendor: undefined, five_hour: state.usage.five_hour, seven_day: state.usage.seven_day }];
+
+  // 每份额度按自己的 vendor 进组；没有分组时全进那一组。
+  const inGroup = (g) => grants.filter((p) => g.vendor === undefined || (p.vendor ?? null) === g.vendor);
+
+  // 每组里：订阅常显；加量 / 赠送收起。某组没有订阅（过期了）时，这组的加量 /
+  // 赠送直接显示 —— 否则这组一条 7 天都没有。
+  const plan = groups.map((g) => {
+    const mine = inGroup(g);
+    const subs = mine.filter((p) => p.kind === "subscription");
+    const rest = KIND_GROUPS.slice(1).flatMap((k) => mine.filter((p) => p.kind === k.kind));
+    return {
+      ...g,
+      split: mine.length > 0,
+      shown: subs.length ? subs : rest,
+      folded: subs.length ? rest : [],
+    };
+  });
+  const allFolded = plan.flatMap((g) => g.folded);
+
+  const capItems = caps.flatMap((c) => [
+    { html: capBar({ ...c, label: `${c.label} 5 小时` }, "five_hour"), pct: c.five_hour },
+    { html: capBar({ ...c, label: `${c.label} 7 天` }, "seven_day"), pct: c.seven_day },
+  ]);
+  const names = [
+    ...KIND_GROUPS.slice(1).map((k) => {
+      const n = allFolded.filter((p) => p.kind === k.kind).length;
+      return n ? `${KIND_SHORT[k.kind]}${n > 1 ? ` ×${n}` : ""}` : "";
+    }),
+    caps.length ? `${caps.map((c) => c.label).join("、")} 份额` : "",
+  ].filter(Boolean);
+  const peak = Math.max(0, ...allFolded.map((p) => clamp(p.week_utilization)), ...capItems.map((i) => clamp(i.pct)));
+  const legacyReset = `${fmtUsageReset(at(5 * D))} 重置`;
+
+  const groupHtml = (g) => `
+    <div class="space-y-2.5">
+      ${g.label ? `<div class="text-[11px] font-semibold text-foreground">${g.label}</div>` : ""}
+      ${g.five_hour != null ? usageBar("5 小时", g.five_hour, `${fmtUsageReset(at(3.1 * H))} 重置`) : ""}
+      ${g.split
+        ? g.shown.map(grantBar).join("")
+        : g.seven_day != null ? usageBar("7 天", g.seven_day, legacyReset) : ""}
+      ${state.moreOpen ? g.folded.map((p) => `<div class="expand-in">${grantBar(p)}</div>`).join("") : ""}
+    </div>`;
+
+  return `
+    <div class="mb-3.5 space-y-2.5 rounded-xl border border-border bg-muted/40 p-3">
+      <div class="flex items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground"><span class="truncate">用量</span></div>
+      ${plan.map(groupHtml).join("")}
+      ${state.moreOpen ? capItems.map((i) => `<div class="expand-in">${i.html}</div>`).join("") : ""}
+      ${names.length ? `
+        <button type="button" data-act="toggleMore" aria-expanded="${state.moreOpen}"
+          class="flex w-full items-center justify-between gap-2 pt-0.5 text-[11px] text-muted-foreground transition hover:text-foreground">
+          <span class="min-w-0">${names.join("、")}</span>
+          <span class="flex flex-none items-center gap-1">
+            ${state.moreOpen ? "收起" : `<span class="${peak >= 90 ? "font-semibold text-red-500" : "text-foreground"}">最高 ${peak.toFixed(1)}%</span>`}
+            ${icon("chevronDown", `h-3.5 w-3.5 transition-transform ${state.moreOpen ? "rotate-180" : ""}`)}
+          </span>
+        </button>` : ""}
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// 账号屏
+// ---------------------------------------------------------------------------
+function accountScreen() {
+  const active = state.plans.some((p) => !p.pending);
+  const sub = state.plans.find((p) => p.role !== "extra" && !p.pending);
+  return `
+    <div class="mb-3.5 flex items-center gap-3 rounded-xl border border-border bg-muted/40 p-3.5">
+      <span class="flex h-10 w-10 flex-none items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-indigo-500 text-base font-bold text-white">ZH</span>
+      <div class="min-w-0 flex-1">
+        <div class="truncate font-semibold">${user.username}</div>
+        <div class="truncate text-xs text-muted-foreground">${user.email}</div>
+      </div>
+      <span class="flex-none rounded-full px-2 py-0.5 text-[11px] font-semibold ${active
+        ? "bg-green-500/15 text-green-600 dark:text-green-400" : "bg-muted text-muted-foreground"}">${sub ? sub.label : active ? "加量包" : "未开通"}</span>
+    </div>
+    ${planSections()}
+    ${active ? usageCard() : ""}
+    <button data-act="toggleForward" class="flex w-full items-center justify-center gap-2 rounded-lg border py-2.5 font-semibold transition ${
+      state.forwarding
+        ? "border-green-500/35 bg-green-500/10 text-green-600 dark:text-green-400 hover:bg-green-500/20"
+        : "border-transparent bg-primary text-primary-foreground hover:brightness-105"
+    }">${icon("plug")} ${state.forwarding ? "结束转发（Claude Code）" : "开启转发（Claude Code）"}</button>
+    <button class="mt-2.5 flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-muted/40 py-2.5 font-medium hover:bg-muted">${icon("bag")} 购买套餐</button>
+    <button class="mt-2 w-full rounded-lg py-2 text-xs text-muted-foreground hover:text-foreground">使用兑换码</button>
+    <details class="mt-3.5 border-t border-border pt-1.5">
+      <summary class="flex cursor-pointer list-none items-center gap-1 py-1 text-xs text-muted-foreground">${icon("chevronDown", "h-3.5 w-3.5")} 高级</summary>
+      <button class="mt-1 flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-muted/40 py-2 text-xs hover:bg-muted">${icon("refresh", "h-3.5 w-3.5")} 刷新 Auth Token</button>
+    </details>
+    <div class="mt-3 text-center">
+      <button class="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-destructive">${icon("logOut", "h-3.5 w-3.5")} 登出</button>
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// 外壳：桌面窗口 + 右下 dock，或手机全宽
+// ---------------------------------------------------------------------------
+let lastKey = null;
+function render() {
+  const device = document.getElementById("device").value;
+  const frame = document.getElementById("frame");
+  const prevScroll = document.getElementById("dockBody")?.scrollTop ?? 0;
+  // 展开折叠区时面板不长高：钉在折叠时量到的高度，多出来的内容在面板里滚动。
+  // 手机上面板本来就是满屏，不用钉。
+  const pinH = state.moreOpen && device === "desktop" ? state.collapsedBodyH : null;
+  const key = state.scenario + device;
+  const animate = key !== lastKey;
+  lastKey = key;
+
+  const panel = (cls) => `
+    <div class="${cls} flex flex-col overflow-hidden bg-background text-sm">
+      <div class="flex flex-none items-center justify-between gap-3 border-b border-border px-4 py-3.5">
+        <div class="min-w-0">
+          <div class="truncate font-semibold">我的账号</div>
+          <div class="truncate text-xs text-muted-foreground">${state.forwarding ? "转发中 · Claude Code 正在走 llm_gateway" : "已登录 · 开启转发后即可使用"}</div>
+        </div>
+        <button title="收起" class="grid h-8 w-8 flex-none place-items-center rounded-lg text-muted-foreground transition hover:bg-muted hover:text-foreground">${icon("chevronDown")}</button>
+      </div>
+      <div id="dockBody" class="min-h-0 flex-1 overflow-y-auto p-4" style="${pinH ? `height:${pinH}px;flex:none` : ""}">
+        <div class="${animate ? "screen-in" : ""}">${accountScreen()}</div>
+      </div>
+    </div>`;
+
+  if (device === "desktop") {
+    frame.innerHTML = `
+      <div class="relative mx-auto h-[calc(100vh-3rem)] max-w-[980px] overflow-hidden rounded-2xl border border-border bg-background shadow-xl">
+        <div class="flex items-center gap-3 border-b border-border px-5 py-4">
+          <div class="flex gap-1.5"><span class="h-3 w-3 rounded-full bg-red-400"></span><span class="h-3 w-3 rounded-full bg-amber-400"></span><span class="h-3 w-3 rounded-full bg-green-400"></span></div>
+          <div class="ml-2 grid grid-cols-3 gap-1 rounded-lg border border-border bg-muted/40 p-1 text-xs">
+            <span class="rounded-md bg-background px-3 py-1 font-medium shadow-sm">Claude</span><span class="px-3 py-1 text-muted-foreground">Codex</span><span class="px-3 py-1 text-muted-foreground">Claude App</span>
+          </div>
+        </div>
+        <div class="space-y-2.5 p-5 opacity-60">
+          <div class="flex items-center gap-3 rounded-xl border border-primary/40 bg-primary/5 p-3.5"><span class="h-8 w-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-500"></span><div><div class="font-semibold">llm_gateway</div><div class="text-xs text-muted-foreground">https://api.fwai.space</div></div><span class="ml-auto rounded-full bg-green-500/15 px-2 py-0.5 text-[11px] font-semibold text-green-600">使用中</span></div>
+          <div class="flex items-center gap-3 rounded-xl border border-border p-3.5"><span class="h-8 w-8 rounded-lg bg-orange-400"></span><div><div class="font-semibold">Claude 官方</div><div class="text-xs text-muted-foreground">api.anthropic.com</div></div></div>
+        </div>
+        ${panel("absolute bottom-6 right-6 z-30 max-h-[calc(100%-3rem)] w-[384px] max-w-[calc(100%-2rem)] rounded-2xl border border-border shadow-2xl")}
+      </div>`;
+  } else {
+    frame.innerHTML = `
+      <div class="mx-auto flex flex-col overflow-hidden rounded-[2.2rem] border-[10px] border-zinc-800 bg-background shadow-2xl" style="width:${+device + 20}px;height:min(780px, calc(100vh - 3rem))">
+        <div class="flex flex-none justify-between px-6 pb-1 pt-2 text-[11px] font-semibold"><span>9:41</span><span>●●●</span></div>
+        ${panel("min-h-0 flex-1")}
+      </div>`;
+  }
+  if (!animate) document.getElementById("dockBody").scrollTop = prevScroll;
+  document.getElementById("json").textContent = JSON.stringify({ subscription: { active: true, plans: state.plans } }, null, 2);
+  state.flash.clear();
+}
+
+// ---------------------------------------------------------------------------
+// toast
+// ---------------------------------------------------------------------------
+function toast(text) {
+  const el = document.createElement("div");
+  el.className = "toast-in pointer-events-auto rounded-md border border-border bg-background px-4 py-3 text-[13px] font-medium text-foreground shadow-lg";
+  el.textContent = text;
+  document.getElementById("toasts").appendChild(el);
+  setTimeout(() => el.remove(), 2600);
+}
+
+// ---------------------------------------------------------------------------
+// 动作
+// ---------------------------------------------------------------------------
+function setScenario(key) {
+  state.scenario = key;
+  state.plans = SCENARIOS[key].plans();
+  state.usage = { ...SCENARIOS[key].usage };
+  state.vendors = SCENARIOS[key].vendors ? structuredClone(SCENARIOS[key].vendors) : null;
+  state.caps = CAPS();
+  state.moreOpen = false;
+  renderScenarios();
+  render();
+}
+
+document.getElementById("simFocus").onclick = () => {
+  for (const p of weekGrants()) {
+    if (p.week_utilization >= 100) continue;
+    p.week_utilization = Math.min(100, Math.round((p.week_utilization + 3 + Math.random() * 9) * 10) / 10);
+    state.flash.add(p.grant_id);
+  }
+  state.usage.five_hour = Math.min(100, state.usage.five_hour + 4.3);
+  state.usage.seven_day = Math.min(100, state.usage.seven_day + 2.1);
+  for (const v of state.vendors ?? []) { v.five_hour = Math.min(100, v.five_hour + 4.3); v.seven_day = Math.min(100, v.seven_day + 2.1); }
+  for (const c of state.caps) { c.five_hour = Math.min(100, c.five_hour + 6); c.seven_day = Math.min(100, c.seven_day + 2); }
+  toast("已重新获取用量和套餐");
+  render();
+};
+
+document.getElementById("simRollover").onclick = () => {
+  const live = weekGrants().filter((p) => p.week_resets_at);
+  if (!live.length) return toast("当前场景没有会刷新的份");
+  const p = live.reduce((a, b) => (a.week_resets_at < b.week_resets_at ? a : b));
+  p.week_utilization = 0;
+  const next = new Date(new Date(p.week_resets_at).getTime() + 7 * D);
+  // 下一轮刷新晚于到期 → 服务端不再返回 week_resets_at
+  if (next > new Date(p.valid_until)) delete p.week_resets_at;
+  else p.week_resets_at = next.toISOString();
+  state.flash.add(p.grant_id);
+  if (p.kind !== "subscription" && !state.moreOpen) {
+    state.collapsedBodyH = document.getElementById("dockBody").offsetHeight;
+    state.moreOpen = true;
+  }
+  toast(`「${p.label}${p.description ? " " + p.description : ""}」本周额度已刷新`);
+  render();
+};
+
+document.getElementById("toggleTheme").onclick = () => document.documentElement.classList.toggle("dark");
+document.getElementById("toggleJson").onclick = () => document.getElementById("json").classList.toggle("hidden");
+for (const id of ["device", "hasCaps"]) document.getElementById(id).onchange = render;
+
+document.addEventListener("click", (e) => {
+  const el = e.target.closest("[data-act]");
+  if (!el) return;
+  const act = el.dataset.act;
+  if (act === "scenario") return setScenario(el.dataset.key);
+  if (act === "toggleForward") state.forwarding = !state.forwarding;
+  else if (act === "toggleMore") {
+    // 展开前量一下当前高度，展开后就钉在这个高度
+    if (!state.moreOpen) state.collapsedBodyH = document.getElementById("dockBody").offsetHeight;
+    state.moreOpen = !state.moreOpen;
+  }
+  else return;
+  render();
+});
+
+function renderScenarios() {
+  document.getElementById("scenarios").innerHTML = Object.entries(SCENARIOS).map(([k, s]) => `
+    <button data-act="scenario" data-key="${k}" class="flex w-full items-center justify-between rounded-xl border-[1.5px] px-3 py-2 text-left text-xs transition ${
+      state.scenario === k ? "border-primary bg-primary/5 font-semibold" : "border-border hover:border-primary/60"
+    }">${s.label}${state.scenario === k ? icon("check", "h-3.5 w-3.5 text-primary") : ""}</button>`).join("");
+}
+
+renderScenarios();
+render();
+</script>
+</body>
+</html>

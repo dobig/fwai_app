@@ -45,6 +45,17 @@ export type GatewayVendor = "claude" | "openai";
 // extra 是临时加量包（叠加，自然到期，不参与换档判定）。
 export type GatewayPlanRole = "subscription" | "extra";
 
+// 一份额度的来源（llm_gateway#496）。比 role 细：加量包和赠送的 role 都是
+// extra，按来源分组只能看这个，不要再去匹配 label 文案。服务端认不出来源时
+// 原样填 role，所以也可能是 "extra"。
+export type GatewayPlanKind =
+  | "subscription"
+  | "pack"
+  | "gift"
+  | "enterprise"
+  | "video"
+  | "extra";
+
 // 一个独立计量的套餐。套餐可叠加，用户同时可以持有多个。
 // pending 为 true 表示这个套餐还没开始生效（排队中）。
 export interface GatewaySubscriptionPlan {
@@ -76,6 +87,15 @@ export interface GatewaySubscriptionPlan {
   vendor_label?: string;
   description?: string;
   pending_text?: string;
+  // 以下三项老服务端不返回（llm_gateway#496）。每份额度从自己生效那一刻起
+  // 按 7 天一轮刷新周额度，所以各份的刷新时间不同。
+  //   kind              来源，见 GatewayPlanKind
+  //   week_resets_at    这一份的周额度刷新时刻；缺省表示下次刷新前它就到期了
+  //   week_utilization  这一份本周已用百分比，0–100
+  // pending 的和纯视频的不带两个 week_ 字段。
+  kind?: GatewayPlanKind;
+  week_resets_at?: string;
+  week_utilization?: number;
 }
 
 // 缺失的 role 按 subscription 处理：老服务端下所有套餐都落在「我的套餐」块里，

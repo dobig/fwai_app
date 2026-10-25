@@ -9,6 +9,12 @@ import type { GatewayModelCap } from "@/lib/api/llm-gateway";
 
 type WindowKey = "five_hour" | "seven_day";
 
+// 两个窗口的份额条在折叠区里挨着画，标题不写窗口就分不清哪条是哪条。
+const WINDOW_LABEL: Record<WindowKey, string> = {
+  five_hour: "5 小时",
+  seven_day: "7 天",
+};
+
 // 和上方总用量条（UsageBar）同一套阈值与配色 —— 同一个百分比不能一红一蓝。
 function barTone(pct: number): string {
   return pct >= 90 ? "bg-red-500" : "bg-primary";
@@ -41,7 +47,7 @@ export function ModelCapBar({
     <div>
       <div className="mb-1 flex items-center justify-between text-[11px]">
         <span className="text-muted-foreground">
-          {cap.label}
+          {cap.label} {WINDOW_LABEL[windowKey]}
           <span className="ml-1.5 text-[10px]">
             · 最多占 {formatShare(cap.share_bps)}
           </span>
