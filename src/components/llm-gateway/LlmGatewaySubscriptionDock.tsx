@@ -584,6 +584,30 @@ export function LlmGatewaySubscriptionDock({
   // 否则每一轮的后半段都会变灰；变灰只该表示后台刷新失败了。
   const usageIsStale =
     usageFetchedAt != null && Date.now() - usageFetchedAt > 30 * 60 * 1000;
+  // 用量按套餐绑定的厂商分组（服务端 vendors）：Claude、GPT、通用各一组，
+  // 只有用户手上有的才出现。老服务端（或升级前的缓存）没有 vendors，就是
+  // 顶层那一组，不带厂商标题，和以前一样。
+  const usageGroups = (
+    usage?.vendors
+      ? usage.vendors.map((v) => ({
+          key: v.vendor ?? "unbound",
+          label: v.vendor
+            ? vendorLabel(v.vendor, catalog?.vendor_details)
+            : "通用",
+          five_hour: v.five_hour,
+          seven_day: v.seven_day,
+        }))
+      : usage
+        ? [
+            {
+              key: "total",
+              label: null,
+              five_hour: usage.five_hour,
+              seven_day: usage.seven_day,
+            },
+          ]
+        : []
+  ).filter((g) => g.five_hour || g.seven_day);
   // 折叠的模型份额行上显示的数：所有模型族、两个窗口里用得最多的那个。
   const modelCapPeak = Math.max(
     0,
@@ -2479,7 +2503,7 @@ requires_openai_auth = true`,
                 同一张卡，标题带上项目名。项目没额度时上面的提示代替这张卡。 */}
             {(isOrgMember ? currentProject?.has_allowance : isActive) &&
               usage &&
-              (usage.five_hour || usage.seven_day) && (
+              usageGroups.length > 0 && (
                 <div
                   className={`mb-3.5 space-y-2.5 rounded-xl border border-border bg-muted/40 p-3 ${usageIsStale ? "opacity-70" : ""}`}
                 >
@@ -2498,9 +2522,22 @@ requires_openai_auth = true`,
                       </span>
                     )}
                   </div>
-                  {usage.five_hour && (
-                    <UsageBar label="5 小时" window={usage.five_hour} />
-                  )}
+                  {usageGroups.map((g) => (
+                    <div key={g.key} className="space-y-2.5">
+                      {g.label && (
+                        <div className="text-[11px] font-semibold text-foreground">
+                          {g.label}
+                        </div>
+                      )}
+                      {g.five_hour && (
+                        <UsageBar label="5 小时" window={g.five_hour} />
+                      )}
+                      {g.seven_day && (
+                        <UsageBar label="7 天" window={g.seven_day} />
+                      )}
+                    </div>
+                  ))}
+                  {/* 份额上限按模型族算，不属于某一个厂商分组，统一放在最后。 */}
                   {modelCapsOpen &&
                     (usage.model_caps ?? []).map((cap) => (
                       <ModelCapBar
@@ -2509,9 +2546,6 @@ requires_openai_auth = true`,
                         windowKey="five_hour"
                       />
                     ))}
-                  {usage.seven_day && (
-                    <UsageBar label="7 天" window={usage.seven_day} />
-                  )}
                   {modelCapsOpen &&
                     (usage.model_caps ?? []).map((cap) => (
                       <ModelCapBar

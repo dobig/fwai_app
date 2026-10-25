@@ -1032,6 +1032,17 @@ export interface GatewayUsage {
   // 按模型族的份额上限（服务端 #256），例如 Fable 最多占总额度的 50%。
   // 老服务端没有这个字段，读的时候一律 `?? []`。
   model_caps?: GatewayModelCap[];
+  // 按套餐绑定的厂商分开的用量：Claude、GPT、不绑定（通用）各一项，只列
+  // 用户手上有的，每项只算那一组套餐。老服务端没有这个字段，这时只有上面
+  // 那一组。顶层的 five_hour / seven_day 是第一个厂商的请求能用的额度。
+  vendors?: GatewayVendorUsage[];
+}
+
+export interface GatewayVendorUsage {
+  // "claude" / "openai"；不绑定厂商的套餐没有这个字段。
+  vendor?: string;
+  five_hour: GatewayUsageWindow | null;
+  seven_day: GatewayUsageWindow | null;
 }
 
 // 一个模型族在一个窗口里的份额用量。utilization 和上面的总额度同一个定义：
