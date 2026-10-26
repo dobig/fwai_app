@@ -252,7 +252,10 @@ pub fn start_forwarding(
         &token,
         &baseUrl,
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| {
+        log::error!("开启转发失败（{app}）: {e}");
+        e.to_string()
+    })
 }
 
 /// token 轮换：只把新凭据覆盖到 live，其余字节不动。转发没开则是 no-op。
@@ -281,8 +284,10 @@ pub fn refresh_forwarding_credentials(
 #[tauri::command]
 pub fn stop_forwarding(state: State<'_, AppState>, app: String) -> Result<(), String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    crate::services::provider::forwarding::stop_forwarding(state.inner(), &app_type)
-        .map_err(|e| e.to_string())
+    crate::services::provider::forwarding::stop_forwarding(state.inner(), &app_type).map_err(|e| {
+        log::error!("结束转发失败（{app}）: {e}");
+        e.to_string()
+    })
 }
 
 /// 该 app 的转发是否正开着。用于前端在启动时恢复按钮状态。
