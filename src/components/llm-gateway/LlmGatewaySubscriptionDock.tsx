@@ -89,6 +89,7 @@ import {
 } from "@/lib/api/llm-gateway";
 import { useClientUpgradeSignal } from "@/lib/clientUpgrade";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { extractErrorMessage } from "@/utils/errorUtils";
 import { PlanCheckout } from "./PlanCheckout";
 import { PlanSections } from "./PlanSections";
 import { ModelCapBar } from "./ModelCapBar";
@@ -1045,6 +1046,15 @@ requires_openai_auth = true`,
     };
   }
 
+  // 后端命令失败时 invoke 抛的是字符串而不是 Error，以前按 instanceof Error 取
+  // message 永远落空，用户只看到一句「失败」，原因（哪个文件、什么错）全丢了。
+  // 原因放在 description 里并多留一会儿，方便用户截图发过来。
+  function forwardingErrorDetail(error: unknown) {
+    const detail = extractErrorMessage(error);
+    if (!detail) return undefined;
+    return { description: detail, duration: 15000 };
+  }
+
   // 需要用户接着操作（登录、购买、换项目）时把面板亮出来。请求可能来自托盘，
   // 那时主窗口多半藏着，只展开面板用户看不见，所以连窗口一起叫到前台。
   function revealPanel() {
@@ -1113,7 +1123,10 @@ requires_openai_auth = true`,
         // 写盘失败就不能说自己在转发——标志置位放在成功之后，否则按钮显示
         // 「转发中」而磁盘上根本没配置，用户既用不了也不知道该点什么。
         console.error(`[forwarding] ${app} 配置写入失败`, error);
-        toast.error(`开启转发失败：${name} 配置写入失败`);
+        toast.error(
+          `开启转发失败：${name} 配置写入失败`,
+          forwardingErrorDetail(error),
+        );
         return;
       }
       localStorage.setItem(forwardingFlagKey(app), "1");
@@ -1122,7 +1135,7 @@ requires_openai_auth = true`,
         desktopRestartNotice(app),
       );
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "开启转发失败");
+      toast.error("开启转发失败", forwardingErrorDetail(error));
     } finally {
       setFwdBusyApp(null);
       void queryClient.invalidateQueries({ queryKey: ["forwarding", app] });
@@ -1146,7 +1159,7 @@ requires_openai_auth = true`,
       );
     } catch (error) {
       console.error(`[forwarding] ${app} 配置还原失败`, error);
-      toast.error(error instanceof Error ? error.message : "结束转发失败");
+      toast.error("结束转发失败", forwardingErrorDetail(error));
     } finally {
       setFwdBusyApp(null);
       void queryClient.invalidateQueries({ queryKey: ["forwarding", app] });
