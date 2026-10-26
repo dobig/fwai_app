@@ -603,7 +603,11 @@ fn backup_once(path: &Path, target_key: &str, backup_dir: &Path) -> Result<(), A
         return Ok(());
     }
     std::fs::create_dir_all(backup_dir).map_err(|e| AppError::io(backup_dir, e))?;
-    crate::config::copy_file(path, &target)
+    // 按内容拷,不用 `fs::copy`:Windows 上它走 CopyFileExW,会连 EFS 加密属性一起
+    // 带过去。MSIX 包容器里的配置可能是加密的,而家庭版等不支持 EFS 的系统建不出
+    // 加密文件,整个操作就死在 os error 6000(无法加密指定的文件)上。
+    let content = std::fs::read(path).map_err(|e| AppError::io(path, e))?;
+    crate::config::atomic_write(&target, &content)
 }
 
 /// `None` 表示原本没有这个键：删掉，而不是写一个我们编的值。
