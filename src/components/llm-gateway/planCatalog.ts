@@ -36,6 +36,7 @@ export function fillServerText(
 // 拉下来时出现。线上的 openai 对用户说 GPT：用户认的是模型，不是公司。
 // 不认识的值原样显示，服务端以后加一家时至少不会显示成空白。
 const VENDOR_FALLBACK_LABELS: Record<string, string> = {
+  flex: "Flex",
   claude: "Claude",
   openai: "GPT",
 };

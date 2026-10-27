@@ -296,7 +296,7 @@ describe("fetchPlanCatalog", () => {
 
     const catalog = await fetchPlanCatalog();
 
-    expect(captured[0].url).toBe("https://gw.test/v1/plans");
+    expect(captured[0].url).toBe("https://gw.test/v1/plans?flex=1");
     expect(captured[0].init.method).toBe("GET");
     expect(catalog).toEqual(body);
   });

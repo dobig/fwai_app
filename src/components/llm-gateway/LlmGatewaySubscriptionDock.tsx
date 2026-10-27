@@ -56,6 +56,7 @@ import {
   gatewayOAuthAccessToken,
   GatewayApiError,
   fetchPlanCatalog,
+  FLEX_VENDOR,
   getGatewayBaseURL,
   getPaymentOrder,
   loadGatewayLogin,
@@ -269,9 +270,10 @@ function vendorForApp(app: ForwardableApp): GatewayVendor {
   return app === "codex" ? "openai" : "claude";
 }
 
-// 生效的套餐里有没有能给这一家用的额度：绑定这一家的，或者绑定之前买的（两家
-// 通用）。只持有另一家的额度时服务端会把请求打回 402 vendor_not_covered，转发
-// 开了也用不了。plans 为空（老服务端）时分辨不了，只看 active。
+// 生效的套餐里有没有能给这一家用的额度：绑定这一家的、Flex（两家通用），或者
+// 绑定之前买的（也是两家通用）。只持有另一家的额度时服务端会把请求打回 402
+// vendor_not_covered，转发开了也用不了。plans 为空（老服务端）时分辨不了，只看
+// active。
 function subscriptionCoversVendor(
   sub: GatewaySubscriptionStatus,
   vendor: string,
@@ -279,7 +281,9 @@ function subscriptionCoversVendor(
   if (!sub.active) return false;
   const live = (sub.plans ?? []).filter((p) => !p.pending);
   if (live.length === 0) return true;
-  return live.some((p) => !p.vendor || p.vendor === vendor);
+  return live.some(
+    (p) => !p.vendor || p.vendor === vendor || p.vendor === FLEX_VENDOR,
+  );
 }
 
 // 已确定要买什么，等着结账页确认的那一单。quote 和下单参数绑在一起存，
@@ -588,8 +592,8 @@ export function LlmGatewaySubscriptionDock({
 
   const subscription = login?.subscription;
   const isActive = Boolean(subscription?.active);
-  // 用户持有的套餐列表（含待生效的）。服务端已按到期时间排好，先到期的
-  // 在前——那也是先被扣额度的那一层。老服务端不返回这个字段，取空数组，
+  // 用户持有的套餐列表（含待生效的）。服务端已排好：Flex 在最前，其余先到期
+  // 的在前。老服务端不返回这个字段，取空数组，
   // 展示逻辑会退回单套餐那一行。
   const planList = subscription?.plans ?? [];
   // 这一单发给服务端的厂商：选了，而且目录里有这一家。目录不列厂商（老服务端）
@@ -1262,19 +1266,26 @@ requires_openai_auth = true`,
     }
     // 服务端确认了确实没开通。未验证邮箱的话连购买屏都进不去，goToPurchase 会
     // 改道去验证屏并自己提示原因——这里就别再叠一条「请先购买会员」的 toast。
-    // 购买屏直接停在这个 app 那一家上，不用再选一次厂商。
+    // 卖 Flex 的服务端停在选厂商那一步，Flex 排在最前；不卖 Flex 的老服务端
+    // 直接停在这个 app 那一家上。目录还没拉过就先拉一次再定。
+    const cat = catalog ?? (await loadCatalog());
+    const offersFlex = Boolean(cat?.vendors?.includes(FLEX_VENDOR));
+    const preset = offersFlex ? null : appVendor;
     if (login && fresh.user?.email_verified === false) {
       revealPanel();
-      await goToPurchase(fresh, "subscription", appVendor);
+      await goToPurchase(fresh, "subscription", preset);
       return;
     }
+    const needs = offersFlex
+      ? `${vendorLabel(appVendor)} 或 ${vendorLabel(FLEX_VENDOR, cat?.vendor_details)} 套餐`
+      : `${vendorLabel(appVendor)} 套餐`;
     toast.info(
       fresh.subscription.active
-        ? `当前套餐不含 ${vendorLabel(appVendor)} 额度，${APP_DISPLAY_NAME[app]} 需要 ${vendorLabel(appVendor)} 套餐`
+        ? `当前套餐不含 ${vendorLabel(appVendor)} 额度，${APP_DISPLAY_NAME[app]} 需要 ${needs}`
         : "请先购买会员再开启转发",
     );
     revealPanel();
-    await goToPurchase(fresh, "subscription", appVendor);
+    await goToPurchase(fresh, "subscription", preset);
   }
 
   // 主界面卡片 → 面板。监听器只挂一次，经 ref 调最新的那份闭包（login、
@@ -1857,21 +1868,26 @@ requires_openai_auth = true`,
 
   // 每次进购买屏都重新拉：价格可能在两次打开之间调过。上一份目录先留着显示，
   // 新的到了再替换，免得每次进来都闪一下加载态。401 的处理同 refreshSubscription。
-  async function loadCatalog() {
+  // 拉到的目录也返回给调用方（失败为 null），state 要到下一次渲染才更新。
+  async function loadCatalog(): Promise<GatewayPlanCatalog | null> {
     setCatalogError(false);
     try {
-      setCatalog(await fetchPlanCatalog());
+      const next = await fetchPlanCatalog();
+      setCatalog(next);
+      return next;
     } catch (error) {
       if (gatewayErrorStatus(error) === 401) {
         try {
           await refreshGatewayToken();
-          setCatalog(await fetchPlanCatalog());
-          return;
+          const next = await fetchPlanCatalog();
+          setCatalog(next);
+          return next;
         } catch {
           // fall through
         }
       }
       setCatalogError(true);
+      return null;
     }
   }
 
@@ -2011,7 +2027,7 @@ requires_openai_auth = true`,
   function handleVendorRejected(error: unknown): boolean {
     const code = gatewayErrorCode(error);
     if (code !== "vendor_required" && code !== "invalid_vendor") return false;
-    toast.error("请重新选择购买 Claude 还是 GPT");
+    toast.error("请重新选择要购买的套餐");
     setVendor(null);
     setSelectedTier(null);
     setCheckout(null);
@@ -3081,6 +3097,8 @@ requires_openai_auth = true`,
                         type="button"
                         onClick={() => {
                           setVendor(v);
+                          // Flex 没有加量包：从「买加量包」进来选了 Flex 就改成买套餐。
+                          if (v === FLEX_VENDOR) setIntent("subscription");
                           setSelectedTier(null);
                           setSelectedPeriod(DEFAULT_PERIOD);
                           setQuoteError(null);
@@ -3452,7 +3470,8 @@ requires_openai_auth = true`,
 
                     老网关（探测到没有 quote 端点）仍然不问：那边不认 as_extra，
                     选了加量包只会买到一份并行叠加的普通套餐。 */}
-                {quoteSupported !== false && (
+                {/* Flex 没有加量包，只剩一张卡片也就不用问了。 */}
+                {quoteSupported !== false && purchaseVendor !== FLEX_VENDOR && (
                   <div className="mb-3 grid grid-cols-2 gap-2">
                     {(
                       [
