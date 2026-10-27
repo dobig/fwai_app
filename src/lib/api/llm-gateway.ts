@@ -41,6 +41,11 @@ export interface GatewayAccountProfile {
 // 的 chargerate 家族一致 —— GPT 那一家在线上叫 openai。
 export type GatewayVendor = "claude" | "openai";
 
+// Flex：一份套餐两家通用（Claude、GPT 都能用），自己是单独一条订阅线，没有加量包。
+// 目录里排在最前。服务端只在 /v1/plans?flex=1 时才列出它 —— 老版本 app 认不出
+// 它覆盖两家，会不让买了 Flex 的人开转发。
+export const FLEX_VENDOR = "flex";
+
 // 一个 grant 的角色。subscription 是订阅层（同时只有一张生效，可换档），
 // extra 是临时加量包（叠加，自然到期，不参与换档判定）。
 export type GatewayPlanRole = "subscription" | "extra";
@@ -706,10 +711,10 @@ export interface GatewayVendorPurchaseCopy {
 
 // fetchPlanCatalog 读购买屏要显示的全部价格。老网关的 /v1/plans 没有 prices /
 // extra 字段，这里当成拿不到目录抛错 —— 宁可让购买屏显示「加载失败」，也不
-// 在本地补算一份可能和扣款对不上的价格。
+// 在本地补算一份可能和扣款对不上的价格。flex=1 告诉服务端这个版本认得 Flex。
 export async function fetchPlanCatalog(): Promise<GatewayPlanCatalog> {
   const catalog = await gatewayRequest<GatewayPlanCatalog>(
-    "/v1/plans",
+    "/v1/plans?flex=1",
     { method: "GET" },
     true,
   );

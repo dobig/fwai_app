@@ -3941,9 +3941,7 @@ describe("LlmGatewaySubscriptionDock 按厂商购买", () => {
     await userEvent.click(await screen.findByText(/^下一步/));
 
     await waitFor(() =>
-      expect(toasts.error).toHaveBeenCalledWith(
-        "请重新选择购买 Claude 还是 GPT",
-      ),
+      expect(toasts.error).toHaveBeenCalledWith("请重新选择要购买的套餐"),
     );
     expect(await screen.findByText("选择要购买的模型")).toBeTruthy();
   });
@@ -4008,6 +4006,105 @@ describe("LlmGatewaySubscriptionDock 按厂商购买", () => {
     expect(await screen.findByText("我的套餐")).toBeTruthy();
     expect(screen.getByText("Claude")).toBeTruthy();
     expect(screen.getByText("通用")).toBeTruthy();
+  });
+
+  describe("Flex", () => {
+    const FLEX_CATALOG: gateway.GatewayPlanCatalog = {
+      ...VENDOR_CATALOG,
+      vendors: ["flex", "claude", "openai"],
+      vendor_details: [
+        {
+          id: "flex",
+          label: "Flex",
+          blurb: "灵活使用 Claude、GPT，一份额度两家通用",
+        },
+        { id: "claude", label: "Claude", blurb: "专用 Claude，额度更多" },
+        { id: "openai", label: "GPT", blurb: "专用 GPT，额度更多" },
+      ],
+      periods: VENDOR_CATALOG.periods.map((p) => ({
+        ...p,
+        vendors:
+          p.days === 30 && !p.extra_only
+            ? ["flex", ...(p.vendors ?? [])]
+            : p.vendors,
+      })),
+      extra: {
+        ...VENDOR_CATALOG.extra,
+        eligibility_by_vendor: {
+          ...VENDOR_CATALOG.extra.eligibility_by_vendor,
+          flex: {
+            plan_in_force: false,
+            active_paid_packs: 0,
+            can_buy: false,
+            reason: "pack_not_offered",
+          },
+        },
+      },
+    };
+    const flexPro = { ...claudePro, grant_id: "g_flex_pro", vendor: "flex" };
+
+    beforeEach(() => {
+      vi.spyOn(gateway, "fetchPlanCatalog").mockResolvedValue(FLEX_CATALOG);
+    });
+
+    it("选厂商那一步 Flex 排在最前", async () => {
+      seedClaudeOnly();
+      renderDock();
+      await userEvent.click(await screen.findByText("购买套餐"));
+      await screen.findByText("选择要购买的模型");
+
+      const names = ["Flex", "Claude", "GPT"].map((n) => screen.getByText(n));
+      expect(
+        names[0].compareDocumentPosition(names[1]) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(
+        names[1].compareDocumentPosition(names[2]) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(
+        screen.getByText("灵活使用 Claude、GPT，一份额度两家通用"),
+      ).toBeTruthy();
+    });
+
+    it("选了 Flex 就只有套餐，没有加量包", async () => {
+      seedClaudeOnly();
+      renderDock();
+      await userEvent.click(await screen.findByText("购买套餐"));
+      await userEvent.click(await screen.findByText("Flex"));
+
+      expect(
+        await screen.findByText("Flex · 选择套餐 · 微信支付"),
+      ).toBeTruthy();
+      expect(screen.queryByText("购买加量包")).toBeNull();
+    });
+
+    it("只有 Flex 套餐时 Claude、Codex 转发都照常开", async () => {
+      for (const app of ["claude", "codex"] as const) {
+        seedClaudeOnly([flexPro]);
+        const { unmount } = renderDock(app);
+        await userEvent.click(await startButton());
+        await waitFor(() =>
+          expect(providersApi.startForwarding).toHaveBeenCalled(),
+        );
+        vi.mocked(providersApi.startForwarding).mockClear();
+        unmount();
+      }
+    });
+
+    it("只有 Claude 套餐时开 Codex 转发：带去选厂商，Flex 在最前", async () => {
+      seedClaudeOnly();
+      renderDock("codex");
+      await userEvent.click(await startButton());
+
+      await waitFor(() =>
+        expect(toasts.info).toHaveBeenCalledWith(
+          "当前套餐不含 GPT 额度，Codex 需要 GPT 或 Flex 套餐",
+        ),
+      );
+      expect(providersApi.startForwarding).not.toHaveBeenCalled();
+      expect(await screen.findByText("选择要购买的模型")).toBeTruthy();
+    });
   });
 
   it("厂商标签用服务端写的 vendor_label", async () => {
