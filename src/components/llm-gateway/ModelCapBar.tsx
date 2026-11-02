@@ -1,4 +1,7 @@
-import type { GatewayModelCap } from "@/lib/api/llm-gateway";
+import type {
+  GatewayModelCap,
+  GatewayModelCapWindow,
+} from "@/lib/api/llm-gateway";
 
 // 账号屏用量区里的模型族份额条（如 Fable 最多占总额度的 50%）。
 //
@@ -24,6 +27,12 @@ function clampPct(n: number): number {
   return Math.max(0, Math.min(100, n));
 }
 
+// 条上画的数：这一族自己用掉的份额。老服务端没有 own_utilization，退回
+// utilization（那时条上的数里混着总额度的影响，至少不比以前差）。
+export function modelCapOwnPct(w: GatewayModelCapWindow): number {
+  return clampPct(w.own_utilization ?? w.utilization);
+}
+
 // 份额上限的百分比文案。基点整除 100 时不带小数：「50%」而不是「50.00%」。
 export function formatShare(bps: number): string {
   const pct = bps / 100;
@@ -41,8 +50,14 @@ export function ModelCapBar({
 }) {
   const w = cap[windowKey];
   if (!w) return null;
-  const pct = clampPct(w.utilization);
+  const pct = modelCapOwnPct(w);
   const full = pct >= 100;
+  // 份额里已经够不着的部分（utilization）比自己用掉的多，差额就是总额度不够
+  // 挤掉的。单独说一句，免得没用过这族模型的人以为条上的数是自己用的。
+  const blocked = clampPct(w.utilization);
+  const poolLimited = !full && blocked - pct >= 0.1;
+  // 还能用多少按「总额度的 x%」说，和上方总用量条剩下的对得上。
+  const reachableOfPool = ((100 - blocked) * cap.share_bps) / 10000;
   return (
     <div>
       <div className="mb-1 flex items-center justify-between text-[11px]">
@@ -71,6 +86,17 @@ export function ModelCapBar({
         // 整个额度都没了。
         <div className="mt-0.5 text-[10px] text-red-500">
           {cap.label} 份额已用完，其它模型仍可使用
+        </div>
+      )}
+      {poolLimited && (
+        <div
+          className={`mt-0.5 text-[10px] ${
+            blocked >= 90 ? "text-red-500" : "text-muted-foreground"
+          }`}
+        >
+          {blocked >= 100
+            ? `总额度已用完，${cap.label} 暂不可用`
+            : `受总额度限制，${cap.label} 还可用总额度的 ${reachableOfPool.toFixed(1)}%`}
         </div>
       )}
     </div>
