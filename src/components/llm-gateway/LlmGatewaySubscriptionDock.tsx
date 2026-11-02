@@ -93,7 +93,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { PlanCheckout } from "./PlanCheckout";
 import { PlanSections } from "./PlanSections";
-import { ModelCapBar } from "./ModelCapBar";
+import { ModelCapBar, modelCapOwnPct } from "./ModelCapBar";
 import {
   foldedSummary,
   formatWeekReset,
@@ -699,7 +699,7 @@ export function LlmGatewaySubscriptionDock({
       0,
       ...usageFolded.map((p) => p.week_utilization),
       ...modelCaps.flatMap((cap) =>
-        [cap.five_hour, cap.seven_day].map((w) => w?.utilization ?? 0),
+        [cap.five_hour, cap.seven_day].map((w) => (w ? modelCapOwnPct(w) : 0)),
       ),
     ),
   );

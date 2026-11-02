@@ -2252,6 +2252,53 @@ describe("LlmGatewaySubscriptionDock 模型份额", () => {
     expect(screen.queryByText("按模型查看")).not.toBeInTheDocument();
   });
 
+  it("没用过 Fable 时条是 0，总额度挤掉的部分另起一行说明", async () => {
+    seedActivePlan();
+    // 份额 50%，周总用量 73.3%：总额度只剩 26.7%，Fable 的份额够不着的部分是
+    // 46.6%，但 Fable 自己一分没花。
+    const cap = fableCap(0, 46.6);
+    cap.five_hour!.own_utilization = 0;
+    cap.seven_day!.own_utilization = 0;
+    vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({
+      five_hour: { utilization: 10, resets_at: "2099-01-01T05:00:00Z" },
+      seven_day: { utilization: 73.3, resets_at: "2099-01-07T00:00:00Z" },
+      model_caps: [cap],
+    });
+    renderDock();
+
+    const toggle = await screen.findByRole("button", { name: /Fable 份额/ });
+    // 折叠行只看收起来的条：Fable 自己没用，就是 0，不再显示成 46.6%。
+    expect(toggle).toHaveTextContent("最高 0.0%");
+    await userEvent.click(toggle);
+
+    expect(screen.queryByText("46.6%")).not.toBeInTheDocument();
+    expect(screen.getAllByText("0.0%")).toHaveLength(2);
+    expect(
+      screen.getByText("受总额度限制，Fable 还可用总额度的 26.7%"),
+    ).toBeTruthy();
+    // 5 小时窗口没被总额度卡住，不多说一句。
+    expect(screen.getAllByText(/受总额度限制/)).toHaveLength(1);
+    expect(screen.queryByText(/份额已用完/)).not.toBeInTheDocument();
+  });
+
+  it("总额度用完而 Fable 没用完时，说是总额度的事", async () => {
+    seedActivePlan();
+    const cap = fableCap(100);
+    cap.five_hour!.own_utilization = 20;
+    vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({
+      five_hour: { utilization: 100, resets_at: "2099-01-01T05:00:00Z" },
+      seven_day: { utilization: 30, resets_at: "2099-01-07T00:00:00Z" },
+      model_caps: [cap],
+    });
+    renderDock();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Fable 份额/ }),
+    );
+    expect(screen.getByText("总额度已用完，Fable 暂不可用")).toBeTruthy();
+    expect(screen.queryByText(/份额已用完/)).not.toBeInTheDocument();
+  });
+
   it("老服务端不返回 model_caps 时照常显示，不多出任何份额条", async () => {
     seedActivePlan();
     vi.spyOn(gateway, "fetchGatewayUsage").mockResolvedValue({

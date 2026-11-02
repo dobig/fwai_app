@@ -1074,6 +1074,10 @@ export interface GatewayVendorUsage {
 // 到 100% 的那一刻就是这类模型开始被拒（429 model_share_exceeded）的那一刻。
 export interface GatewayModelCapWindow {
   utilization: number;
+  // 这一族自己花掉的占份额的百分比（服务端 #581）。utilization 还算上了总额度
+  // 不够时被挤掉的部分：没用过 Fable、总周用量 73.3% 时它是 46.6%（份额
+  // 50%），这里是 0。份额条画这个；老服务端没有，退回 utilization。
+  own_utilization?: number;
   resets_at?: string;
   cap_micros: number;
   charged_micros: number;
