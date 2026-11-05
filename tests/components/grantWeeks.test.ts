@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  fiveHourGrantFooter,
+  fiveHourGrantLabel,
   foldedSummary,
   formatWeekReset,
+  hasGrantFiveHour,
   plansInVendorGroup,
   splitWeekGrants,
   weekGrantFooter,
@@ -204,5 +207,45 @@ describe("weekGrantFooter", () => {
       text: `已用完 · ${formatWeekReset("2026-10-30T14:00:00Z")} 恢复`,
       tone: "danger",
     });
+  });
+});
+
+describe("每份的 5 小时（llm_gateway#583）", () => {
+  const withFiveHour = (
+    p: GatewaySubscriptionPlan,
+    utilization: number,
+    resets?: string,
+  ) => ({
+    ...p,
+    five_hour_utilization: utilization,
+    five_hour_resets_at: resets,
+  });
+
+  it("只要有一份带了 5 小时就算服务端按份给了；都不带是老服务端", () => {
+    expect(hasGrantFiveHour(splitWeekGrants([SUB, PACK_LATE]))).toBe(false);
+    expect(
+      hasGrantFiveHour(splitWeekGrants([SUB, withFiveHour(PACK_LATE, 0)])),
+    ).toBe(true);
+    expect(hasGrantFiveHour(null)).toBe(false);
+  });
+
+  it("标题和时间行", () => {
+    const [sub] = splitWeekGrants([
+      withFiveHour(SUB, 40, "2026-10-21T05:00:00Z"),
+    ])!.pinned;
+    expect(fiveHourGrantLabel(sub, false)).toBe("5 小时 · 订阅");
+    expect(fiveHourGrantFooter(sub)).toEqual({
+      text: `${formatWeekReset("2026-10-21T05:00:00Z")} 重置`,
+      tone: "muted",
+    });
+
+    const [full] = splitWeekGrants([
+      withFiveHour(SUB, 100, "2026-10-21T05:00:00Z"),
+    ])!.pinned;
+    expect(fiveHourGrantFooter(full)?.tone).toBe("danger");
+
+    // 窗口还没扣过钱：没有时间行。
+    const [idle] = splitWeekGrants([withFiveHour(SUB, 0)])!.pinned;
+    expect(fiveHourGrantFooter(idle)).toBeNull();
   });
 });

@@ -2572,6 +2572,66 @@ describe("LlmGatewaySubscriptionDock 每份额度的周刷新（#79）", () => {
     expect(group.firstElementChild).toHaveTextContent(/^Claude$/);
   });
 
+  it("服务端按份给了 5 小时：每份各一条 5 小时，不再画总的那条", async () => {
+    // prod 2026-11-04：这个 5 小时没花钱，周只剩一点，总的 5 小时却显示 10%。
+    // 按份画的是这一份自己花了多少。
+    seedPlans([
+      sub({
+        five_hour_utilization: 0,
+        five_hour_resets_at: undefined,
+        week_utilization: 77.7,
+      }),
+    ]);
+    renderDock();
+
+    expect(await screen.findByText("5 小时 · 订阅")).toBeInTheDocument();
+    expect(screen.getByText("0.0%")).toBeInTheDocument();
+    expect(screen.getByText("77.7%")).toBeInTheDocument();
+    // 总的 5 小时（27.4%）不画。
+    expect(screen.queryByText("5 小时")).toBeNull();
+    expect(screen.queryByText("27.4%")).toBeNull();
+    // 窗口还没扣过钱：不写重置时间。
+    expect(screen.queryByText(/ 重置$/)).toBeNull();
+  });
+
+  it("没有 5 小时限额的那份不画 5 小时；被 5 小时卡住的那份写什么时候恢复", async () => {
+    seedPlans([
+      sub({
+        five_hour_utilization: 100,
+        five_hour_resets_at: "2099-01-01T05:00:00Z",
+      }),
+      // 这份没有 5 小时限额：服务端不带 five_hour_ 字段。
+      pack("grant_b2", { week_utilization: 30 }),
+    ]);
+    renderDock();
+
+    expect(await screen.findByText("5 小时 · 订阅")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `已用完 · ${formatWeekReset("2099-01-01T05:00:00Z")} 恢复`,
+      ),
+    ).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: /^加量/ });
+    await userEvent.click(toggle);
+    expect(screen.getByText("7 天 · 加量")).toBeInTheDocument();
+    expect(screen.queryByText("5 小时 · 加量")).toBeNull();
+    expect(screen.queryByText("5 小时")).toBeNull();
+  });
+
+  it("加量包的 5 小时收进折叠行，折叠行的最高值算上它", async () => {
+    seedPlans([
+      sub({ five_hour_utilization: 10 }),
+      pack("grant_b2", { five_hour_utilization: 92, week_utilization: 30 }),
+    ]);
+    renderDock();
+
+    const toggle = await screen.findByRole("button", { name: /^加量/ });
+    expect(toggle).toHaveTextContent("最高 92.0%");
+    expect(screen.queryByText("5 小时 · 加量")).toBeNull();
+    await userEvent.click(toggle);
+    expect(screen.getByText("5 小时 · 加量")).toBeInTheDocument();
+  });
+
   it("kind 是 extra（服务端认不出来源）时按赠送显示，不丢", async () => {
     seedPlans([sub(), pack("grant_x", { kind: "extra", week_utilization: 9 })]);
     renderDock();

@@ -101,6 +101,13 @@ export interface GatewaySubscriptionPlan {
   kind?: GatewayPlanKind;
   week_resets_at?: string;
   week_utilization?: number;
+  // 这一份的 5 小时窗口（llm_gateway#583，老服务端不返回）。5 小时窗口是
+  // 所有份共用的，所以各份的 five_hour_resets_at 相同；这个窗口还没扣过钱时
+  // 不带。没有 5 小时限额的那份不带 five_hour_utilization，客户端就不画它的
+  // 5 小时条 —— 以后有的套餐可能取消 5 小时限额。
+  //   five_hour_utilization  这一份这个 5 小时窗口已用百分比，0–100
+  five_hour_resets_at?: string;
+  five_hour_utilization?: number;
 }
 
 // 缺失的 role 按 subscription 处理：老服务端下所有套餐都落在「我的套餐」块里，
