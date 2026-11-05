@@ -95,8 +95,11 @@ import { PlanCheckout } from "./PlanCheckout";
 import { PlanSections } from "./PlanSections";
 import { ModelCapBar, modelCapOwnPct } from "./ModelCapBar";
 import {
+  fiveHourGrantFooter,
+  fiveHourGrantLabel,
   foldedSummary,
   formatWeekReset,
+  hasGrantFiveHour,
   plansInVendorGroup,
   splitWeekGrants,
   weekGrantFooter,
@@ -353,7 +356,7 @@ function UsageBar({
 }: {
   label: string;
   window: GatewayUsageWindow;
-  footer?: { text: string; tone: WeekFooterTone };
+  footer?: { text: string; tone: WeekFooterTone } | null;
 }) {
   const pct = Math.max(0, Math.min(100, w.utilization));
   const near = pct >= 90;
@@ -373,26 +376,27 @@ function UsageBar({
           style={{ width: `${pct}%` }}
         />
       </div>
-      {footer ? (
-        <div
-          className={`mt-0.5 text-right text-[10px] ${FOOTER_TONE[footer.tone]}`}
-        >
-          {footer.text}
-        </div>
-      ) : (
-        w.resets_at && (
-          <div className="mt-0.5 text-right text-[10px] text-muted-foreground">
-            {formatReset(w.resets_at)} 重置
-          </div>
-        )
-      )}
+      {footer !== undefined
+        ? footer && (
+            <div
+              className={`mt-0.5 text-right text-[10px] ${FOOTER_TONE[footer.tone]}`}
+            >
+              {footer.text}
+            </div>
+          )
+        : w.resets_at && (
+            <div className="mt-0.5 text-right text-[10px] text-muted-foreground">
+              {formatReset(w.resets_at)} 重置
+            </div>
+          )}
     </div>
   );
 }
 
-// 一份额度这周用了多少、什么时候刷新（#79）。和总用量条同一个样子，只换标题
-// 和时间那一行。
-function WeekGrantBar({
+// 一份额度这个 5 小时和这周用了多少、什么时候刷新（#79）。和总用量条同一个
+// 样子，只换标题和时间那一行。服务端没给这一份的 5 小时（老服务端，或这份
+// 没有 5 小时限额）就只画 7 天。
+function GrantBars({
   plan,
   showVendor,
 }: {
@@ -400,11 +404,20 @@ function WeekGrantBar({
   showVendor: boolean;
 }) {
   return (
-    <UsageBar
-      label={weekGrantLabel(plan, showVendor)}
-      window={{ utilization: plan.week_utilization }}
-      footer={weekGrantFooter(plan)}
-    />
+    <>
+      {plan.five_hour_utilization != null && (
+        <UsageBar
+          label={fiveHourGrantLabel(plan, showVendor)}
+          window={{ utilization: plan.five_hour_utilization }}
+          footer={fiveHourGrantFooter(plan)}
+        />
+      )}
+      <UsageBar
+        label={weekGrantLabel(plan, showVendor)}
+        window={{ utilization: plan.week_utilization }}
+        footer={weekGrantFooter(plan)}
+      />
+    </>
   );
 }
 
@@ -697,7 +710,10 @@ export function LlmGatewaySubscriptionDock({
     100,
     Math.max(
       0,
-      ...usageFolded.map((p) => p.week_utilization),
+      ...usageFolded.flatMap((p) => [
+        p.week_utilization,
+        p.five_hour_utilization ?? 0,
+      ]),
       ...modelCaps.flatMap((cap) =>
         [cap.five_hour, cap.seven_day].map((w) => (w ? modelCapOwnPct(w) : 0)),
       ),
@@ -2672,15 +2688,18 @@ requires_openai_auth = true`,
                           {g.label}
                         </div>
                       )}
-                      {g.five_hour && (
+                      {/* 服务端按份给了 5 小时就不画总的那条（见
+                          hasGrantFiveHour）：总的是各份加起来的，叠加时
+                          可能没满却用不了。 */}
+                      {g.five_hour && !hasGrantFiveHour(g.week) && (
                         <UsageBar label="5 小时" window={g.five_hour} />
                       )}
-                      {/* 「7 天」按份拆开时常显订阅层（见 splitWeekGrants），
-                          其余收进卡片底部的折叠行；没有分份数据时还是一条
-                          总的。 */}
+                      {/* 每份的 5 小时和「7 天」按份拆开时常显订阅层（见
+                          splitWeekGrants），其余收进卡片底部的折叠行；没有
+                          分份数据时还是一条总的。 */}
                       {g.week
                         ? g.week.pinned.map((p) => (
-                            <WeekGrantBar
+                            <GrantBars
                               key={p.grant_id}
                               plan={p}
                               showVendor={showGrantVendor}
@@ -2691,7 +2710,7 @@ requires_openai_auth = true`,
                           )}
                       {usageMoreOpen &&
                         (g.week?.folded ?? []).map((p) => (
-                          <WeekGrantBar
+                          <GrantBars
                             key={p.grant_id}
                             plan={p}
                             showVendor={showGrantVendor}

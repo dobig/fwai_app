@@ -10,6 +10,10 @@ import { vendorLabel } from "./planCatalog";
 // 7 天一轮刷新，所以「7 天」不能只画一条：/api/oauth/usage 的 seven_day 只给
 // 得出所有份里最早的那个刷新时间，用户看不出哪一份什么时候恢复。
 //
+// 5 小时也一样按份画（llm_gateway#583）：服务端的总 5 小时是各份加起来的，
+// 叠加时可能两份各被不同的限额卡住、总的两条都没满却用不了；按份画，被卡住
+// 的那份一定有一条是 100%。
+//
 // 这里只管「画哪几条、按什么顺序、哪些收进折叠行」，不碰 React。
 
 type WeekKind = Extract<GatewayPlanKind, "subscription" | "pack" | "gift">;
@@ -101,11 +105,39 @@ export function plansInVendorGroup(
  * 和 GPT 两份订阅，这时写上厂商，否则两条分不清。
  */
 export function weekGrantLabel(plan: WeekGrant, showVendor: boolean): string {
+  return grantLabel("7 天", plan, showVendor);
+}
+
+/** 同 weekGrantLabel：「5 小时 · 订阅」。 */
+export function fiveHourGrantLabel(
+  plan: WeekGrant,
+  showVendor: boolean,
+): string {
+  return grantLabel("5 小时", plan, showVendor);
+}
+
+function grantLabel(
+  window: string,
+  plan: WeekGrant,
+  showVendor: boolean,
+): string {
   const kind = KIND_SHORT[plan.kind];
-  if (!showVendor) return `7 天 · ${kind}`;
+  if (!showVendor) return `${window} · ${kind}`;
   const vendor =
     plan.vendor_label || (plan.vendor ? vendorLabel(plan.vendor) : "通用");
-  return `7 天 · ${vendor} ${kind}`;
+  return `${window} · ${vendor} ${kind}`;
+}
+
+/**
+ * 服务端按份给了 5 小时（llm_gateway#583）时，这一组就不再画那条总的「5 小时」。
+ * 只看有没有任何一份带了字段：没有 5 小时限额的那份本来就不带，不能拿它当
+ * 「老服务端」。
+ */
+export function hasGrantFiveHour(split: WeekGrantSplit | null): boolean {
+  if (!split) return false;
+  return [...split.pinned, ...split.folded].some(
+    (p) => p.five_hour_utilization != null,
+  );
 }
 
 /** 折叠行左边那串：「加量 ×2、赠送」。 */
@@ -141,6 +173,22 @@ export function weekGrantFooter(plan: WeekGrant): {
     return { text: `已用完 · ${at} 恢复`, tone: "danger" };
   }
   return { text: `${at} 刷新`, tone: "muted" };
+}
+
+/**
+ * 一份的 5 小时那行时间：「x 重置」，用满时「已用完 · x 恢复」。这个窗口还没
+ * 扣过钱（没有 five_hour_resets_at）就不写，和总的 5 小时条一样。
+ */
+export function fiveHourGrantFooter(plan: WeekGrant): {
+  text: string;
+  tone: WeekFooterTone;
+} | null {
+  if (!plan.five_hour_resets_at) return null;
+  const at = formatWeekReset(plan.five_hour_resets_at);
+  if ((plan.five_hour_utilization ?? 0) >= 100) {
+    return { text: `已用完 · ${at} 恢复`, tone: "danger" };
+  }
+  return { text: `${at} 重置`, tone: "muted" };
 }
 
 // 本地时区，「10/28 17:00」。和用量条的「x 重置」同一个格式。
