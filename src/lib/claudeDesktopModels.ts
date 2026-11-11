@@ -61,7 +61,7 @@ export const DEFAULT_DESKTOP_MODEL_ROWS: ClaudeDesktopModelRow[] = [
   { role: "Haiku", model: "claude-haiku-5-5", enabled: true, supports1m: true },
   {
     role: "Fable",
-    model: "claude-fable-5-1",
+    model: "claude-fable-5-2",
     enabled: false,
     supports1m: true,
   },
