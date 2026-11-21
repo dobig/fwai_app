@@ -45,8 +45,7 @@ export function GatewayAccountSettings() {
   if (!login) {
     return (
       <div className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-        登录 llm_gateway
-        后可在这里设置账号相关选项（如发送前隐藏密钥）。
+        登录 llm_gateway 后可在这里设置账号相关选项（如发送前隐藏密钥）。
         <br />
         在右下角的 llm_gateway 面板里登录。
       </div>
