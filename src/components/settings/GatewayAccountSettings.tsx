@@ -1,13 +1,11 @@
 import { useEffect, useState } from "react";
-import { KeyRound, Minimize2, ShieldCheck } from "lucide-react";
+import { KeyRound, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { ToggleRow } from "@/components/ui/toggle-row";
 import {
-  fetchTokensSaved,
   GATEWAY_LOGIN_CHANGED_EVENT,
   loadGatewayLogin,
   setSecretRedaction,
-  setToolCompression,
   updateGatewayUserProfile,
   type GatewayLoginResult,
 } from "@/lib/api/llm-gateway";
@@ -19,23 +17,8 @@ const SETTINGS = {
     write: (enabled: boolean) => setSecretRedaction(enabled),
     name: "发送前隐藏密钥",
   },
-  compress: {
-    write: (enabled: boolean) => setToolCompression(enabled),
-    name: "压缩工具输出",
-  },
 } as const;
 type SettingKey = keyof typeof SETTINGS;
-
-// 省下的 token 数。过万用「万」「亿」，不然七八位数字读不出量级。
-export function formatTokenCount(n: number): string {
-  if (n >= 1e8) return `${trimDecimal(n / 1e8)} 亿`;
-  if (n >= 1e4) return `${trimDecimal(n / 1e4)} 万`;
-  return String(n);
-}
-
-function trimDecimal(n: number): string {
-  return n >= 100 ? String(Math.round(n)) : String(Number(n.toFixed(1)));
-}
 
 // llm_gateway 账号级设置，放在设置页「高级」标签里。和本机设置不同，这里的每一项
 // 存在服务端、跟着账号走 —— 换台电脑登录还在。没登录网关时开关没有可以写的地方，
@@ -44,12 +27,8 @@ export function GatewayAccountSettings() {
   const [login, setLogin] = useState<GatewayLoginResult | null>(() =>
     loadGatewayLogin(),
   );
-  // 两个开关各自一把锁：一个在写的时候，另一个照样能点。
+  // 每个开关各自一把锁：一个在写的时候，另一个照样能点。
   const [busy, setBusy] = useState<Set<SettingKey>>(() => new Set());
-  // 压缩累计省下的 token。null 是「还没拿到」或「拿不到」（老服务端 404），
-  // 两种情况都不显示这一行，而不是显示一个误导的 0。
-  const [tokensSaved, setTokensSaved] = useState<number | null>(null);
-  const compressOn = login?.user.tool_compression === true;
 
   // 在右下角面板里登录、登出之后，这里跟着变。
   useEffect(() => {
@@ -62,31 +41,12 @@ export function GatewayAccountSettings() {
     };
   }, []);
 
-  // 开关打开时才拉；每次从关到开都重拉一次。关掉就清空，不显示。
-  useEffect(() => {
-    if (!compressOn) {
-      setTokensSaved(null);
-      return;
-    }
-    let cancelled = false;
-    fetchTokensSaved()
-      .then((n) => {
-        if (!cancelled) setTokensSaved(n);
-      })
-      .catch(() => {
-        if (!cancelled) setTokensSaved(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [compressOn]);
-
   // 没登录网关时给一句提示，而不是整页空白：这一页现在只有账号级设置。
   if (!login) {
     return (
       <div className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
         登录 llm_gateway
-        后可在这里设置账号相关选项（如发送前隐藏密钥、压缩工具输出）。
+        后可在这里设置账号相关选项（如发送前隐藏密钥）。
         <br />
         在右下角的 llm_gateway 面板里登录。
       </div>
@@ -131,24 +91,6 @@ export function GatewayAccountSettings() {
           disabled={busy.has("redact")}
           onCheckedChange={(value) => void toggle("redact", value)}
         />
-        {/* 只说效果，不讲压缩分几层、怎么截断 —— 用户要决定的只是「省不省」。 */}
-        <ToggleRow
-          icon={<Minimize2 className="h-4 w-4 text-primary" />}
-          title={SETTINGS.compress.name}
-          description="命令行输出发给模型前先精简：去掉颜色码、进度条等无用内容，过长的输出只保留关键部分，更省用量。模型需要时会自动取回完整内容。"
-          checked={compressOn}
-          disabled={busy.has("compress")}
-          onCheckedChange={(value) => void toggle("compress", value)}
-        />
-        {compressOn && tokensSaved !== null && (
-          <p className="px-1 text-xs text-muted-foreground">
-            已为你节省{" "}
-            <span className="font-medium text-foreground">
-              {formatTokenCount(tokensSaved)}
-            </span>{" "}
-            token
-          </p>
-        )}
       </div>
     </section>
   );
